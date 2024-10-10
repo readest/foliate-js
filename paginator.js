@@ -300,6 +300,7 @@ class View {
         const vertical = this.#vertical
         this.#size = vertical ? height : width
 
+        if (!this.document) return
         const doc = this.document
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
@@ -350,6 +351,7 @@ class View {
         }
     }
     expand() {
+        if (!this.document) return
         const { documentElement } = this.document
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
