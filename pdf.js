@@ -111,9 +111,15 @@ const makeTOCItem = item => ({
 })
 
 export const makePDF = async file => {
-    const data = new Uint8Array(await file.arrayBuffer())
+    const initialData = await file.slice(0, 4095).arrayBuffer()
+    const transport = new pdfjsLib.PDFDataRangeTransport(file.size, initialData)
+    transport.requestDataRange = (begin, end) => {
+        file.slice(begin, end).arrayBuffer().then(chunk => {
+            transport.onDataRange(begin, chunk)
+        })
+    }
     const pdf = await pdfjsLib.getDocument({
-        data,
+        range: transport,
         cMapUrl: pdfjsPath('cmaps/'),
         standardFontDataUrl: pdfjsPath('standard_fonts/'),
         isEvalSupported: false,
