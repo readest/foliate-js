@@ -94,7 +94,9 @@ const childGetter = (doc, ns) => {
 
 const resolveURL = (url, relativeTo) => {
     try {
-        if (relativeTo.includes(':')) return new URL(url, relativeTo)
+        // replace %2c in the url with a comma, this might be introduced by calibre
+        url = url.replace(/%2c/gi, ',').replace(/%3a/gi, ':')
+        if (relativeTo.includes(':') && !relativeTo.startsWith('OEBPS')) return new URL(url, relativeTo)
         // the base needs to be a valid URL, so set a base URL and then remove it
         const root = 'https://invalid.invalid/'
         const obj = new URL(url, root + relativeTo)
@@ -203,7 +205,7 @@ const getMetadata = opf => {
         if (!els) return null
         return Object.groupBy(els.map(parse), x => x.property)
     }
-    const dc = Object.fromEntries(Object.entries(Object.groupBy(els.dc, el => el.localName))
+    const dc = Object.fromEntries(Object.entries(Object.groupBy(els.dc || [], el => el.localName))
         .map(([name, els]) => [name, els.map(parse)]))
     const properties = getProperties() ?? {}
     const legacyMeta = Object.fromEntries(els.legacyMeta?.map(el =>
@@ -670,8 +672,12 @@ class Resources {
             ?? this.getItemByID($$$(opf, 'meta')
                 .find(filterAttribute('name', 'cover'))
                 ?.getAttribute('content'))
+            ?? this.manifest.find(item => item.href.includes('cover')
+                && item.mediaType.startsWith('image'))
             ?? this.getItemByHref(this.guide
                 ?.find(ref => ref.type.includes('cover'))?.href)
+            // last resort: first image in manifest
+            ?? this.manifest.find(item => item.mediaType.startsWith('image'))
 
         this.cfis = CFI.fromElements($$itemref)
     }
@@ -704,6 +710,7 @@ class Resources {
 
 class Loader {
     #cache = new Map()
+    #cacheXHTMLContent = new Map()
     #children = new Map()
     #refCount = new Map()
     allowScript = false
@@ -727,6 +734,9 @@ class Loader {
         const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#cache.set(href, url)
         this.#refCount.set(href, 1)
+        if (newType === MIME.XHTML) {
+            this.#cacheXHTMLContent.set(url, {href, type: newType, data: newData})
+        }
         if (parent) {
             const childList = this.#children.get(parent)
             if (childList) childList.push(href)
@@ -750,8 +760,10 @@ class Loader {
         //console.log(`unreferencing ${href}, now ${count}`)
         if (count < 1) {
             //console.log(`unloading ${href}`)
-            URL.revokeObjectURL(this.#cache.get(href))
+            const url = this.#cache.get(href)
+            URL.revokeObjectURL(url)
             this.#cache.delete(href)
+            this.#cacheXHTMLContent.delete(url)
             this.#refCount.delete(href)
             // unref children
             const childList = this.#children.get(href)
@@ -765,7 +777,11 @@ class Loader {
         const { href, mediaType } = item
 
         const isScript = MIME.JS.test(item.mediaType)
-        if (isScript && !this.allowScript) return null
+        const detail = { type: mediaType, isScript, allowScript: this.allowScript }
+        const event = new CustomEvent('load', { detail })
+        this.eventTarget.dispatchEvent(event)
+        const allowScript = await event.detail.allowScript
+        if (isScript && !allowScript) return null
 
         const parent = parents.at(-1)
         if (this.#cache.has(href)) return this.ref(href, parent)
@@ -778,6 +794,10 @@ class Loader {
         // NOTE: this can be replaced with `Promise.try()`
         const tryLoadBlob = Promise.resolve().then(() => this.loadBlob(href))
         return this.createURL(href, tryLoadBlob, mediaType, parent)
+    }
+    async loadItemXHTMLContent(item, parents = []) {
+        const url = await this.loadItem(item, parents)
+        if (url) return this.#cacheXHTMLContent.get(url)?.data
     }
     async loadHref(href, base, parents = []) {
         if (isExternal(href)) return href
@@ -979,6 +999,7 @@ ${doc.querySelector('parsererror').innerText}`)
                 id: item.href,
                 load: () => this.#loader.loadItem(item),
                 unload: () => this.#loader.unloadItem(item),
+                loadContent: () => this.#loader.loadItemXHTMLContent(item),
                 createDocument: () => this.loadDocument(item),
                 size: this.getSize(item.href),
                 cfi: this.resources.cfis[index],
