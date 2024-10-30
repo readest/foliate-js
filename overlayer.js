@@ -4,7 +4,9 @@ const createSVGElement = tag =>
 export class Overlayer {
     #svg = createSVGElement('svg')
     #map = new Map()
-    constructor() {
+    #doc = null
+    constructor(doc) {
+        this.#doc = doc
         Object.assign(this.#svg.style, {
             position: 'absolute', top: '0', left: '0',
             width: '100%', height: '100%',
@@ -14,10 +16,50 @@ export class Overlayer {
     get element() {
         return this.#svg
     }
+    get #zoom() {
+        // Safari does not zoom the client rects, while Chrome, Edge and Firefox does
+        if (/^((?!chrome|android).)*AppleWebKit/i.test(navigator.userAgent) && !window.chrome) {
+            return window.getComputedStyle(this.#doc.body).zoom || 1.0
+        }
+        return 1.0
+    }
+    #splitRangeByParagraph(range) {
+        const ancestor = range.commonAncestorContainer
+        const paragraphs = Array.from(ancestor.querySelectorAll?.('p') || [])
+        if (paragraphs.length === 0) return [range]
+
+        const splitRanges = []
+        paragraphs.forEach((p) => {
+            const pRange = document.createRange()
+            if (range.intersectsNode(p)) {
+                pRange.selectNodeContents(p)
+                if (pRange.compareBoundaryPoints(Range.START_TO_START, range) < 0) {
+                    pRange.setStart(range.startContainer, range.startOffset)
+                }
+                if (pRange.compareBoundaryPoints(Range.END_TO_END, range) > 0) {
+                    pRange.setEnd(range.endContainer, range.endOffset)
+                }
+                splitRanges.push(pRange)
+            }
+        })
+        return splitRanges
+    }
     add(key, range, draw, options) {
         if (this.#map.has(key)) this.remove(key)
         if (typeof range === 'function') range = range(this.#svg.getRootNode())
-        const rects = range.getClientRects()
+        const zoom = this.#zoom
+        let rects = []
+        this.#splitRangeByParagraph(range).forEach((pRange) => {
+            const pRects = Array.from(pRange.getClientRects()).map(rect => ({
+                left: rect.left * zoom,
+                top: rect.top * zoom,
+                right: rect.right * zoom,
+                bottom: rect.bottom * zoom,
+                width: rect.width * zoom,
+                height: rect.height * zoom,
+            }))
+            rects = rects.concat(pRects)
+        })
         const element = draw(rects, options)
         this.#svg.append(element)
         this.#map.set(key, { range, draw, options, element, rects })
@@ -31,7 +73,19 @@ export class Overlayer {
         for (const obj of this.#map.values()) {
             const { range, draw, options, element } = obj
             this.#svg.removeChild(element)
-            const rects = range.getClientRects()
+            const zoom = this.#zoom
+            let rects = []
+            this.#splitRangeByParagraph(range).forEach((pRange) => {
+                const pRects = Array.from(pRange.getClientRects()).map(rect => ({
+                    left: rect.left * zoom,
+                    top: rect.top * zoom,
+                    right: rect.right * zoom,
+                    bottom: rect.bottom * zoom,
+                    width: rect.width * zoom,
+                    height: rect.height * zoom,
+                }))
+                rects = rects.concat(pRects)
+            })
             const el = draw(rects, options)
             this.#svg.append(el)
             obj.element = el
@@ -50,13 +104,13 @@ export class Overlayer {
         return []
     }
     static underline(rects, options = {}) {
-        const { color = 'red', width: strokeWidth = 2, writingMode } = options
+        const { color = 'red', width: strokeWidth = 2, padding = 0, writingMode } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', color)
         if (writingMode === 'vertical-rl' || writingMode === 'vertical-lr')
             for (const { right, top, height } of rects) {
                 const el = createSVGElement('rect')
-                el.setAttribute('x', right - strokeWidth)
+                el.setAttribute('x', right - strokeWidth / 2 + padding)
                 el.setAttribute('y', top)
                 el.setAttribute('height', height)
                 el.setAttribute('width', strokeWidth)
@@ -65,7 +119,7 @@ export class Overlayer {
         else for (const { left, bottom, width } of rects) {
             const el = createSVGElement('rect')
             el.setAttribute('x', left)
-            el.setAttribute('y', bottom - strokeWidth)
+            el.setAttribute('y', bottom - strokeWidth / 2 + padding)
             el.setAttribute('height', strokeWidth)
             el.setAttribute('width', width)
             g.append(el)
@@ -96,7 +150,7 @@ export class Overlayer {
         return g
     }
     static squiggly(rects, options = {}) {
-        const { color = 'red', width: strokeWidth = 2, writingMode } = options
+        const { color = 'red', width: strokeWidth = 2, padding = 0, writingMode } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', 'none')
         g.setAttribute('stroke', color)
@@ -109,7 +163,7 @@ export class Overlayer {
                 const inline = height / n
                 const ls = Array.from({ length: n },
                     (_, i) => `l${i % 2 ? -block : block} ${inline}`).join('')
-                el.setAttribute('d', `M${right} ${top}${ls}`)
+                el.setAttribute('d', `M${right - strokeWidth / 2 + padding} ${top}${ls}`)
                 g.append(el)
             }
         else for (const { left, bottom, width } of rects) {
@@ -118,39 +172,39 @@ export class Overlayer {
             const inline = width / n
             const ls = Array.from({ length: n },
                 (_, i) => `l${inline} ${i % 2 ? block : -block}`).join('')
-            el.setAttribute('d', `M${left} ${bottom}${ls}`)
+            el.setAttribute('d', `M${left} ${bottom + strokeWidth / 2 + padding}${ls}`)
             g.append(el)
         }
         return g
     }
     static highlight(rects, options = {}) {
-        const { color = 'red' } = options
+        const { color = 'red', padding = 0 } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', color)
         g.style.opacity = 'var(--overlayer-highlight-opacity, .3)'
         g.style.mixBlendMode = 'var(--overlayer-highlight-blend-mode, normal)'
         for (const { left, top, height, width } of rects) {
             const el = createSVGElement('rect')
-            el.setAttribute('x', left)
-            el.setAttribute('y', top)
-            el.setAttribute('height', height)
-            el.setAttribute('width', width)
+            el.setAttribute('x', left - padding)
+            el.setAttribute('y', top - padding)
+            el.setAttribute('height', height + padding * 2)
+            el.setAttribute('width', width + padding * 2)
             g.append(el)
         }
         return g
     }
     static outline(rects, options = {}) {
-        const { color = 'red', width: strokeWidth = 3, radius = 3 } = options
+        const { color = 'red', width: strokeWidth = 3, padding = 0, radius = 3 } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', 'none')
         g.setAttribute('stroke', color)
         g.setAttribute('stroke-width', strokeWidth)
         for (const { left, top, height, width } of rects) {
             const el = createSVGElement('rect')
-            el.setAttribute('x', left)
-            el.setAttribute('y', top)
-            el.setAttribute('height', height)
-            el.setAttribute('width', width)
+            el.setAttribute('x', left - padding)
+            el.setAttribute('y', top - padding)
+            el.setAttribute('height', height + padding * 2)
+            el.setAttribute('width', width + padding * 2)
             el.setAttribute('rx', radius)
             g.append(el)
         }

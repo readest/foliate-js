@@ -1,4 +1,7 @@
-const getTypes = el => new Set(el?.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type')?.split(' '))
+const getTypes = el => new Set([
+    ...(el?.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type')?.split(' ') ?? []),
+    ...(el?.attributes?.getNamedItem?.('epub:type')?.value?.split(' ') ?? []),
+])
 const getRoles = el => new Set(el?.getAttribute?.('role')?.split(' '))
 
 const isSuper = el => {
@@ -62,10 +65,18 @@ export class FootnoteHandler extends EventTarget {
                     const type = getReferencedType(el)
                     const hidden = el?.matches?.('aside') && type === 'footnote'
                     if (el) {
-                        const range = el.startContainer ? el : doc.createRange()
-                        if (!el.startContainer) {
-                            if (el.matches('li, aside')) range.selectNodeContents(el)
-                            else range.selectNode(el)
+                        let range
+                        if (el.startContainer) {
+                            range = el
+                        } else if (el.matches('li, aside')) {
+                            range = doc.createRange()
+                            range.selectNodeContents(el)
+                        } else if (el.closest('li')) {
+                            range = doc.createRange()
+                            range.selectNodeContents(el.closest('li'))
+                        } else {
+                            range = doc.createRange()
+                            range.selectNode(el)
                         }
                         const frag = range.extractContents()
                         doc.body.replaceChildren()
@@ -85,9 +96,9 @@ export class FootnoteHandler extends EventTarget {
         })
     }
     handle(book, e) {
-        const { a, href } = e.detail
+        const { a, href, follow } = e.detail
         const { yes, maybe } = isFootnoteReference(a)
-        if (yes) {
+        if (yes || follow) {
             e.preventDefault()
             return Promise.resolve(book.resolveHref(href)).then(target =>
                 this.#showFragment(book, target, href))

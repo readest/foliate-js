@@ -25,11 +25,32 @@ const getSegmenter = (lang = 'en', granularity = 'word') => {
     const segmenter = new Intl.Segmenter(lang, { granularity })
     const granularityIsWord = granularity === 'word'
     return function* (strs, makeRange) {
-        const str = strs.join('')
+        const str = strs.join('').replace(/\r\n/g, '  ').replace(/\r/g, ' ').replace(/\n/g, ' ')
         let name = 0
         let strIndex = -1
         let sum = 0
-        for (const { index, segment, isWordLike } of segmenter.segment(str)) {
+        const rawSegments = Array.from(segmenter.segment(str))
+        const mergedSegments = []
+        for (let i = 0; i < rawSegments.length; i++) {
+            const current = rawSegments[i]
+            const next = rawSegments[i + 1]
+            const segment = current.segment.trim()
+            const nextSegment = next?.segment?.trim()
+            const endsWithAbbr = /(?:^|\s)([A-Z][a-z]{1,5})\.$/.test(segment)
+            const nextStartsWithCapital = /^[A-Z]/.test(nextSegment || '')
+            if (endsWithAbbr && nextStartsWithCapital) {
+                const mergedSegment = {
+                    index: current.index,
+                    segment: current.segment + (next?.segment || ''),
+                    isWordLike: true,
+                }
+                mergedSegments.push(mergedSegment)
+                i++
+            } else {
+                mergedSegments.push(current)
+            }
+        }
+        for (const { index, segment, isWordLike } of mergedSegments) {
             if (granularityIsWord && !isWordLike) continue
             while (sum <= index) sum += strs[++strIndex].length
             const startIndex = strIndex
@@ -44,7 +65,7 @@ const getSegmenter = (lang = 'en', granularity = 'word') => {
     }
 }
 
-const fragmentToSSML = (fragment, inherited) => {
+const fragmentToSSML = (fragment, nodeFilter, inherited) => {
     const ssml = document.implementation.createDocument(NS.SSML, 'speak')
     const { lang } = inherited
     if (lang) ssml.documentElement.setAttributeNS(NS.XML, 'lang', lang)
@@ -53,7 +74,8 @@ const fragmentToSSML = (fragment, inherited) => {
         if (!node) return
         if (node.nodeType === 3) return ssml.createTextNode(node.textContent)
         if (node.nodeType === 4) return ssml.createCDATASection(node.textContent)
-        if (node.nodeType !== 1) return
+        if (node.nodeType !== 1 && node.nodeType !== 11) return
+        if (nodeFilter && nodeFilter(node) === NodeFilter.FILTER_REJECT) return
 
         let el
         const nodeName = node.nodeName.toLowerCase()
@@ -66,15 +88,15 @@ const fragmentToSSML = (fragment, inherited) => {
         else if (nodeName === 'em' || nodeName === 'strong')
             el = ssml.createElementNS(NS.SSML, 'emphasis')
 
-        const lang = node.lang || node.getAttributeNS(NS.XML, 'lang')
+        const lang = node.lang || node.getAttributeNS?.(NS.XML, 'lang')
         if (lang) {
             if (!el) el = ssml.createElementNS(NS.SSML, 'lang')
             el.setAttributeNS(NS.XML, 'lang', lang)
         }
 
-        const alphabet = node.getAttributeNS(NS.SSML, 'alphabet') || inheritedAlphabet
+        const alphabet = node.getAttributeNS?.(NS.SSML, 'alphabet') || inheritedAlphabet
         if (!el) {
-            const ph = node.getAttributeNS(NS.SSML, 'ph')
+            const ph = node.getAttributeNS?.(NS.SSML, 'ph')
             if (ph) {
                 el = ssml.createElementNS(NS.SSML, 'phoneme')
                 if (alphabet) el.setAttribute('alphabet', alphabet)
@@ -92,11 +114,11 @@ const fragmentToSSML = (fragment, inherited) => {
         }
         return el
     }
-    convert(fragment.firstChild, ssml.documentElement, inherited.alphabet)
+    convert(fragment, ssml.documentElement, inherited.alphabet)
     return ssml
 }
 
-const getFragmentWithMarks = (range, textWalker, granularity) => {
+const getFragmentWithMarks = (range, textWalker, nodeFilter, granularity) => {
     const lang = getLang(range.commonAncestorContainer)
     const alphabet = getAlphabet(range.commonAncestorContainer)
 
@@ -106,15 +128,15 @@ const getFragmentWithMarks = (range, textWalker, granularity) => {
     // we need ranges on both the original document (for highlighting)
     // and the document fragment (for inserting marks)
     // so unfortunately need to do it twice, as you can't copy the ranges
-    const entries = [...textWalker(range, segmenter)]
-    const fragmentEntries = [...textWalker(fragment, segmenter)]
+    const entries = [...textWalker(range, segmenter, nodeFilter)]
+    const fragmentEntries = [...textWalker(fragment, segmenter, nodeFilter)]
 
     for (const [name, range] of fragmentEntries) {
         const mark = document.createElement('foliate-mark')
         mark.dataset.name = name
         range.insertNode(mark)
     }
-    const ssml = fragmentToSSML(fragment, { lang, alphabet })
+    const ssml = fragmentToSSML(fragment, nodeFilter, { lang, alphabet })
     return { entries, ssml }
 }
 
@@ -207,11 +229,11 @@ export class TTS {
     #ranges
     #lastMark
     #serializer = new XMLSerializer()
-    constructor(doc, textWalker, highlight, granularity) {
+    constructor(doc, textWalker, nodeFilter, highlight, granularity) {
         this.doc = doc
         this.highlight = highlight
         this.#list = new ListIterator(getBlocks(doc), range => {
-            const { entries, ssml } = getFragmentWithMarks(range, textWalker, granularity)
+            const { entries, ssml } = getFragmentWithMarks(range, textWalker, nodeFilter, granularity)
             this.#ranges = new Map(entries)
             return [ssml, range]
         })
@@ -231,7 +253,8 @@ export class TTS {
             node.parentNode.removeChild(node)
             node = next
         }
-        return this.#serializer.serializeToString(ssml)
+        const ssmlStr = this.#serializer.serializeToString(ssml)
+        return ssmlStr
     }
     start() {
         this.#lastMark = null
@@ -273,6 +296,7 @@ export class TTS {
         if (range) {
             this.#lastMark = mark
             this.highlight(range.cloneRange())
+            return range
         }
     }
 }

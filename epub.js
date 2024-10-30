@@ -94,7 +94,9 @@ const childGetter = (doc, ns) => {
 
 const resolveURL = (url, relativeTo) => {
     try {
-        if (relativeTo.includes(':')) return new URL(url, relativeTo)
+        // replace %2c in the url with a comma, this might be introduced by calibre
+        url = url.replace(/%2c/gi, ',').replace(/%3a/gi, ':')
+        if (relativeTo.includes(':') && !relativeTo.startsWith('OEBPS')) return new URL(url, relativeTo)
         // the base needs to be a valid URL, so set a base URL and then remove it
         const root = 'https://invalid.invalid/'
         const obj = new URL(url, root + relativeTo)
@@ -203,7 +205,7 @@ const getMetadata = opf => {
         if (!els) return null
         return Object.groupBy(els.map(parse), x => x.property)
     }
-    const dc = Object.fromEntries(Object.entries(Object.groupBy(els.dc, el => el.localName))
+    const dc = Object.fromEntries(Object.entries(Object.groupBy(els.dc || [], el => el.localName))
         .map(([name, els]) => [name, els.map(parse)]))
     const properties = getProperties() ?? {}
     const legacyMeta = Object.fromEntries(els.legacyMeta?.map(el =>
@@ -389,6 +391,20 @@ const parseClock = str => {
         : unit === 'ms' ? .001
         : 1
     return n * f
+}
+
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp']
+
+const getImageMediaType = (path) => {
+    const extension = path.toLowerCase().split('.').pop()
+    const mediaTypeMap = {
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'png': 'image/png',
+        'gif': 'image/gif',
+        'webp': 'image/webp',
+    }
+    return mediaTypeMap[extension] || 'image/jpeg'
 }
 
 class MediaOverlay extends EventTarget {
@@ -670,8 +686,12 @@ class Resources {
             ?? this.getItemByID($$$(opf, 'meta')
                 .find(filterAttribute('name', 'cover'))
                 ?.getAttribute('content'))
+            ?? this.manifest.find(item => item.href.includes('cover')
+                && item.mediaType.startsWith('image'))
             ?? this.getItemByHref(this.guide
                 ?.find(ref => ref.type.includes('cover'))?.href)
+            // last resort: first image in manifest
+            ?? this.manifest.find(item => item.mediaType.startsWith('image'))
 
         this.cfis = CFI.fromElements($$itemref)
     }
@@ -704,14 +724,16 @@ class Resources {
 
 class Loader {
     #cache = new Map()
+    #cacheXHTMLContent = new Map()
     #children = new Map()
     #refCount = new Map()
     eventTarget = new EventTarget()
-    constructor({ loadText, loadBlob, resources }) {
+    constructor({ loadText, loadBlob, resources, entries }) {
         this.loadText = loadText
         this.loadBlob = loadBlob
         this.manifest = resources.manifest
         this.assets = resources.manifest
+        this.entries = entries
         // needed only when replacing in (X)HTML w/o parsing (see below)
         //.filter(({ mediaType }) => ![MIME.XHTML, MIME.HTML].includes(mediaType))
     }
@@ -726,6 +748,9 @@ class Loader {
         const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#cache.set(href, url)
         this.#refCount.set(href, 1)
+        if (newType === MIME.XHTML) {
+            this.#cacheXHTMLContent.set(url, {href, type: newType, data: newData})
+        }
         if (parent) {
             const childList = this.#children.get(parent)
             if (childList) childList.push(href)
@@ -749,8 +774,10 @@ class Loader {
         //console.log(`unreferencing ${href}, now ${count}`)
         if (count < 1) {
             //console.log(`unloading ${href}`)
-            URL.revokeObjectURL(this.#cache.get(href))
+            const url = this.#cache.get(href)
+            URL.revokeObjectURL(url)
             this.#cache.delete(href)
+            this.#cacheXHTMLContent.delete(url)
             this.#refCount.delete(href)
             // unref children
             const childList = this.#children.get(href)
@@ -782,11 +809,32 @@ class Loader {
         const tryLoadBlob = Promise.resolve().then(() => this.loadBlob(href))
         return this.createURL(href, tryLoadBlob, mediaType, parent)
     }
+    async loadItemXHTMLContent(item, parents = []) {
+        const url = await this.loadItem(item, parents)
+        if (url) return this.#cacheXHTMLContent.get(url)?.data
+    }
+    tryImageEntryItem(path) {
+        if (!IMAGE_EXTENSIONS.some(ext => path.toLowerCase().endsWith(`.${ext}`))) {
+            return null
+        }
+        if (!this.entries.get(path)) {
+            return null
+        }
+        return {
+            href: path,
+            mediaType: getImageMediaType(path),
+        }
+    }
     async loadHref(href, base, parents = []) {
         if (isExternal(href)) return href
         const path = resolveURL(href, base)
-        const item = this.manifest.find(item => item.href === path)
-        if (!item) return href
+        let item = this.manifest.find(item => item.href === path)
+        if (!item) {
+            item = this.tryImageEntryItem(path)
+            if (!item) {
+                return href
+            }
+        }
         return this.loadItem(item, parents.concat(base))
     }
     async loadReplaced(item, parents = []) {
@@ -932,7 +980,11 @@ export class EPUB {
     parser = new DOMParser()
     #loader
     #encryption
-    constructor({ loadText, loadBlob, getSize, sha1 }) {
+    constructor({ entries, loadText, loadBlob, getSize, sha1 }) {
+        this.entries = entries.reduce((map, entry) => {
+            map.set(entry.filename, entry)
+            return map
+        }, new Map())
         this.loadText = loadText
         this.loadBlob = loadBlob
         this.getSize = getSize
@@ -973,6 +1025,7 @@ ${doc.querySelector('parsererror').innerText}`)
             loadBlob: uri => Promise.resolve(this.loadBlob(uri))
                 .then(this.#encryption.getDecoder(uri)),
             resources: this.resources,
+            entries: this.entries,
         })
         this.transformTarget = this.#loader.eventTarget
         this.sections = this.resources.spine.map((spineItem, index) => {
@@ -986,6 +1039,7 @@ ${doc.querySelector('parsererror').innerText}`)
                 id: item.href,
                 load: () => this.#loader.loadItem(item),
                 unload: () => this.#loader.unloadItem(item),
+                loadContent: () => this.#loader.loadItemXHTMLContent(item),
                 createDocument: () => this.loadDocument(item),
                 size: this.getSize(item.href),
                 cfi: this.resources.cfis[index],
