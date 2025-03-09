@@ -255,9 +255,6 @@ class View {
                 const background = this.docBackground
                 this.#iframe.style.display = 'none'
 
-                this.#vertical = vertical
-                this.#rtl = rtl
-
                 this.#contentRange.selectNodeContents(doc.body)
                 const layout = beforeRender?.({ vertical, rtl, background })
                 this.#iframe.style.display = 'block'
