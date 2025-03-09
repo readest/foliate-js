@@ -547,7 +547,7 @@ export class Paginator extends HTMLElement {
         this.#observer.observe(this.#container)
         this.#container.addEventListener('scroll', () => this.dispatchEvent(new Event('scroll')))
         this.#container.addEventListener('scroll', debounce(() => {
-            if (this.scrolled) {
+            if (this.initalScrollBehavior) {
                 if (this.#justAnchored) this.#justAnchored = false
                 else this.#afterScroll('scroll')
             }
@@ -589,7 +589,7 @@ export class Paginator extends HTMLElement {
             doc.addEventListener('keydown', () => isKeyboardSelecting = true)
             doc.addEventListener('keyup', () => isKeyboardSelecting = false)
             doc.addEventListener('selectionchange', () => {
-                if (this.scrolled) return
+                if (this.initalScrollBehavior) return
                 const range = this.#lastVisibleRange
                 if (!range) return
                 const sel = doc.getSelection()
@@ -603,7 +603,7 @@ export class Paginator extends HTMLElement {
                     this.#scrollToAnchor(selRange)
                 }
             })
-            doc.addEventListener('focusin', e => this.scrolled ? null :
+            doc.addEventListener('focusin', e => this.initalScrollBehavior ? null :
                 // NOTE: `requestAnimationFrame` is needed in WebKit
                 requestAnimationFrame(() => this.#scrollToAnchor(e.target)))
         })
@@ -756,7 +756,7 @@ export class Paginator extends HTMLElement {
         }))
         this.#scrollToAnchor(this.#anchor)
     }
-    get scrolled() {
+    initalScrollBehavior() {
         return this.getAttribute('flow') === 'scrolled'
     }
     get scrollProp() {
@@ -838,7 +838,7 @@ export class Paginator extends HTMLElement {
         const state = this.#touchState
         if (state.pinched) return
         state.pinched = globalThis.visualViewport.scale > 1
-        if (this.scrolled || state.pinched) return
+        if (this.initalScrollBehavior || state.pinched) return
         if (e.touches.length > 1) {
             if (this.#touchScrolled) e.preventDefault()
             return
@@ -867,7 +867,7 @@ export class Paginator extends HTMLElement {
     }
     #onTouchEnd() {
         this.#touchScrolled = false
-        if (this.scrolled) return
+        if (this.initalScrollBehavior) return
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
         // at this point I'm basically throwing `requestAnimationFrame` at
@@ -879,7 +879,7 @@ export class Paginator extends HTMLElement {
     }
     // allows one to process rects as if they were LTR and horizontal
     #getRectMapper() {
-        if (this.scrolled) {
+        if (this.initalScrollBehavior) {
             const size = this.viewSize
             const margin = this.#margin
             return this.#vertical
@@ -896,7 +896,7 @@ export class Paginator extends HTMLElement {
                 : f => f
     }
     async #scrollToRect(rect, reason) {
-        if (this.scrolled) {
+        if (this.initalScrollBehavior) {
             const offset = this.#getRectMapper()(rect).left - this.#margin
             return this.#scrollTo(offset, reason)
         }
@@ -911,7 +911,7 @@ export class Paginator extends HTMLElement {
             return
         }
         // FIXME: vertical-rl only, not -lr
-        if (this.scrolled && this.#vertical) offset = -offset
+        if (this.initalScrollBehavior && this.#vertical) offset = -offset
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated')) return animate(
             this.containerPosition, offset, 300, easeOutQuad,
             x => this.containerPosition = x
@@ -946,7 +946,7 @@ export class Paginator extends HTMLElement {
             return
         }
         // if anchor is a fraction
-        if (this.scrolled) {
+        if (this.initalScrollBehavior) {
             await this.#scrollTo(anchor * this.viewSize, reason)
             return
         }
@@ -957,7 +957,7 @@ export class Paginator extends HTMLElement {
         await this.#scrollToPage(newPage + 1, reason)
     }
     #getVisibleRange() {
-        if (this.scrolled) return getVisibleRange(this.#view.document,
+        if (this.initalScrollBehavior) return getVisibleRange(this.#view.document,
             this.start + this.#margin, this.end - this.#margin, this.#getRectMapper())
         const size = this.#rtl ? -this.size : this.size
         return getVisibleRange(this.#view.document,
@@ -973,7 +973,7 @@ export class Paginator extends HTMLElement {
 
         const index = this.#index
         const detail = { reason, range, index }
-        if (this.scrolled) detail.fraction = this.start / this.viewSize
+        if (this.initalScrollBehavior) detail.fraction = this.start / this.viewSize
         else if (this.pages > 0) {
             const { page, pages } = this
             this.#header.style.visibility = page > 1 ? 'visible' : 'hidden'
@@ -1040,7 +1040,7 @@ export class Paginator extends HTMLElement {
     }
     #scrollPrev(distance) {
         if (!this.#view) return true
-        if (this.scrolled) {
+        if (this.initalScrollBehavior) {
             if (this.start > 0) return this.#scrollTo(
                 Math.max(0, this.start - (distance ?? this.size)), null, true)
             return true
@@ -1051,7 +1051,7 @@ export class Paginator extends HTMLElement {
     }
     #scrollNext(distance) {
         if (!this.#view) return true
-        if (this.scrolled) {
+        if (this.initalScrollBehavior) {
             if (this.viewSize - this.end > 2) return this.#scrollTo(
                 Math.min(this.viewSize, distance ? this.start + distance : this.end), null, true)
             return true
