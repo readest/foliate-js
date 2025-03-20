@@ -277,7 +277,7 @@ class View {
         })
     }
     render(layout) {
-        if (!layout) return
+        if (!layout || !this.document) return
         this.#column = layout.flow !== 'scrolled'
         this.#layout = layout
         if (this.#column) this.columnize(layout)
@@ -672,6 +672,7 @@ export class Paginator extends HTMLElement {
     }
     #replaceBackground(background, columnCount) {
         const doc = this.#view?.document
+        if (!doc) return
         const htmlStyle = doc.defaultView.getComputedStyle(doc.documentElement)
         const themeBgColor = htmlStyle.getPropertyValue('--theme-bg-color')
         if (background && themeBgColor) {
