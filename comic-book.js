@@ -1,4 +1,4 @@
-export const makeComicBook = ({ entries, loadBlob, getSize }, file) => {
+export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, file) => {
     const cache = new Map()
     const urls = new Map()
     const load = async name => {
@@ -24,8 +24,27 @@ export const makeComicBook = ({ entries, loadBlob, getSize }, file) => {
     if (!files.length) throw new Error('No supported image files in archive')
 
     const book = {}
+    try {
+        const jsonComment = JSON.parse(await getComment() || '')
+        const info = jsonComment['ComicBookInfo/1.0']
+        if (info) {
+            const year = info.publicationYear
+            const month = info.publicationMonth
+            const mm = month && month >= 1 && month <= 12 ? String(month).padStart(2, '0') : null
+            book.metadata = {
+                title: info.title || file.name,
+                publisher: info.publisher,
+                language: info.language || info.lang,
+                author: info.credits ? info.credits.map(c => `${c.person} (${c.role})`).join(', ') : '',
+                published: year && month ? `${year}-${mm}` : undefined,
+            }
+        } else {
+            book.metadata = { title: file.name }
+        }
+    } catch {
+        book.metadata = { title: file.name }
+    }
     book.getCover = () => loadBlob(files[0])
-    book.metadata = { title: file.name }
     book.sections = files.map(name => ({
         id: name,
         load: () => load(name),
