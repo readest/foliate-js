@@ -168,8 +168,13 @@ export const makePDF = async file => {
         const parsed = JSON.parse(href)
         const dest = typeof parsed === 'string'
             ? await pdf.getDestination(parsed) : parsed
-        const index = await pdf.getPageIndex(dest[0])
-        return [index, null]
+        try {
+            const index = await pdf.getPageIndex(dest[0])
+            return [index, null]
+        } catch (e) {
+            console.warn('Error getting page index for href', href)
+            return [null, null]
+        }
     }
     book.getTOCFragment = doc => doc.documentElement
     book.getCover = async () => renderPage(await pdf.getPage(1), true)
