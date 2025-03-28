@@ -29,7 +29,28 @@ const getSegmenter = (lang = 'en', granularity = 'word') => {
         let name = 0
         let strIndex = -1
         let sum = 0
-        for (const { index, segment, isWordLike } of segmenter.segment(str)) {
+        const rawSegments = Array.from(segmenter.segment(str))
+        const mergedSegments = []
+        for (let i = 0; i < rawSegments.length; i++) {
+            const current = rawSegments[i]
+            const next = rawSegments[i + 1]
+            const segment = current.segment.trim()
+            const nextSegment = next?.segment?.trim()
+            const endsWithAbbr = /(?:^|\s)([A-Z][a-z]{1,5})\.$/.test(segment)
+            const nextStartsWithCapital = /^[A-Z]/.test(nextSegment || '')
+            if (endsWithAbbr && nextStartsWithCapital) {
+                const mergedSegment = {
+                    index: current.index,
+                    segment: current.segment + (next?.segment || ''),
+                    isWordLike: true,
+                }
+                mergedSegments.push(mergedSegment)
+                i++
+            } else {
+                mergedSegments.push(current)
+            }
+        }
+        for (const { index, segment, isWordLike } of mergedSegments) {
             if (granularityIsWord && !isWordLike) continue
             while (sum <= index) sum += strs[++strIndex].length
             const startIndex = strIndex
