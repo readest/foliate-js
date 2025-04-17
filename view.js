@@ -211,7 +211,7 @@ const languageInfo = lang => {
 }
 
 export class View extends HTMLElement {
-    #root = this.attachShadow({ mode: 'closed' })
+    #root = this.attachShadow({ mode: 'open' })
     #sectionProgress
     #tocProgress
     #pageProgress

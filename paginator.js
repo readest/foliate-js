@@ -242,7 +242,7 @@ class View {
     get document() {
         return this.#iframe.contentDocument
     }
-    async load(src, afterLoad, beforeRender) {
+    async load(src, data, afterLoad, beforeRender) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
         return new Promise(resolve => {
             this.#iframe.addEventListener('load', () => {
@@ -273,7 +273,11 @@ class View {
 
                 resolve()
             }, { once: true })
-            this.#iframe.src = src
+            if (data) {
+                this.#iframe.srcdoc = data
+            } else {
+                this.#iframe.src = src
+            }
         })
     }
     render(layout) {
@@ -420,7 +424,7 @@ export class Paginator extends HTMLElement {
         'flow', 'gap', 'margin',
         'max-inline-size', 'max-block-size', 'max-column-count',
     ]
-    #root = this.attachShadow({ mode: 'closed' })
+    #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.render())
     #top
     #background
@@ -1006,7 +1010,7 @@ export class Paginator extends HTMLElement {
         this.dispatchEvent(new CustomEvent('relocate', { detail }))
     }
     async #display(promise) {
-        const { index, src, anchor, onLoad, select } = await promise
+        const { index, src, data, anchor, onLoad, select } = await promise
         this.#index = index
         const hasFocus = this.#view?.document?.hasFocus()
         if (src) {
@@ -1022,7 +1026,7 @@ export class Paginator extends HTMLElement {
                 onLoad?.({ doc, index })
             }
             const beforeRender = this.#beforeRender.bind(this)
-            await view.load(src, afterLoad, beforeRender)
+            await view.load(src, data, afterLoad, beforeRender)
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
                     doc: view.document, index,
@@ -1048,8 +1052,10 @@ export class Paginator extends HTMLElement {
                 this.dispatchEvent(new CustomEvent('load', { detail }))
             }
             await this.#display(Promise.resolve(this.sections[index].load())
-                .then(src => ({ index, src, anchor, onLoad, select }))
-                .catch(e => {
+                .then(async src => {
+                    const data = await this.sections[index].loadContent?.()
+                    return { index, src, data, anchor, onLoad, select }
+                }).catch(e => {
                     console.warn(e)
                     console.warn(new Error(`Failed to load section ${index}`))
                     return {}
