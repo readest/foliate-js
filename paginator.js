@@ -612,9 +612,13 @@ export class Paginator extends HTMLElement {
                     this.#scrollToAnchor(selRange)
                 }
             })
-            doc.addEventListener('focusin', e => this.scrolled ? null :
-                // NOTE: `requestAnimationFrame` is needed in WebKit
-                requestAnimationFrame(() => this.#scrollToAnchor(e.target)))
+            doc.addEventListener('focusin', e => {
+                if (this.scrolled) return null
+                if (this.#container && this.#container.contains(e.target)) {
+                    // NOTE: `requestAnimationFrame` is needed in WebKit
+                    requestAnimationFrame(() => this.#scrollToAnchor(e.target))
+                }
+            })
         })
 
         this.#mediaQueryListener = () => {
