@@ -680,7 +680,9 @@ export class Paginator extends HTMLElement {
         const themeBgColor = htmlStyle.getPropertyValue('--theme-bg-color')
         if (background && themeBgColor) {
             const parsedBackground = background.split(/\s(?=(?:url|rgb|hsl|#[0-9a-fA-F]{3,6}))/)
-            parsedBackground[0] = themeBgColor
+            if (themeBgColor !== '#ffffff') {
+                parsedBackground[0] = themeBgColor
+            }
             background = parsedBackground.join(' ')
         }
         if (/cover.*fixed|fixed.*cover/.test(background)) {
