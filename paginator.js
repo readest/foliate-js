@@ -801,6 +801,7 @@ export class Paginator extends HTMLElement {
         return this.#container.getBoundingClientRect()[this.sideProp]
     }
     get viewSize() {
+        if (!this.#view || !this.#view.element) return 0
         return this.#view.element.getBoundingClientRect()[this.sideProp]
     }
     get start() {
