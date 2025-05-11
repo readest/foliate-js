@@ -782,6 +782,7 @@ export class Paginator extends HTMLElement {
         this.#view.render(this.#beforeRender({
             vertical: this.#vertical,
             rtl: this.#rtl,
+            background: this.#view.docBackground,
         }))
         this.#scrollToAnchor(this.#anchor)
     }
