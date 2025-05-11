@@ -678,9 +678,10 @@ export class Paginator extends HTMLElement {
         if (!doc) return
         const htmlStyle = doc.defaultView.getComputedStyle(doc.documentElement)
         const themeBgColor = htmlStyle.getPropertyValue('--theme-bg-color')
+        const isDarkMode = htmlStyle.getPropertyValue('color-scheme') === 'dark'
         if (background && themeBgColor) {
             const parsedBackground = background.split(/\s(?=(?:url|rgb|hsl|#[0-9a-fA-F]{3,6}))/)
-            if (themeBgColor !== '#ffffff') {
+            if (isDarkMode) {
                 parsedBackground[0] = themeBgColor
             }
             background = parsedBackground.join(' ')
