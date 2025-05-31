@@ -954,7 +954,7 @@ export class EPUB {
 ${doc.querySelector('parsererror').innerText}`)
         return doc
     }
-    async init() {
+    async init({ allowScript = false } = {}) {
         const $container = await this.#loadXML('META-INF/container.xml')
         if (!$container) throw new Error('Failed to load container file')
 
@@ -981,6 +981,7 @@ ${doc.querySelector('parsererror').innerText}`)
                 .then(this.#encryption.getDecoder(uri)),
             resources: this.resources,
         })
+        this.#loader.allowScript = allowScript
         this.transformTarget = this.#loader.eventTarget
         this.sections = this.resources.spine.map((spineItem, index) => {
             const { idref, linear, properties = [] } = spineItem
