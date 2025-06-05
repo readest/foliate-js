@@ -676,6 +676,8 @@ class Resources {
                 && item.mediaType.startsWith('image'))
             ?? this.getItemByHref(this.guide
                 ?.find(ref => ref.type.includes('cover'))?.href)
+            // last resort: first image in manifest
+            ?? this.manifest.find(item => item.mediaType.startsWith('image'))
 
         this.cfis = CFI.fromElements($$itemref)
     }
