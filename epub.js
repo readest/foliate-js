@@ -95,7 +95,7 @@ const childGetter = (doc, ns) => {
 const resolveURL = (url, relativeTo) => {
     try {
         // replace %2c in the url with a comma, this might be introduced by calibre
-        url = url.replace(/%2c/, ',')
+        url = url.replace(/%2c/gi, ',').replace(/%3a/gi, ':')
         if (relativeTo.includes(':') && !relativeTo.startsWith('OEBPS')) return new URL(url, relativeTo)
         // the base needs to be a valid URL, so set a base URL and then remove it
         const root = 'https://invalid.invalid/'
