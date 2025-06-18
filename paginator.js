@@ -476,7 +476,7 @@ export class Paginator extends HTMLElement {
             --_max-inline-size: 720px;
             --_max-block-size: 1440px;
             --_max-column-count: 2;
-            --_max-column-count-portrait: 1;
+            --_max-column-count-portrait: var(--_max-column-count);
             --_max-column-count-spread: var(--_max-column-count);
             --_half-gap: calc(var(--_gap) / 2);
             --_half-margin-left: calc(var(--_margin-left) / 2);
