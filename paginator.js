@@ -14,19 +14,26 @@ const debounce = (f, wait, immediate) => {
     }
 }
 
-const scheduleNextFrame = (fn) => document.hidden ? setTimeout(fn, 16) : requestAnimationFrame(fn)
-
 const lerp = (min, max, x) => x * (max - min) + min
 const easeOutQuad = x => 1 - (1 - x) * (1 - x)
 const animate = (a, b, duration, ease, render) => new Promise(resolve => {
-    const start = performance.now()
-    const step = () => {
-        const now = performance.now()
+    let start
+    const step = now => {
+        if (document.hidden) {
+            render(lerp(a, b, 1))
+            return resolve()
+        }
+        start ??= now
         const fraction = Math.min(1, (now - start) / duration)
         render(lerp(a, b, ease(fraction)))
-        fraction < 1 ? scheduleNextFrame(step) : resolve()
+        if (fraction < 1) requestAnimationFrame(step)
+        else resolve()
     }
-    scheduleNextFrame(step)
+    if (document.hidden) {
+        render(lerp(a, b, 1))
+        return resolve()
+    }
+    requestAnimationFrame(step)
 })
 
 // collapsed range doesn't return client rects sometimes (or always?)
@@ -631,8 +638,8 @@ export class Paginator extends HTMLElement {
             doc.addEventListener('focusin', e => {
                 if (this.scrolled) return null
                 if (this.#container && this.#container.contains(e.target)) {
-                    // NOTE: `scheduleNextFrame` is needed in WebKit
-                    scheduleNextFrame(() => this.#scrollToAnchor(e.target))
+                    // NOTE: `requestAnimationFrame` is needed in WebKit
+                    requestAnimationFrame(() => this.#scrollToAnchor(e.target))
                 }
             })
         })
@@ -923,9 +930,9 @@ export class Paginator extends HTMLElement {
         if (this.scrolled) return
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
-        // at this point I'm basically throwing `scheduleNextFrame` at
+        // at this point I'm basically throwing `requestAnimationFrame` at
         // anything that doesn't work
-        scheduleNextFrame(() => {
+        requestAnimationFrame(() => {
             if (globalThis.visualViewport.scale === 1)
                 this.snap(this.#touchState.vx, this.#touchState.vy)
         })
@@ -1178,8 +1185,8 @@ export class Paginator extends HTMLElement {
             $style.textContent = style
         } else $style.textContent = styles
 
-        // NOTE: needs `scheduleNextFrame` in Chromium
-        scheduleNextFrame(() => {
+        // NOTE: needs `requestAnimationFrame` in Chromium
+        requestAnimationFrame(() => {
             this.#replaceBackground(this.#view.docBackground, this.columnCount)
         })
 
