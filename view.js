@@ -358,9 +358,19 @@ export class View extends HTMLElement {
                 Promise.resolve(this.#emit('external-link', { a, href }, true))
                     .then(x => x ? globalThis.open(href, '_blank') : null)
                     .catch(e => console.error(e))
-            else Promise.resolve(this.#emit('link', { a, href }, true))
-                .then(x => x ? this.goTo(href) : null)
-                .catch(e => console.error(e))
+            else {
+                let internalHref = href
+                if (!book.resolveHref(href_)) {
+                    const hashIndex = href_.indexOf('#')
+                    if (hashIndex >= 0) {
+                        const hash = href_.slice(hashIndex)
+                        internalHref = section?.resolveHref?.(hash) ?? href
+                    }
+                }
+                Promise.resolve(this.#emit('link', { a, href: internalHref }, true))
+                    .then(x => x ? this.goTo(internalHref) : null)
+                    .catch(e => console.error(e))
+            }
         })
     }
     async addAnnotation(annotation, remove) {
