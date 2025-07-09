@@ -360,7 +360,7 @@ export class View extends HTMLElement {
                     .catch(e => console.error(e))
             else {
                 let internalHref = href
-                if (!book.resolveHref(href_)) {
+                if (!book.resolveHref(href)) {
                     const hashIndex = href_.indexOf('#')
                     if (hashIndex >= 0) {
                         const hash = href_.slice(hashIndex)
