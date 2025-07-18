@@ -65,7 +65,7 @@ const getSegmenter = (lang = 'en', granularity = 'word') => {
     }
 }
 
-const fragmentToSSML = (fragment, inherited) => {
+const fragmentToSSML = (fragment, nodeFilter, inherited) => {
     const ssml = document.implementation.createDocument(NS.SSML, 'speak')
     const { lang } = inherited
     if (lang) ssml.documentElement.setAttributeNS(NS.XML, 'lang', lang)
@@ -75,6 +75,7 @@ const fragmentToSSML = (fragment, inherited) => {
         if (node.nodeType === 3) return ssml.createTextNode(node.textContent)
         if (node.nodeType === 4) return ssml.createCDATASection(node.textContent)
         if (node.nodeType !== 1 && node.nodeType !== 11) return
+        if (nodeFilter && nodeFilter(node) === NodeFilter.FILTER_REJECT) return
 
         let el
         const nodeName = node.nodeName.toLowerCase()
@@ -117,7 +118,7 @@ const fragmentToSSML = (fragment, inherited) => {
     return ssml
 }
 
-const getFragmentWithMarks = (range, textWalker, granularity) => {
+const getFragmentWithMarks = (range, textWalker, nodeFilter, granularity) => {
     const lang = getLang(range.commonAncestorContainer)
     const alphabet = getAlphabet(range.commonAncestorContainer)
 
@@ -127,15 +128,15 @@ const getFragmentWithMarks = (range, textWalker, granularity) => {
     // we need ranges on both the original document (for highlighting)
     // and the document fragment (for inserting marks)
     // so unfortunately need to do it twice, as you can't copy the ranges
-    const entries = [...textWalker(range, segmenter)]
-    const fragmentEntries = [...textWalker(fragment, segmenter)]
+    const entries = [...textWalker(range, segmenter, nodeFilter)]
+    const fragmentEntries = [...textWalker(fragment, segmenter, nodeFilter)]
 
     for (const [name, range] of fragmentEntries) {
         const mark = document.createElement('foliate-mark')
         mark.dataset.name = name
         range.insertNode(mark)
     }
-    const ssml = fragmentToSSML(fragment, { lang, alphabet })
+    const ssml = fragmentToSSML(fragment, nodeFilter, { lang, alphabet })
     return { entries, ssml }
 }
 
@@ -228,11 +229,11 @@ export class TTS {
     #ranges
     #lastMark
     #serializer = new XMLSerializer()
-    constructor(doc, textWalker, highlight, granularity) {
+    constructor(doc, textWalker, nodeFilter, highlight, granularity) {
         this.doc = doc
         this.highlight = highlight
         this.#list = new ListIterator(getBlocks(doc), range => {
-            const { entries, ssml } = getFragmentWithMarks(range, textWalker, granularity)
+            const { entries, ssml } = getFragmentWithMarks(range, textWalker, nodeFilter, granularity)
             this.#ranges = new Map(entries)
             return [ssml, range]
         })
