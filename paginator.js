@@ -910,8 +910,9 @@ export class Paginator extends HTMLElement {
         if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
             return
         }
-        e.preventDefault()
         const touch = e.changedTouches[0]
+        const isStylus = touch.touchType === 'stylus'
+        if (!isStylus) e.preventDefault()
         const x = touch.screenX, y = touch.screenY
         const dx = state.x - x, dy = state.y - y
         const dt = e.timeStamp - state.t
@@ -921,9 +922,9 @@ export class Paginator extends HTMLElement {
         state.vx = dx / dt
         state.vy = dy / dt
         this.#touchScrolled = true
-        if (Math.abs(dx) >= Math.abs(dy)) {
+        if (Math.abs(dx) >= Math.abs(dy) && (!isStylus || Math.abs(dx) > 1)) {
             this.scrollBy(dx, 0)
-        } else if (Math.abs(dy) > Math.abs(dx)) {
+        } else if (Math.abs(dy) > Math.abs(dx) && (!isStylus || Math.abs(dy) > 1)) {
             this.scrollBy(0, dy)
         }
     }
