@@ -686,6 +686,8 @@ class Resources {
             ?? this.getItemByID($$$(opf, 'meta')
                 .find(filterAttribute('name', 'cover'))
                 ?.getAttribute('content'))
+            ?? this.manifest.find(item => item.id === 'cover'
+                && item.mediaType.startsWith('image'))
             ?? this.manifest.find(item => item.href.includes('cover')
                 && item.mediaType.startsWith('image'))
             ?? this.getItemByHref(this.guide
