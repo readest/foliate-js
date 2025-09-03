@@ -25,8 +25,7 @@ export class Overlayer {
     }
     #splitRangeByParagraph(range) {
         const ancestor = range.commonAncestorContainer
-        const paragraphs = Array.from(ancestor.querySelectorAll?.('p') || [])
-        if (paragraphs.length === 0) return [range]
+        const paragraphs = Array.from(ancestor.querySelectorAll?.('p, h1, h2, h3, h4') || [])
 
         const splitRanges = []
         paragraphs.forEach((p) => {
@@ -42,7 +41,7 @@ export class Overlayer {
                 splitRanges.push(pRange)
             }
         })
-        return splitRanges
+        return splitRanges.length === 0 ? [range] : splitRanges
     }
     add(key, range, draw, options) {
         if (this.#map.has(key)) this.remove(key)
