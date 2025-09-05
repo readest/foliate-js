@@ -82,7 +82,7 @@ const renderPage = async (page, getImageBlob) => {
     if (annotationLayerBuilderCSS == null) {
         annotationLayerBuilderCSS = await fetchText(pdfjsPath('annotation_layer_builder.css'))
     }
-    const src = URL.createObjectURL(new Blob([`
+    const data = `
         <!DOCTYPE html>
         <html lang="en">
         <meta charset="utf-8">
@@ -98,9 +98,10 @@ const renderPage = async (page, getImageBlob) => {
         <div id="canvas"></div>
         <div class="textLayer"></div>
         <div class="annotationLayer"></div>
-    `], { type: 'text/html' }))
+    `
+    const src = URL.createObjectURL(new Blob([data], { type: 'text/html' }))
     const onZoom = ({ doc, scale }) => render(page, doc, scale)
-    return { src, onZoom }
+    return { src, data, onZoom }
 }
 
 const makeTOCItem = item => ({
