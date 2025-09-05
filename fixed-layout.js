@@ -33,7 +33,7 @@ const getViewport = (doc, viewport) => {
 
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread']
-    #root = this.attachShadow({ mode: 'closed' })
+    #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
     #index = -1
@@ -81,6 +81,7 @@ export class FixedLayout extends HTMLElement {
     async #createFrame({ index, src: srcOption }) {
         const srcOptionIsString = typeof srcOption === 'string'
         const src = srcOptionIsString ? srcOption : srcOption?.src
+        const data = srcOptionIsString ? null : srcOption?.data
         const onZoom = srcOptionIsString ? null : srcOption?.onZoom
         const element = document.createElement('div')
         element.setAttribute('dir', 'ltr')
@@ -110,7 +111,11 @@ export class FixedLayout extends HTMLElement {
                     onZoom,
                 })
             }, { once: true })
-            iframe.src = src
+            if (data) {
+                iframe.srcdoc = data
+            } else {
+                iframe.src = src
+            }
         })
     }
     #render(side = this.#side) {
