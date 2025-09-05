@@ -279,6 +279,75 @@ export class TTS {
         if (paused && range) this.highlight(range.cloneRange())
         return this.#speak(doc)
     }
+    prevMark(paused) {
+        const marks = Array.from(this.#ranges.keys())
+        if (marks.length === 0) return
+
+        const currentIndex = this.#lastMark ? marks.indexOf(this.#lastMark) : -1
+        if (currentIndex > 0) {
+            const prevMarkName = marks[currentIndex - 1]
+            const range = this.#ranges.get(prevMarkName)
+            if (range) {
+                this.#lastMark = prevMarkName
+                if (paused) this.highlight(range.cloneRange())
+
+                const [doc] = this.#list.current() ?? []
+                return this.#speak(doc, ssml => this.#getMarkElement(ssml, prevMarkName))
+            }
+        } else {
+            const [doc, range] = this.#list.prev() ?? []
+            if (doc && range) {
+                const prevMarks = Array.from(this.#ranges.keys())
+                if (prevMarks.length > 0) {
+                    const lastMarkName = prevMarks[prevMarks.length - 1]
+                    const lastMarkRange = this.#ranges.get(lastMarkName)
+                    if (lastMarkRange) {
+                        this.#lastMark = lastMarkName
+                        if (paused) this.highlight(lastMarkRange.cloneRange())
+                        return this.#speak(doc, ssml => this.#getMarkElement(ssml, lastMarkName))
+                    }
+                } else {
+                    this.#lastMark = null
+                    if (paused) this.highlight(range.cloneRange())
+                    return this.#speak(doc)
+                }
+            }
+        }
+    }
+    nextMark(paused) {
+        const marks = Array.from(this.#ranges.keys())
+        if (marks.length === 0) return
+
+        const currentIndex = this.#lastMark ? marks.indexOf(this.#lastMark) : -1
+        if (currentIndex >= 0 && currentIndex < marks.length - 1) {
+            const nextMarkName = marks[currentIndex + 1]
+            const range = this.#ranges.get(nextMarkName)
+            if (range) {
+                this.#lastMark = nextMarkName
+                if (paused) this.highlight(range.cloneRange())
+                const [doc] = this.#list.current() ?? []
+                return this.#speak(doc, ssml => this.#getMarkElement(ssml, nextMarkName))
+            }
+        } else {
+            const [doc, range] = this.#list.next() ?? []
+            if (doc && range) {
+                const nextMarks = Array.from(this.#ranges.keys())
+                if (nextMarks.length > 0) {
+                    const firstMarkName = nextMarks[0]
+                    const firstMarkRange = this.#ranges.get(firstMarkName)
+                    if (firstMarkRange) {
+                        this.#lastMark = firstMarkName
+                        if (paused) this.highlight(firstMarkRange.cloneRange())
+                        return this.#speak(doc, ssml => this.#getMarkElement(ssml, firstMarkName))
+                    }
+                } else {
+                    this.#lastMark = null
+                    if (paused) this.highlight(range.cloneRange())
+                    return this.#speak(doc)
+                }
+            }
+        }
+    }
     from(range) {
         this.#lastMark = null
         const [doc] = this.#list.find(range_ =>
