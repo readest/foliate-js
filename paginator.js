@@ -369,6 +369,13 @@ class View {
             })
         }
     }
+    get #zoom() {
+        // Safari does not zoom the client rects, while Chrome, Edge and Firefox does
+        if (/^((?!chrome|android).)*AppleWebKit/i.test(navigator.userAgent) && !window.chrome) {
+            return window.getComputedStyle(this.document.body).zoom || 1.0
+        }
+        return 1.0
+    }
     expand() {
         const { documentElement } = this.document
         if (this.#column) {
@@ -380,7 +387,7 @@ class View {
             // which seem to be supported only by WebKit and only for horizontal writing
             const contentStart = this.#vertical ? 0
                 : this.#rtl ? rootRect.right - contentRect.right : contentRect.left - rootRect.left
-            const contentSize = contentStart + contentRect[side]
+            const contentSize = (contentStart + contentRect[side]) * this.#zoom
             const pageCount = Math.ceil(contentSize / this.#size)
             const expandedSize = pageCount * this.#size
             this.#element.style.padding = '0'
