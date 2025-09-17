@@ -1017,17 +1017,20 @@ export class Paginator extends HTMLElement {
                 .find(r => r.width > 0 && r.height > 0) || rects[0]
             if (!rect) return
             await this.#scrollToRect(rect, reason)
-            let node = anchor.focus ? anchor : undefined
-            if (!node && anchor.startContainer) {
-                node = anchor.startContainer
-                if (node.nodeType === Node.TEXT_NODE) {
-                    node = node.parentElement
+            // focus the element when navigating with keyboard or screen reader
+            if (reason === 'navigation') {
+                let node = anchor.focus ? anchor : undefined
+                if (!node && anchor.startContainer) {
+                    node = anchor.startContainer
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        node = node.parentElement
+                    }
                 }
-            }
-            if (node && node.focus) {
-                node.tabIndex = -1
-                node.style.outline = 'none'
-                node.focus({ preventScroll: true })
+                if (node && node.focus) {
+                    node.tabIndex = -1
+                    node.style.outline = 'none'
+                    node.focus({ preventScroll: true })
+                }
             }
             return
         }
