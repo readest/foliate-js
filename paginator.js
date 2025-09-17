@@ -378,6 +378,7 @@ class View {
         return 1.0
     }
     expand() {
+        if (!this.document) return
         const { documentElement } = this.document
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
