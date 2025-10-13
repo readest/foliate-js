@@ -713,10 +713,11 @@ export class Paginator extends HTMLElement {
         if (!doc) return
         const htmlStyle = doc.defaultView.getComputedStyle(doc.documentElement)
         const themeBgColor = htmlStyle.getPropertyValue('--theme-bg-color')
+        const bgTextureId = htmlStyle.getPropertyValue('--bg-texture-id')
         const isDarkMode = htmlStyle.getPropertyValue('color-scheme') === 'dark'
         if (background && themeBgColor) {
             const parsedBackground = background.split(/\s(?=(?:url|rgb|hsl|#[0-9a-fA-F]{3,6}))/)
-            if (isDarkMode) {
+            if (isDarkMode && (bgTextureId === 'none' || !bgTextureId)) {
                 parsedBackground[0] = themeBgColor
             }
             background = parsedBackground.join(' ')
