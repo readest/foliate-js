@@ -77,6 +77,19 @@ export class FootnoteHandler extends EventTarget {
                         } else if (el.closest('.note')) {
                             range = doc.createRange()
                             range.selectNodeContents(el.closest('.note'))
+                        } else if (el.querySelector('a')) {
+                            range = doc.createRange()
+                            range.setStartBefore(el)
+                            let next = el.nextElementSibling
+                            while (next) {
+                                if (next.querySelector('a')) break
+                                next = next.nextElementSibling
+                            }
+                            if (next) {
+                                range.setEndBefore(next)
+                            } else {
+                                range.setEndAfter(el.parentNode.lastChild)
+                            }
                         } else {
                             range = doc.createRange()
                             const hasContent = el.textContent?.trim() || el.children.length > 0
