@@ -904,6 +904,7 @@ export class Paginator extends HTMLElement {
             x: touch?.screenX, y: touch?.screenY,
             t: e.timeStamp,
             vx: 0, xy: 0,
+            dx: 0, dy: 0,
         }
     }
     #onTouchMove(e) {
@@ -931,10 +932,12 @@ export class Paginator extends HTMLElement {
         state.t = e.timeStamp
         state.vx = dx / dt
         state.vy = dy / dt
+        state.dx += dx
+        state.dy += dy
         this.#touchScrolled = true
-        if (Math.abs(dx) >= Math.abs(dy) && (!isStylus || Math.abs(dx) > 1)) {
+        if (!this.#vertical && Math.abs(state.dx) >= Math.abs(state.dy) && !this.hasAttribute('eink') && (!isStylus || Math.abs(dx) > 1)) {
             this.scrollBy(dx, 0)
-        } else if (Math.abs(dy) > Math.abs(dx) && (!isStylus || Math.abs(dy) > 1)) {
+        } else if (this.#vertical && Math.abs(state.dx) < Math.abs(state.dy) && !this.hasAttribute('eink') && (!isStylus || Math.abs(dy) > 1)) {
             this.scrollBy(0, dy)
         }
     }
@@ -987,7 +990,7 @@ export class Paginator extends HTMLElement {
         }
         // FIXME: vertical-rl only, not -lr
         if (this.scrolled && this.#vertical) offset = -offset
-        if ((reason === 'snap' || smooth) && this.hasAttribute('animated')) return animate(
+        if ((reason === 'snap' || smooth) && this.hasAttribute('animated') && !this.hasAttribute('eink')) return animate(
             this.containerPosition, offset, 300, easeOutQuad,
             x => this.containerPosition = x,
         ).then(() => {
