@@ -879,7 +879,7 @@ export class Paginator extends HTMLElement {
 
     snap(vx, vy) {
         const velocity = this.#vertical ? vy : vx
-        const horizontal = Math.abs(vx) > Math.abs(vy)
+        const horizontal = Math.abs(vx) * 2 > Math.abs(vy)
         const orthogonal = this.#vertical ? !horizontal : horizontal
         const [offset, a, b] = this.#scrollBounds
         const { start, end, pages, size } = this
@@ -888,7 +888,7 @@ export class Paginator extends HTMLElement {
         const d = velocity * (this.#rtl ? -size : size) * (orthogonal ? 1 : 0)
         const page = Math.floor(
             Math.max(min, Math.min(max, (start + end) / 2
-                + (isNaN(d) ? 0 : d))) / size)
+                + (isNaN(d) ? 0 : d * 2))) / size)
 
         this.#scrollToPage(page, 'snap').then(() => {
             const dir = page <= 0 ? -1 : page >= pages - 1 ? 1 : null
