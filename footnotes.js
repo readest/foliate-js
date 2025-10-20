@@ -71,6 +71,16 @@ export class FootnoteHandler extends EventTarget {
                         } else if (el.matches('li, aside')) {
                             range = doc.createRange()
                             range.selectNodeContents(el)
+                        } else if (el.matches('dt')) {
+                            range = doc.createRange()
+                            range.setStartBefore(el)
+                            let sibling = el.nextElementSibling
+                            let lastDD = null
+                            while (sibling && sibling.matches('dd')) {
+                                lastDD = sibling
+                                sibling = sibling.nextElementSibling
+                            }
+                            range.setEndAfter(lastDD || el)
                         } else if (el.closest('li')) {
                             range = doc.createRange()
                             range.selectNodeContents(el.closest('li'))

@@ -165,7 +165,7 @@ const setSelectionTo = (target, collapse) => {
         range.selectNode(target)
     }
     if (range) {
-        const sel = range.startContainer.ownerDocument.defaultView.getSelection()
+        const sel = range.startContainer.ownerDocument?.defaultView.getSelection()
         if (sel) {
             sel.removeAllRanges()
             if (collapse === -1) range.collapse(true)
