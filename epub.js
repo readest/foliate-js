@@ -294,9 +294,12 @@ const getMetadata = opf => {
     for (const [keys, val] of [].concat(
         dc.creator?.map(makeContributor)?.map(remapContributor('author')) ?? [],
         dc.contributor?.map(makeContributor)?.map(remapContributor('contributor')) ?? []))
-        for (const key of keys)
+        for (const key of keys) {
+            // if already parsed publisher don't remap it from author/contributor again
+            if (key === 'publisher' && metadata.publisher) continue
             if (metadata[key]) metadata[key].push(val)
             else metadata[key] = [val]
+        }
     tidy(metadata)
     if (metadata.altIdentifier === metadata.identifier)
         delete metadata.altIdentifier
