@@ -323,14 +323,14 @@ class View {
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': `${Math.trunc(columnWidth)}px`,
-            'column-gap': vertical ? `${(marginTop + marginBottom) / 2}px` : `${gap + marginRight / 2 + marginLeft / 2}px`,
+            'column-gap': vertical ? `${(marginTop + marginBottom) * 1.5}px` : `${gap + marginRight / 2 + marginLeft / 2}px`,
             'column-fill': 'auto',
             ...(vertical
                 ? { 'width': `${width}px` }
                 : { 'height': `${height}px` }),
             'padding': vertical
-                ? `${marginTop / 2}px ${marginRight}px ${marginBottom / 2}px ${marginLeft}px`
-                : `0px ${gap / 2 + marginRight / 2}px 0px ${gap / 2 + marginLeft / 2}px`,
+                ? `${marginTop * 1.5}px ${marginRight}px ${marginBottom * 1.5}px ${marginLeft}px`
+                : `${marginTop}px ${gap / 2 + marginRight / 2}px ${marginBottom}px ${gap / 2 + marginLeft / 2}px`,
             'overflow': 'hidden',
             // force wrap long words
             'overflow-wrap': 'break-word',
@@ -530,7 +530,7 @@ export class Paginator extends HTMLElement {
         }
         #container {
             grid-column: 2 / 5;
-            grid-row: 2;
+            grid-row: 1 / -1;
             overflow: hidden;
         }
         :host([flow="scrolled"]) #container {
@@ -722,9 +722,6 @@ export class Paginator extends HTMLElement {
                 parsedBackground[0] = themeBgColor
             }
             background = parsedBackground.join(' ')
-        }
-        if (/cover.*fixed|fixed.*cover/.test(background)) {
-            background = background.replace('cover', 'auto 100%').replace('fixed', '')
         }
         this.#background.innerHTML = ''
         this.#background.style.display = 'grid'
