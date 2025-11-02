@@ -787,7 +787,7 @@ export class Paginator extends HTMLElement {
             return { flow, marginTop, marginRight, marginBottom, marginLeft, gap: g * size, columnWidth }
         }
 
-        const divisor = Math.min(maxColumnCount, Math.ceil(size / maxInlineSize))
+        const divisor = Math.min(maxColumnCount + (vertical ? 1 : 0), Math.ceil(size / maxInlineSize))
         const columnWidth = vertical
             ? (size / divisor - (marginTop + marginBottom) / 2)
             : (size / divisor - gap - marginRight / 2 - marginLeft / 2)
