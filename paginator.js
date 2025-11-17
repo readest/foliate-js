@@ -305,6 +305,7 @@ class View {
                 ? `${marginTop}px ${gap}px ${marginBottom}px ${gap}px`
                 : `0px ${gap / 2 + marginRight}px 0px ${gap / 2 + marginLeft}px`,
             'column-width': 'auto',
+            '--available-width': `${Math.trunc(Math.min(window.innerWidth, columnWidth) - marginLeft - marginRight - gap - 60)}`,
             'height': 'auto',
             'width': 'auto',
         })
@@ -323,6 +324,7 @@ class View {
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': `${Math.trunc(columnWidth)}px`,
+            '--available-width': `${Math.trunc(columnWidth - marginLeft - marginRight - gap)}`,
             'column-gap': vertical ? `${(marginTop + marginBottom) * 1.5}px` : `${gap + marginRight / 2 + marginLeft / 2}px`,
             'column-fill': 'auto',
             ...(vertical
