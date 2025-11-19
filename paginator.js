@@ -305,9 +305,10 @@ class View {
                 ? `${marginTop}px ${gap}px ${marginBottom}px ${gap}px`
                 : `0px ${gap / 2 + marginRight}px 0px ${gap / 2 + marginLeft}px`,
             'column-width': 'auto',
-            '--available-width': `${Math.trunc(Math.min(window.innerWidth, columnWidth) - marginLeft - marginRight - gap - 60)}`,
             'height': 'auto',
             'width': 'auto',
+            '--available-width': `${Math.trunc(Math.min(window.innerWidth, columnWidth) - marginLeft - marginRight - gap - 60)}`,
+            '--available-height': `${Math.trunc(window.innerHeight - marginTop - marginBottom)}`,
         })
         setStylesImportant(doc.body, {
             [vertical ? 'max-height' : 'max-width']: `${columnWidth}px`,
@@ -324,7 +325,6 @@ class View {
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': `${Math.trunc(columnWidth)}px`,
-            '--available-width': `${Math.trunc(columnWidth - marginLeft - marginRight - gap)}`,
             'column-gap': vertical ? `${(marginTop + marginBottom) * 1.5}px` : `${gap + marginRight / 2 + marginLeft / 2}px`,
             'column-fill': 'auto',
             ...(vertical
@@ -342,6 +342,8 @@ class View {
             'min-height': 'none', 'min-width': 'none',
             // fix glyph clipping in WebKit
             '-webkit-line-box-contain': 'block glyphs replaced',
+            '--available-width': `${Math.trunc(columnWidth - marginLeft - marginRight - gap)}`,
+            '--available-height': `${Math.trunc(height - marginTop - marginBottom)}`,
         })
         setStylesImportant(doc.body, {
             'max-height': 'none',
