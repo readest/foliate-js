@@ -49,9 +49,114 @@ const render = async (page, doc, zoom) => {
     const endOfContent = document.createElement('div')
     endOfContent.className = 'endOfContent'
     container.append(endOfContent)
-    // TODO: this only works in Firefox; see https://github.com/mozilla/pdf.js/pull/17923
-    container.onpointerdown = () => container.classList.add('selecting')
-    container.onpointerup = () => container.classList.remove('selecting')
+
+    let isPanning = false
+    let startX = 0
+    let startY = 0
+    let scrollLeft = 0
+    let scrollTop = 0
+    let scrollParent = null
+
+    const findScrollableParent = (element) => {
+        let current = element
+        while (current) {
+            if (current !== document.body && current.nodeType === 1) {
+                const style = window.getComputedStyle(current)
+                const overflow = style.overflow + style.overflowY + style.overflowX
+                if (/(auto|scroll)/.test(overflow)) {
+                    if (current.scrollHeight > current.clientHeight ||
+                        current.scrollWidth > current.clientWidth) {
+                        return current
+                    }
+                }
+            }
+            if (current.parentElement) {
+                current = current.parentElement
+            } else if (current.parentNode && current.parentNode.host) {
+                current = current.parentNode.host
+            } else {
+                break
+            }
+        }
+        return window
+    }
+
+    container.onpointerdown = (e) => {
+        const selection = doc.getSelection()
+        const hasTextSelection = selection && selection.toString().length > 0
+
+        const elementUnderCursor = doc.elementFromPoint(e.clientX, e.clientY)
+        const hasTextUnderneath = elementUnderCursor &&
+                             (elementUnderCursor.tagName === 'SPAN' || elementUnderCursor.tagName === 'P') &&
+                             elementUnderCursor.textContent.trim().length > 0
+
+        if (!hasTextUnderneath && !hasTextSelection) {
+            isPanning = true
+            startX = e.screenX
+            startY = e.screenY
+
+            const iframe = doc.defaultView.frameElement
+            if (iframe) {
+                scrollParent = findScrollableParent(iframe)
+                if (scrollParent === window) {
+                    scrollLeft = window.scrollX || window.pageXOffset
+                    scrollTop = window.scrollY || window.pageYOffset
+                } else {
+                    scrollLeft = scrollParent.scrollLeft
+                    scrollTop = scrollParent.scrollTop
+                }
+                container.style.cursor = 'grabbing'
+                e.preventDefault()
+            }
+        } else {
+            container.classList.add('selecting')
+        }
+    }
+
+    container.onpointermove = (e) => {
+        if (isPanning && scrollParent) {
+            e.preventDefault()
+
+            const dx = e.screenX - startX
+            const dy = e.screenY - startY
+
+            if (scrollParent === window) {
+                window.scrollTo(scrollLeft - dx, scrollTop - dy)
+            } else {
+                scrollParent.scrollLeft = scrollLeft - dx
+                scrollParent.scrollTop = scrollTop - dy
+            }
+        }
+    }
+
+    container.onpointerup = () => {
+        if (isPanning) {
+            isPanning = false
+            scrollParent = null
+            container.style.cursor = 'grab'
+        } else {
+            container.classList.remove('selecting')
+        }
+    }
+
+    container.onpointerleave = () => {
+        if (isPanning) {
+            isPanning = false
+            scrollParent = null
+            container.style.cursor = 'grab'
+        }
+    }
+
+    doc.addEventListener('selectionchange', () => {
+        const selection = doc.getSelection()
+        if (selection && selection.toString().length > 0) {
+            container.style.cursor = 'text'
+        } else if (!isPanning) {
+            container.style.cursor = 'grab'
+        }
+    })
+
+    container.style.cursor = 'grab'
 
     const div = doc.querySelector('.annotationLayer')
     await new pdfjsLib.AnnotationLayer({ page, viewport, div }).render({
