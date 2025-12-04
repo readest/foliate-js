@@ -163,8 +163,8 @@ export class FixedLayout extends HTMLElement {
                 display: blank ? 'none' : 'block',
             })
             Object.assign(element.style, {
-                width: `${(width ?? blankWidth) * scale / this.#scaleFactor}px`,
-                height: `${(height ?? blankHeight) * scale / this.#scaleFactor}px`,
+                width: 'auto',
+                height: 'auto',
                 flexShrink: '0',
                 display: zoomedOut ? 'flex' : 'block',
                 marginBlock: zoomedOut ? undefined : 'auto',
@@ -173,6 +173,12 @@ export class FixedLayout extends HTMLElement {
             })
             if (portrait && frame !== target) {
                 element.style.display = 'none'
+            }
+            const iframeWidth = width * iframeScale
+            const containerWidth = element.clientWidth
+            if (containerWidth > 0) {
+                const scrollableContainer = element.parentNode.host
+                scrollableContainer.scrollLeft = (iframeWidth - containerWidth) / 2
             }
         }
         if (this.#center) {

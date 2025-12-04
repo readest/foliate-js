@@ -106,7 +106,6 @@ const render = async (page, doc, zoom) => {
                     scrollTop = scrollParent.scrollTop
                 }
                 container.style.cursor = 'grabbing'
-                e.preventDefault()
             }
         } else {
             container.classList.add('selecting')
