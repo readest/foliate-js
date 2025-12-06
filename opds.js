@@ -66,6 +66,13 @@ export const isOPDSCatalog = str => {
     return mediaType === MIME.ATOM && parameters.profile?.toLowerCase() === 'opds-catalog'
 }
 
+export const isOPDSSearch = str => {
+    const parsed = parseMediaType(str)
+    if (!parsed) return false
+    const { mediaType } = parsed
+    return mediaType === MIME.ATOM
+}
+
 // ignore the namespace if it doesn't appear in document at all
 const useNS = (doc, ns) =>
     doc.lookupNamespaceURI(null) === ns || doc.lookupPrefix(ns) ? ns : null
@@ -249,7 +256,7 @@ export const getOpenSearch = doc => {
     const children = Array.from(doc.documentElement.children)
 
     const $$urls = children.filter(filter('Url'))
-    const $url = $$urls.find(url => isOPDSCatalog(url.getAttribute('type'))) ?? $$urls[0]
+    const $url = $$urls.find(url => isOPDSSearch(url.getAttribute('type'))) ?? $$urls[0]
     if (!$url) throw new Error('document must contain at least one Url element')
 
     const regex = /{(?:([^}]+?):)?(.+?)(\?)?}/g
