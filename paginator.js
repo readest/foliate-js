@@ -302,8 +302,8 @@ class View {
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'padding': vertical
-                ? `${marginTop}px ${gap}px ${marginBottom}px ${gap}px`
-                : `0px ${gap / 2 + marginRight}px 0px ${gap / 2 + marginLeft}px`,
+                ? `${marginTop * 1.5}px ${marginRight}px ${marginBottom * 1.5}px ${marginLeft}px`
+                : `${marginTop}px ${gap / 2 + marginRight / 2}px ${marginBottom}px ${gap / 2 + marginLeft / 2}px`,
             'column-width': 'auto',
             'height': 'auto',
             'width': 'auto',
@@ -414,15 +414,13 @@ class View {
             const otherSide = this.#vertical ? 'height' : 'width'
             const contentSize = documentElement.getBoundingClientRect()[side]
             const expandedSize = contentSize
-            const { marginTop, marginRight, marginBottom, marginLeft } = this.#layout
-            const padding = this.#vertical ? `0 ${marginRight}px 0 ${marginLeft}px` : `${marginTop}px 0 ${marginBottom}px 0`
-            this.#element.style.padding = padding
+            this.#element.style.padding = '0'
             this.#iframe.style[side] = `${expandedSize}px`
             this.#element.style[side] = `${expandedSize}px`
             this.#iframe.style[otherSide] = '100%'
             this.#element.style[otherSide] = '100%'
             if (this.#overlayer) {
-                this.#overlayer.element.style.margin = padding
+                this.#overlayer.element.style.margin = '0'
                 this.#overlayer.element.style.left = '0'
                 this.#overlayer.element.style.top = '0'
                 this.#overlayer.element.style[side] = `${expandedSize}px`
@@ -533,7 +531,7 @@ export class Paginator extends HTMLElement {
             grid-row: 1 / -1;
         }
         #container {
-            grid-column: 2 / 5;
+            grid-column: 1 / -1;
             grid-row: 1 / -1;
             overflow: hidden;
         }
@@ -788,12 +786,12 @@ export class Paginator extends HTMLElement {
             this.#header.replaceChildren()
             this.#footer.replaceChildren()
 
-            return { flow, marginTop, marginRight, marginBottom, marginLeft, gap: g * size, columnWidth }
+            return { flow, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth }
         }
 
         const divisor = Math.min(maxColumnCount + (vertical ? 1 : 0), Math.ceil(size / maxInlineSize))
         const columnWidth = vertical
-            ? (size / divisor - (marginTop + marginBottom) / 2)
+            ? (size / divisor - marginTop * 1.5 - marginBottom * 1.5)
             : (size / divisor - gap - marginRight / 2 - marginLeft / 2)
         this.setAttribute('dir', rtl ? 'rtl' : 'ltr')
 
@@ -965,7 +963,7 @@ export class Paginator extends HTMLElement {
             return this.#vertical
                 ? ({ left, right }) =>
                     ({ left: size - right - marginTop, right: size - left - marginBottom })
-                : ({ top, bottom }) => ({ left: top + marginTop, right: bottom + marginBottom })
+                : ({ top, bottom }) => ({ left: top - marginTop, right: bottom - marginBottom })
         }
         const pxSize = this.pages * this.size
         return this.#rtl
@@ -977,7 +975,7 @@ export class Paginator extends HTMLElement {
     }
     async #scrollToRect(rect, reason) {
         if (this.scrolled) {
-            const offset = this.#getRectMapper()(rect).left - this.#marginTop
+            const offset = this.#getRectMapper()(rect).left - 4
             return this.#scrollTo(offset, reason)
         }
         const offset = this.#getRectMapper()(rect).left
@@ -1020,7 +1018,7 @@ export class Paginator extends HTMLElement {
             // when the start of the range is immediately after a hyphen in the
             // previous column, there is an extra zero width rect in that column
             const rect = Array.from(rects)
-                .find(r => r.width > 0 && r.height > 0) || rects[0]
+                .find(r => r.width > 0 && r.height > 0 && r.x >= 0 && r.y >= 0) || rects[0]
             if (!rect) return
             await this.#scrollToRect(rect, reason)
             // focus the element when navigating with keyboard or screen reader
