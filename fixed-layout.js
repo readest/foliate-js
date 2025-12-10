@@ -163,8 +163,8 @@ export class FixedLayout extends HTMLElement {
                 display: blank ? 'none' : 'block',
             })
             Object.assign(element.style, {
-                width: 'auto',
-                height: 'auto',
+                width: `${(width ?? blankWidth) * scale / this.#scaleFactor}px`,
+                height: `${(height ?? blankHeight) * scale / this.#scaleFactor}px`,
                 flexShrink: '0',
                 display: zoomedOut ? 'flex' : 'block',
                 marginBlock: zoomedOut ? undefined : 'auto',
