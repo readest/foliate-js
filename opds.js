@@ -256,7 +256,7 @@ export const getOpenSearch = doc => {
     const children = Array.from(doc.documentElement.children)
 
     const $$urls = children.filter(filter('Url'))
-    const $url = $$urls.find(url => isOPDSSearch(url.getAttribute('type'))) ?? $$urls[0]
+    const $url = $$urls.find(url => isOPDSCatalog(url.getAttribute('type'))) ?? $$urls.find(url => isOPDSSearch(url.getAttribute('type'))) ?? $$urls[0]
     if (!$url) throw new Error('document must contain at least one Url element')
 
     const regex = /{(?:([^}]+?):)?(.+?)(\?)?}/g
