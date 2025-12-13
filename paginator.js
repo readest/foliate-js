@@ -531,12 +531,12 @@ export class Paginator extends HTMLElement {
             grid-row: 1 / -1;
         }
         #container {
-            grid-column: 1 / -1;
+            grid-column: 2 / 5;
             grid-row: 1 / -1;
             overflow: hidden;
         }
         :host([flow="scrolled"]) #container {
-            grid-column: 1 / -1;
+            grid-column: 2 / 5;
             grid-row: 1 / -1;
             overflow: auto;
         }
