@@ -307,6 +307,10 @@ class View {
             'column-width': 'auto',
             'height': 'auto',
             'width': 'auto',
+            '--page-margin-top': `${vertical ? marginTop * 1.5 : marginTop}px`,
+            '--page-margin-right': `${vertical ? marginRight : marginRight + gap /2}px`,
+            '--page-margin-bottom': `${vertical ? marginBottom * 1.5 : marginBottom}px`,
+            '--page-margin-left': `${vertical ? marginLeft : marginLeft + gap / 2}px`,
             '--available-width': `${Math.trunc(Math.min(window.innerWidth, columnWidth) - marginLeft - marginRight - gap - 60)}`,
             '--available-height': `${Math.trunc(window.innerHeight - marginTop - marginBottom)}`,
         })
@@ -342,6 +346,10 @@ class View {
             'min-height': 'none', 'min-width': 'none',
             // fix glyph clipping in WebKit
             '-webkit-line-box-contain': 'block glyphs replaced',
+            '--page-margin-top': `${vertical ? marginTop * 1.5 : marginTop}px`,
+            '--page-margin-right': `${vertical ? marginRight : marginRight / 2 + gap /2}px`,
+            '--page-margin-bottom': `${vertical ? marginBottom * 1.5 : marginBottom}px`,
+            '--page-margin-left': `${vertical ? marginLeft : marginLeft / 2 + gap / 2}px`,
             '--available-width': `${Math.trunc(columnWidth - marginLeft - marginRight - gap)}`,
             '--available-height': `${Math.trunc(height - marginTop - marginBottom)}`,
         })
@@ -503,11 +511,11 @@ export class Paginator extends HTMLElement {
             --_max-height: var(--_max-block-size);
             display: grid;
             grid-template-columns:
-                minmax(var(--_half-margin-left), 1fr)
-                var(--_half-margin-left)
+                minmax(0, 1fr)
+                var(--_margin-left)
                 minmax(0, calc(var(--_max-width) - var(--_gap)))
-                var(--_half-margin-right)
-                minmax(var(--_half-margin-right), 1fr);
+                var(--_margin-right)
+                minmax(0, 1fr);
             grid-template-rows:
                 minmax(var(--_margin-top), 1fr)
                 minmax(0, var(--_max-height))
