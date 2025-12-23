@@ -797,7 +797,7 @@ export class Paginator extends HTMLElement {
             return { flow, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth }
         }
 
-        const divisor = Math.min(maxColumnCount + (vertical ? 1 : 0), Math.ceil(size / maxInlineSize))
+        const divisor = Math.min(maxColumnCount + (vertical ? 1 : 0), Math.ceil(Math.floor(size) / Math.floor(maxInlineSize)))
         const columnWidth = vertical
             ? (size / divisor - marginTop * 1.5 - marginBottom * 1.5)
             : (size / divisor - gap - marginRight / 2 - marginLeft / 2)
@@ -809,7 +809,7 @@ export class Paginator extends HTMLElement {
         this.#replaceBackground(background, this.columnCount)
 
         const marginalDivisor = vertical
-            ? Math.min(2, Math.ceil(width / maxInlineSize))
+            ? Math.min(2, Math.ceil(Math.floor(width) / Math.floor(maxInlineSize)))
             : divisor
         const marginalStyle = {
             gridTemplateColumns: `repeat(${marginalDivisor}, 1fr)`,
