@@ -995,10 +995,32 @@ export class EPUB {
         this.getSize = getSize
         this.#encryption = new Encryption(deobfuscators(sha1))
     }
+    #sanitizeXMLEntities(str) {
+        // Common HTML entities that aren't valid in XML
+        const entityMap = {
+            'nbsp': '&#160;',
+            'mdash': '&#8212;',
+            'ndash': '&#8211;',
+            'ldquo': '&#8220;',
+            'rdquo': '&#8221;',
+            'lsquo': '&#8216;',
+            'rsquo': '&#8217;',
+            'hellip': '&#8230;',
+            'copy': '&#169;',
+            'reg': '&#174;',
+            'trade': '&#8482;',
+            'bull': '&#8226;',
+            'middot': '&#183;',
+        }
+        return str.replace(/&([a-z]+);/gi, (match, entity) => {
+            return entityMap[entity.toLowerCase()] || match
+        })
+    }
     async #loadXML(uri) {
         const str = await this.loadText(uri)
         if (!str) return null
-        const doc = this.parser.parseFromString(str, MIME.XML)
+        const sanitized = this.#sanitizeXMLEntities(str)
+        const doc = this.parser.parseFromString(sanitized, MIME.XML)
         if (doc.querySelector('parsererror'))
             throw new Error(`XML parsing error: ${uri}
 ${doc.querySelector('parsererror').innerText}`)
