@@ -402,7 +402,8 @@ export class View extends HTMLElement {
                     return
                 }
                 const range = doc ? anchor(doc) : anchor
-                overlayer.add(value, range, Overlayer.bubble)
+                const draw = (func, opts) => overlayer.add(value, range, func, opts)
+                this.#emit('draw-annotation', { draw, annotation, doc, range })
             }
             return
         }
@@ -438,7 +439,10 @@ export class View extends HTMLElement {
 
         let lastHitTestTime = 0
         const THROTTLE_MS = 200
+        const isAndroid = /Android/i.test(navigator.userAgent)
+
         doc.addEventListener('mousemove', (e) => {
+            if (isAndroid) return
             const now = performance.now()
             if (now - lastHitTestTime < THROTTLE_MS) return
             lastHitTestTime = now

@@ -210,14 +210,15 @@ export class Overlayer {
         return g
     }
     static bubble(rects, options = {}) {
-        const { color = '#fbbf24', opacity = 0.85, size = 20, padding = 10 } = options
+        const { color = '#fbbf24', writingMode, opacity = 0.85, size = 20, padding = 10 } = options
+        const isVertical = writingMode === 'vertical-rl' || writingMode === 'vertical-lr'
         const g = createSVGElement('g')
         g.style.opacity = opacity
         if (rects.length === 0) return g
         rects.splice(1)
         const firstRect = rects[0]
-        const x = firstRect.right - size + padding
-        const y = firstRect.top - size + padding
+        const x = isVertical ? firstRect.right - size + padding : firstRect.right - size + padding
+        const y = isVertical ? firstRect.bottom - size + padding : firstRect.top - size + padding
         firstRect.top = y - padding
         firstRect.right = x + size + padding
         firstRect.bottom = y + size + padding
@@ -252,9 +253,9 @@ export class Overlayer {
         lineGroup.setAttribute('stroke', 'rgba(0, 0, 0, 0.3)')
         lineGroup.setAttribute('stroke-width', '1.5')
         lineGroup.setAttribute('stroke-linecap', 'round')
-        const lineY1 = y + s * 0.25
-        const lineY2 = y + s * 0.4
-        const lineY3 = y + s * 0.55
+        const lineY1 = y + s * 0.18
+        const lineY2 = y + s * 0.33
+        const lineY3 = y + s * 0.48
         const lineX1 = x + s * 0.2
         const lineX2 = x + s * 0.8
         const line1 = createSVGElement('line')
@@ -273,6 +274,14 @@ export class Overlayer {
         line3.setAttribute('x2', x + s * 0.6)
         line3.setAttribute('y2', lineY3)
         lineGroup.append(line1, line2, line3)
+
+        if (isVertical) {
+            const centerX = x + s / 2
+            const centerY = y + s / 2
+            bubble.setAttribute('transform', `rotate(90 ${centerX} ${centerY})`)
+            lineGroup.setAttribute('transform', `rotate(90 ${centerX} ${centerY})`)
+        }
+
         g.append(bubble)
         g.append(lineGroup)
         return g
