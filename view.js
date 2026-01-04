@@ -584,12 +584,26 @@ export class View extends HTMLElement {
     async * search(opts) {
         this.clearSearch()
         const { searchMatcher } = await import('./search.js')
-        const { query, index } = opts
+        const { sections } = this.book
+        const { query, index, results } = opts
         const matcher = searchMatcher(textWalker,
             { defaultLocale: this.language, ...opts })
-        const iter = index != null
-            ? this.#searchSection(matcher, query, index)
-            : this.#searchBook(matcher, query)
+
+        const iter = results?.length
+            ? (async function* () {
+                for (const result of results) {
+                    if (result.subitems) {
+                        const progress = (result.index + 1) / sections.length
+                        yield { progress }
+                        yield { index: result.index, subitems: result.subitems }
+                    } else {
+                        yield { cfi: result.cfi, excerpt: result.excerpt }
+                    }
+                }
+            })()
+            : index != null
+                ? this.#searchSection(matcher, query, index)
+                : this.#searchBook(matcher, query)
 
         const list = []
         this.#searchResults.set(index, list)
@@ -601,6 +615,7 @@ export class View extends HTMLElement {
                 this.#searchResults.set(result.index, list)
                 for (const item of list) this.addAnnotation(item)
                 yield {
+                    index: result.index,
                     label: this.#tocProgress.getProgress(result.index)?.label ?? '',
                     subitems: result.subitems,
                 }
