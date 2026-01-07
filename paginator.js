@@ -479,6 +479,7 @@ export class Paginator extends HTMLElement {
     #touchState
     #touchScrolled
     #lastVisibleRange
+    #scrollLocked = false
     constructor() {
         super()
         this.#root.innerHTML = `<style>
@@ -874,6 +875,9 @@ export class Paginator extends HTMLElement {
     set containerPosition(newVal) {
         this.#container[this.scrollProp] = newVal
     }
+    set scrollLocked(value) {
+        this.#scrollLocked = value
+    }
 
     scrollBy(dx, dy) {
         const delta = this.#vertical ? dy : dx
@@ -932,6 +936,7 @@ export class Paginator extends HTMLElement {
         const touch = e.changedTouches[0]
         const isStylus = touch.touchType === 'stylus'
         if (!isStylus) e.preventDefault()
+        if (this.#scrollLocked) return
         const x = touch.screenX, y = touch.screenY
         const dx = state.x - x, dy = state.y - y
         const dt = e.timeStamp - state.t

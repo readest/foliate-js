@@ -46,6 +46,7 @@ export class FixedLayout extends HTMLElement {
     #side
     #zoom
     #scaleFactor = 1.0
+    #scrollLocked = false
     constructor() {
         super()
 
@@ -285,6 +286,12 @@ export class FixedLayout extends HTMLElement {
         const section = spread?.center ?? (this.#side === 'left'
             ? spread.left ?? spread.right : spread.right ?? spread.left)
         return this.book.sections.indexOf(section)
+    }
+    get scrollLocked() {
+        return this.#scrollLocked
+    }
+    set scrollLocked(value) {
+        this.#scrollLocked = value
     }
     #reportLocation(reason) {
         this.dispatchEvent(new CustomEvent('relocate', { detail:
