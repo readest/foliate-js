@@ -31,25 +31,23 @@ const getSegmenter = (lang = 'en', granularity = 'word') => {
         let sum = 0
         const rawSegments = Array.from(segmenter.segment(str))
         const mergedSegments = []
-        for (let i = 0; i < rawSegments.length; i++) {
+        for (let i = 0, j = 0; i < rawSegments.length; i++) {
             const current = rawSegments[i]
-            const next = rawSegments[i + 1]
-            const segment = current.segment.trim()
-            const nextSegment = next?.segment?.trim()
-            const endsWithAbbr = /(?:^|\s)([A-Z][a-z]{1,5})\.$/.test(segment)
-            const nextStartsWithCapital = /^[A-Z]/.test(nextSegment || '')
-            if ((endsWithAbbr && nextStartsWithCapital) || segment.length <= 3) {
+            const segment = ' ' + current.segment
+            const endsWithAbbr = /\s([A-Z]{1,2}[a-z]{0,5}|[a-z]{1,3})\.\s*$/.test(segment)
+            if (!endsWithAbbr || i >= (rawSegments.length-1)) {
                 const mergedSegment = {
-                    index: current.index,
-                    segment: current.segment + (next?.segment || ''),
-                    isWordLike: true,
+                    index: rawSegments[j].index,
+                    segment: '',
+                    isWordLike: (i == j) ? current.isWordLike : true,
+                }
+                while (j <= i) {
+                    mergedSegment.segment += rawSegments[j++].segment
                 }
                 mergedSegments.push(mergedSegment)
-                i++
-            } else {
-                mergedSegments.push(current)
             }
         }
+
         for (const { index, segment, isWordLike } of mergedSegments) {
             if (granularityIsWord && !isWordLike) continue
             while (sum <= index) sum += strs[++strIndex].length
