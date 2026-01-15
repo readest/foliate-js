@@ -948,6 +948,7 @@ export class Paginator extends HTMLElement {
         state.dx += dx
         state.dy += dy
         this.#touchScrolled = true
+        if (!this.hasAttribute('animated') || this.hasAttribute('eink')) return
         if (!this.#vertical && Math.abs(state.dx) >= Math.abs(state.dy) && !this.hasAttribute('eink') && (!isStylus || Math.abs(dx) > 1)) {
             this.scrollBy(dx, 0)
         } else if (this.#vertical && Math.abs(state.dx) < Math.abs(state.dy) && !this.hasAttribute('eink') && (!isStylus || Math.abs(dy) > 1)) {
