@@ -47,6 +47,8 @@ export class FixedLayout extends HTMLElement {
     #zoom
     #scaleFactor = 1.0
     #scrollLocked = false
+    #isOverflowX = false
+    #isOverflowY = false
     constructor() {
         super()
 
@@ -56,9 +58,14 @@ export class FixedLayout extends HTMLElement {
             width: 100%;
             height: 100%;
             display: flex;
-            justify-content: center;
+            justify-content: flex-start;
             align-items: center;
             overflow: auto;
+        }
+        @supports (justify-content: safe center) {
+          :host {
+            justify-content: safe center;
+          }
         }`)
 
         this.#observer.observe(this)
@@ -150,7 +157,7 @@ export class FixedLayout extends HTMLElement {
             ) || 1
         scale *= this.#scaleFactor
 
-        const transform = frame => {
+        const transform = ({frame, styles}) => {
             let { element, iframe, width, height, blank, onZoom } = frame
             if (!iframe) return
             if (onZoom) onZoom({ doc: frame.iframe.contentDocument, scale })
@@ -164,29 +171,38 @@ export class FixedLayout extends HTMLElement {
                 display: blank ? 'none' : 'block',
             })
             Object.assign(element.style, {
-                width: `${(width ?? blankWidth) * scale / this.#scaleFactor}px`,
-                height: `${(height ?? blankHeight) * scale / this.#scaleFactor}px`,
+                width: `${(width ?? blankWidth) * scale}px`,
+                height: `${(height ?? blankHeight) * scale}px`,
                 flexShrink: '0',
                 display: zoomedOut ? 'flex' : 'block',
                 marginBlock: zoomedOut ? undefined : 'auto',
                 alignItems: zoomedOut ? 'center' : undefined,
                 justifyContent: zoomedOut ? 'center' : undefined,
+                ...styles,
             })
             if (portrait && frame !== target) {
                 element.style.display = 'none'
             }
-            const iframeWidth = width * iframeScale
-            const containerWidth = element.clientWidth
-            if (containerWidth > 0) {
-                const scrollableContainer = element.parentNode.host
-                scrollableContainer.scrollLeft = (iframeWidth - containerWidth) / 2
+
+            return {
+                width: element.clientWidth,
+                height: element.clientHeight,
+                containerWidth: element.parentNode.host.clientWidth,
+                containerHeight: element.parentNode.host.clientHeight,
             }
         }
         if (this.#center) {
-            transform(this.#center)
+            const dimensions = transform({frame: this.#center, styles: { marginInline: 'auto' }})
+            const {width, height, containerWidth, containerHeight} = dimensions
+            this.#isOverflowX = width > containerWidth
+            this.#isOverflowY = height > containerHeight
         } else {
-            transform(left)
-            transform(right)
+            const leftDimensions = transform({frame: left, styles: { marginInlineStart: 'auto' }})
+            const rightDimensions = transform({frame: right, styles: { marginInlineEnd: 'auto' }})
+            const {width: leftWidth, height: leftHeight, containerWidth, containerHeight} = leftDimensions
+            const {width: rightWidth, height: rightHeight} = rightDimensions
+            this.#isOverflowX = leftWidth + rightWidth > containerWidth
+            this.#isOverflowY = Math.max(leftHeight, rightHeight) > containerHeight
         }
     }
     async #showSpread({ left, right, center, side }) {
@@ -293,6 +309,12 @@ export class FixedLayout extends HTMLElement {
     set scrollLocked(value) {
         this.#scrollLocked = value
     }
+    get isOverflowX() {
+        return this.#isOverflowX
+    }
+    get isOverflowY() {
+        return this.#isOverflowY
+    }
     #reportLocation(reason) {
         this.dispatchEvent(new CustomEvent('relocate', { detail:
             { reason, range: null, index: this.index, fraction: 0, size: 1 } }))
@@ -348,6 +370,22 @@ export class FixedLayout extends HTMLElement {
     async prev() {
         const s = this.rtl ? this.#goRight() : this.#goLeft()
         if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
+    }
+    async pan(dx, dy) {
+        if (this.#scrollLocked) return
+        this.#scrollLocked = true
+
+        const transform = frame => {
+            let { element, iframe } = frame
+            if (!iframe || !element) return
+
+            const scrollableContainer = element.parentNode.host
+            scrollableContainer.scrollLeft += dx
+            scrollableContainer.scrollTop += dy
+        }
+
+        transform(this.#center ?? this.#right ?? {})
+        this.#scrollLocked = false
     }
     getContents() {
         return Array.from(this.#root.querySelectorAll('iframe'), frame => ({

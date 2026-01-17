@@ -872,6 +872,12 @@ export class Paginator extends HTMLElement {
     get containerPosition() {
         return this.#container[this.scrollProp]
     }
+    get isOverflowX() {
+        return false
+    }
+    get isOverflowY() {
+        return false
+    }
     set containerPosition(newVal) {
         this.#container[this.scrollProp] = newVal
     }
@@ -1197,6 +1203,12 @@ export class Paginator extends HTMLElement {
     }
     async next(distance) {
         return await this.#turnPage(1, distance)
+    }
+    async pan(dx, dy) {
+        if (this.#locked) return
+        this.#locked = true
+        this.scrollBy(dx, dy)
+        this.#locked = false
     }
     prevSection() {
         return this.goTo({ index: this.#adjacentIndex(-1) })

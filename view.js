@@ -558,6 +558,15 @@ export class View extends HTMLElement {
     async next(distance) {
         await this.renderer.next(distance)
     }
+    async pan(dx, dy) {
+        await this.renderer.pan(dx, dy)
+    }
+    isOverflowX() {
+        return this.renderer.isOverflowX
+    }
+    isOverflowY() {
+        return this.renderer.isOverflowY
+    }
     goLeft() {
         return this.book.dir === 'rtl' ? this.next() : this.prev()
     }
