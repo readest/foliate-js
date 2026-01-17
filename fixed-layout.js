@@ -184,11 +184,16 @@ export class FixedLayout extends HTMLElement {
                 element.style.display = 'none'
             }
 
+            const container= element.parentNode.host
+            const containerWidth = container.clientWidth
+            const containerHeight = container.clientHeight
+            container.scrollLeft = (element.clientWidth - containerWidth) / 2
+
             return {
                 width: element.clientWidth,
                 height: element.clientHeight,
-                containerWidth: element.parentNode.host.clientWidth,
-                containerHeight: element.parentNode.host.clientHeight,
+                containerWidth,
+                containerHeight,
             }
         }
         if (this.#center) {
