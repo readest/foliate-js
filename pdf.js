@@ -1,6 +1,6 @@
 const pdfjsPath = path => `/vendor/pdfjs/${path}`
 
-import '@pdfjs/pdf.mjs'
+import '@pdfjs/pdf.min.mjs'
 const pdfjsLib = globalThis.pdfjsLib
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.min.mjs')
 
@@ -10,10 +10,12 @@ let textLayerBuilderCSS = null
 let annotationLayerBuilderCSS = null
 
 const render = async (page, doc, zoom) => {
+    if (!doc) return
     const scale = zoom * devicePixelRatio
     doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
     doc.documentElement.style.transformOrigin = 'top left'
-    doc.documentElement.style.setProperty('--scale-factor', scale)
+    doc.documentElement.style.setProperty('--total-scale-factor', scale)
+    doc.documentElement.style.setProperty('--scale-round-x', '1px')
     const viewport = page.getViewport({ scale })
 
     // the canvas must be in the `PDFDocument`'s `ownerDocument`
@@ -158,13 +160,13 @@ const render = async (page, doc, zoom) => {
     container.style.cursor = 'grab'
 
     const div = doc.querySelector('.annotationLayer')
-    await new pdfjsLib.AnnotationLayer({ page, viewport, div }).render({
+    const linkService = {
+        goToDestination: () => {},
+        getDestinationHash: dest => JSON.stringify(dest),
+        addLinkAttributes: (link, url) => link.href = url,
+    }
+    await new pdfjsLib.AnnotationLayer({ page, viewport, div, linkService }).render({
         annotations: await page.getAnnotations(),
-        linkService: {
-            goToDestination: () => {},
-            getDestinationHash: dest => JSON.stringify(dest),
-            addLinkAttributes: (link, url) => link.href = url,
-        },
     })
 }
 
@@ -223,6 +225,7 @@ export const makePDF = async file => {
     }
     const pdf = await pdfjsLib.getDocument({
         range: transport,
+        wasmUrl: pdfjsPath(''),
         cMapUrl: pdfjsPath('cmaps/'),
         standardFontDataUrl: pdfjsPath('standard_fonts/'),
         isEvalSupported: false,
