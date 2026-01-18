@@ -15,7 +15,9 @@ const render = async (page, doc, zoom) => {
     doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
     doc.documentElement.style.transformOrigin = 'top left'
     doc.documentElement.style.setProperty('--total-scale-factor', scale)
+    doc.documentElement.style.setProperty('--user-unit', '1')
     doc.documentElement.style.setProperty('--scale-round-x', '1px')
+    doc.documentElement.style.setProperty('--scale-round-y', '1px')
     const viewport = page.getViewport({ scale })
 
     // the canvas must be in the `PDFDocument`'s `ownerDocument`
@@ -25,7 +27,9 @@ const render = async (page, doc, zoom) => {
     canvas.width = viewport.width
     const canvasContext = canvas.getContext('2d')
     await page.render({ canvasContext, viewport }).promise
-    doc.querySelector('#canvas').replaceChildren(doc.adoptNode(canvas))
+    const canvasElement = doc.querySelector('#canvas')
+    if (!canvasElement) return
+    canvasElement.replaceChildren(doc.adoptNode(canvas))
 
     const container = doc.querySelector('.textLayer')
     const textLayer = new pdfjsLib.TextLayer({
@@ -34,7 +38,7 @@ const render = async (page, doc, zoom) => {
     })
     await textLayer.render()
 
-    // hide "offscreen" canvases appended to docuemnt when rendering text layer
+    // hide "offscreen" canvases appended to document when rendering text layer
     // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/pdf_viewer.css#L51-L58
     for (const canvas of document.querySelectorAll('.hiddenCanvasElement'))
         Object.assign(canvas.style, {
