@@ -272,13 +272,17 @@ export const makeFB2 = async blob => {
     const urls = []
     const sectionData = bodyData[0][0]
         // make a separate section for each section in the first body
-        .map(({ el, ids }) => {
+        .map(({ el, ids }, id) => {
             // set up titles for TOC
             const titles = Array.from(
                 el.querySelectorAll(':scope > section > .title'),
                 (el, index) => {
                     el.setAttribute(dataID, index)
-                    return { title: getElementText(el), index }
+                    const section = el.closest('section')
+                    const size = new TextEncoder().encode(section.innerHTML).length
+                        - Array.from(section.querySelectorAll('[src]'))
+                            .reduce((sum, el) => sum + (el.getAttribute('src')?.length ?? 0), 0)
+                    return { title: getElementText(el), index, size, href: `${id}#${index}` }
                 })
             return { ids, titles, el }
         })
@@ -309,9 +313,9 @@ export const makeFB2 = async blob => {
 
     const idMap = new Map()
     book.sections = sectionData.map((section, index) => {
-        const { ids, load, createDocument, size, linear } = section
+        const { ids, load, createDocument, size, linear, titles } = section
         for (const id of ids) if (id) idMap.set(id, index)
-        return { id: index, load, createDocument, size, linear }
+        return { id: index, load, createDocument, size, linear, subitems: titles }
     })
 
     book.toc = sectionData.map(({ title, titles }, index) => {
