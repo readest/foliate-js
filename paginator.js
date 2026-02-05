@@ -313,6 +313,8 @@ class View {
             '--page-margin-left': `${vertical ? marginLeft : marginLeft + gap / 2}px`,
             '--available-width': `${Math.trunc(Math.min(window.innerWidth, columnWidth) - marginLeft - marginRight - gap - 60)}`,
             '--available-height': `${Math.trunc(window.innerHeight - marginTop - marginBottom)}`,
+            '--full-width': `${Math.trunc(window.innerWidth)}`,
+            '--full-height': `${Math.trunc(window.innerHeight)}`,
         })
         setStylesImportant(doc.body, {
             [vertical ? 'max-height' : 'max-width']: `${columnWidth}px`,
@@ -352,6 +354,8 @@ class View {
             '--page-margin-left': `${vertical ? marginLeft : marginLeft / 2 + gap / 2}px`,
             '--available-width': `${Math.trunc(columnWidth - marginLeft - marginRight - gap)}`,
             '--available-height': `${Math.trunc(height - marginTop - marginBottom)}`,
+            '--full-width': `${Math.trunc(window.innerWidth)}`,
+            '--full-height': `${Math.trunc(window.innerHeight)}`,
         })
         setStylesImportant(doc.body, {
             'max-height': 'none',
