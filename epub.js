@@ -1096,6 +1096,9 @@ ${doc.querySelector('parsererror').innerText}`)
         } catch(e) {
             console.warn(e)
         }
+
+        await this.#updateSubItems()
+
         this.landmarks ??= this.resources.guide
 
         const { metadata, rendition, media } = getMetadata(opf)
@@ -1114,6 +1117,209 @@ ${doc.querySelector('parsererror').innerText}`)
                     this.dir === 'rtl' ? 'left' : 'right'
         }
         return this
+    }
+
+    #groupTocSubitems(items) {
+        // Helper: Group subitems by section ID
+        const groupBySection = (subitems) => {
+            const grouped = new Map()
+            for (const subitem of subitems) {
+                const [sectionId] = this.splitTOCHref(subitem.href)
+                if (!grouped.has(sectionId)) grouped.set(sectionId, [])
+                grouped.get(sectionId).push(subitem)
+            }
+            return grouped
+        }
+
+        // Helper: Separate parent item from fragment items
+        const separateParentAndFragments = (sectionId, subitems) => {
+            let parent = null
+            const fragments = []
+
+            for (const subitem of subitems) {
+                const [, fragmentId] = this.splitTOCHref(subitem.href)
+                if (!fragmentId || subitem.href === sectionId) {
+                    parent = subitem
+                } else {
+                    fragments.push(subitem)
+                }
+            }
+
+            return { parent, fragments }
+        }
+
+        // Helper: Create grouped structure for multiple items in same section
+        const createGroupedItem = (sectionId, subitems) => {
+            const { parent, fragments } = separateParentAndFragments(sectionId, subitems)
+
+            // Use existing parent or create new one
+            const parentItem = parent ?? {
+                label: subitems[0].label || sectionId,
+                href: sectionId,
+            }
+
+            // Nest fragment items under parent
+            if (fragments.length > 0) {
+                parentItem.subitems = fragments
+            }
+
+            return parentItem
+        }
+
+        for (const item of items) {
+            if (!item.subitems?.length) continue
+
+            const groupedBySection = groupBySection(item.subitems)
+            const newSubitems = []
+
+            for (const [sectionId, subitems] of groupedBySection.entries()) {
+                const groupedItem = subitems.length === 1
+                    ? subitems[0]  // Single item, keep as-is
+                    : createGroupedItem(sectionId, subitems)  // Multiple items, group them
+
+                newSubitems.push(groupedItem)
+            }
+
+            item.subitems = newSubitems
+        }
+    }
+
+    // Helper: Find position of fragment ID in HTML string
+    #findFragmentPosition(html, fragmentId) {
+        if (!fragmentId) return html.length
+
+        const patterns = [
+            new RegExp(`\\sid=["']${CSS.escape(fragmentId)}["']`, 'i'),
+            new RegExp(`\\sname=["']${CSS.escape(fragmentId)}["']`, 'i'),
+        ]
+
+        for (const pattern of patterns) {
+            const match = html.match(pattern)
+            if (match) return match.index
+        }
+
+        return -1
+    }
+
+    // Helper: Flatten nested TOC structure into single array
+    #collectAllTocItems(tocItems) {
+        const allItems = []
+        const traverse = (items) => {
+            for (const item of items) {
+                allItems.push(item)
+                if (item.subitems?.length) traverse(item.subitems)
+            }
+        }
+        traverse(tocItems)
+        return allItems
+    }
+
+    // Helper: Group TOC items by section ID (base + fragments)
+    #groupItemsBySection(allItems) {
+        const sectionGroups = new Map()
+
+        for (const item of allItems) {
+            const [sectionId, fragmentId] = this.splitTOCHref(item.href)
+
+            if (!sectionGroups.has(sectionId)) {
+                sectionGroups.set(sectionId, { base: null, fragments: [] })
+            }
+
+            const group = sectionGroups.get(sectionId)
+            const isBase = !fragmentId || item.href === sectionId
+
+            if (isBase) group.base = item
+            else group.fragments.push(item)
+        }
+
+        return sectionGroups
+    }
+
+    // Helper: Calculate byte size of HTML between two fragments
+    #calculateFragmentSize(content, fragmentId, prevFragmentId) {
+        const endPos = this.#findFragmentPosition(content, fragmentId)
+        if (endPos < 0) return 0
+
+        const startPos = prevFragmentId
+            ? this.#findFragmentPosition(content, prevFragmentId)
+            : 0
+
+        const validStartPos = Math.max(0, startPos)
+        if (endPos < validStartPos) return 0
+
+        const htmlSubstring = content.substring(validStartPos, endPos)
+        return new Blob([htmlSubstring]).size
+    }
+
+    // Helper: Load and cache section HTML content
+    async #loadSectionContent(section, contentCache) {
+        const cached = contentCache.get(section.id)
+        if (cached) return cached
+
+        const content = await section.loadContent()
+        if (content) contentCache.set(section.id, content)
+
+        return content
+    }
+
+    // Helper: Create section subitems from fragments
+    #createSectionSubitems(fragments, base, content, section) {
+        const subitems = []
+        for (let i = 0; i < fragments.length; i++) {
+            const fragment = fragments[i]
+            const [, fragmentId] = this.splitTOCHref(fragment.href)
+
+            const prevFragment = i > 0 ? fragments[i - 1] : base
+            const [, prevFragmentId] = prevFragment
+                ? this.splitTOCHref(prevFragment.href)
+                : [null, null]
+
+            const size = this.#calculateFragmentSize(content, fragmentId, prevFragmentId)
+
+            subitems.push({
+                id: fragment.href,
+                href: fragment.href,
+                cfi: fragment.cfi,
+                size,
+                linear: section.linear,
+            })
+        }
+
+        return subitems
+    }
+
+    // Update section subitems from TOC structure
+    async #updateSubItems() {
+        if (!this.toc || !this.sections) return
+
+        // Step 1: Group TOC items by section
+        this.#groupTocSubitems(this.toc)
+
+        // Step 2: Prepare section lookup and content cache
+        const sectionMap = new Map(this.sections.map(s => [s.id, s]))
+        const contentCache = new Map()
+
+        // Step 3: Flatten TOC and group by section ID
+        const allTocItems = this.#collectAllTocItems(this.toc)
+        const sectionGroups = this.#groupItemsBySection(allTocItems)
+
+        // Step 4: Process each section and create subitems
+        for (const [sectionId, { base, fragments }] of sectionGroups.entries()) {
+            const section = sectionMap.get(sectionId)
+            if (!section || fragments.length === 0) continue
+
+            // Load HTML content for this section
+            const content = await this.#loadSectionContent(section, contentCache)
+            if (!content) continue
+
+            // Create subitems from fragments
+            const subitems = this.#createSectionSubitems(fragments, base, content, section)
+
+            // Assign to section
+            if (subitems.length > 0) {
+                section.subitems = subitems
+            }
+        }
     }
     async loadDocument(item) {
         const str = await this.loadText(item.href)
