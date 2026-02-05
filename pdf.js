@@ -214,11 +214,31 @@ const renderPage = async (page, getImageBlob) => {
     return { src, data, onZoom }
 }
 
-const makeTOCItem = item => ({
-    label: item.title,
-    href: item.dest ? JSON.stringify(item.dest) : '',
-    subitems: item.items.length ? item.items.map(makeTOCItem) : null,
-})
+const makeTOCItem = async (item, pdf) => {
+    let pageIndex = undefined
+
+    if (item.dest) {
+        try {
+            const dest = typeof item.dest === 'string'
+                ? await pdf.getDestination(item.dest)
+                : item.dest
+            if (dest?.[0]) {
+                pageIndex = await pdf.getPageIndex(dest[0])
+            }
+        } catch (e) {
+            console.warn('Failed to get page index for TOC item:', item.title, e)
+        }
+    }
+
+    return {
+        label: item.title,
+        href: item.dest ? JSON.stringify(item.dest) : '',
+        index: pageIndex,
+        subitems: item.items?.length
+            ? await Promise.all(item.items.map(i => makeTOCItem(i, pdf)))
+            : null,
+    }
+}
 
 export const makePDF = async file => {
     const transport = new pdfjsLib.PDFDataRangeTransport(file.size, [])
@@ -253,7 +273,7 @@ export const makePDF = async file => {
     }
 
     const outline = await pdf.getOutline()
-    book.toc = outline?.map(makeTOCItem)
+    book.toc = outline ? await Promise.all(outline.map(item => makeTOCItem(item, pdf))) : null
 
     const cache = new Map()
     book.sections = Array.from({ length: pdf.numPages }).map((_, i) => ({
