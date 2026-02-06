@@ -38,7 +38,7 @@ const getSegmenter = (lang = 'en', granularity = 'word') => {
             const nextSegment = next?.segment?.trim()
             const endsWithAbbr = /(?:^|\s)([A-Z][a-z]{1,5})\.$/.test(segment)
             const nextStartsWithCapital = /^[A-Z]/.test(nextSegment || '')
-            if (endsWithAbbr && nextStartsWithCapital) {
+            if ((endsWithAbbr && nextStartsWithCapital) || segment.length <= 3) {
                 const mergedSegment = {
                     index: current.index,
                     segment: current.segment + (next?.segment || ''),
