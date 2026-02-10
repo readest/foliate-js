@@ -185,18 +185,76 @@ export class Overlayer {
         return g
     }
     static highlight(rects, options = {}) {
-        const { color = 'red', padding = 0 } = options
+        const {
+            color = 'red',
+            padding = 0,
+            radius = 4,
+            radiusPadding = 2,
+            vertical = false,
+        } = options
+
         const g = createSVGElement('g')
         g.setAttribute('fill', color)
         g.style.opacity = 'var(--overlayer-highlight-opacity, .3)'
         g.style.mixBlendMode = 'var(--overlayer-highlight-blend-mode, normal)'
-        for (const { left, top, height, width } of rects) {
-            const el = createSVGElement('rect')
-            el.setAttribute('x', left - padding)
-            el.setAttribute('y', top - padding)
-            el.setAttribute('height', height + padding * 2)
-            el.setAttribute('width', width + padding * 2)
-            g.append(el)
+
+        for (const [index, { left, top, height, width }] of rects.entries()) {
+            const isFirst = index === 0
+            const isLast = index === rects.length - 1
+
+            let x, y, w, h
+
+            let radiusTopLeft, radiusTopRight, radiusBottomRight, radiusBottomLeft
+
+            if (vertical) {
+                x = left - padding
+                y = top - padding - (isFirst ? radiusPadding : 0)
+                w = width + padding * 2
+                h = height + padding * 2 + (isFirst ? radiusPadding : 0) + (isLast ? radiusPadding : 0)
+                radiusTopLeft = isFirst ? radius : 0
+                radiusTopRight = isFirst ? radius : 0
+                radiusBottomRight = isLast ? radius : 0
+                radiusBottomLeft = isLast ? radius : 0
+            } else {
+                x = left - padding - (isFirst ? radiusPadding : 0)
+                y = top - padding
+                w = width + padding * 2 + (isFirst ? radiusPadding : 0) + (isLast ? radiusPadding : 0)
+                h = height + padding * 2
+                radiusTopLeft = isFirst ? radius : 0
+                radiusTopRight = isLast ? radius : 0
+                radiusBottomRight = isLast ? radius : 0
+                radiusBottomLeft = isFirst ? radius : 0
+            }
+
+            const rtl = Math.min(radiusTopLeft, w / 2, h / 2)
+            const rtr = Math.min(radiusTopRight, w / 2, h / 2)
+            const rbr = Math.min(radiusBottomRight, w / 2, h / 2)
+            const rbl = Math.min(radiusBottomLeft, w / 2, h / 2)
+
+            if (rtl === 0 && rtr === 0 && rbr === 0 && rbl === 0) {
+                const el = createSVGElement('rect')
+                el.setAttribute('x', x)
+                el.setAttribute('y', y)
+                el.setAttribute('height', h)
+                el.setAttribute('width', w)
+                g.append(el)
+            } else {
+                const el = createSVGElement('path')
+                const d = `
+                M ${x + rtl} ${y}
+                L ${x + w - rtr} ${y}
+                ${rtr > 0 ? `Q ${x + w} ${y} ${x + w} ${y + rtr}` : `L ${x + w} ${y}`}
+                L ${x + w} ${y + h - rbr}
+                ${rbr > 0 ? `Q ${x + w} ${y + h} ${x + w - rbr} ${y + h}` : `L ${x + w} ${y + h}`}
+                L ${x + rbl} ${y + h}
+                ${rbl > 0 ? `Q ${x} ${y + h} ${x} ${y + h - rbl}` : `L ${x} ${y + h}`}
+                L ${x} ${y + rtl}
+                ${rtl > 0 ? `Q ${x} ${y} ${x + rtl} ${y}` : `L ${x} ${y}`}
+                Z
+            `.trim().replace(/\s+/g, ' ')
+                el.setAttribute('d', d)
+                g.append(el)
+            }
         }
         return g
     }
