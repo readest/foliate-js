@@ -202,6 +202,11 @@ const makeMarginals = (length, part) => Array.from({ length }, () => {
     return div
 })
 
+const setStyles = (el, styles) => {
+    const { style } = el
+    for (const [k, v] of Object.entries(styles)) style.setProperty(k, v)
+}
+
 const setStylesImportant = (el, styles) => {
     const { style } = el
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v, 'important')
@@ -307,14 +312,16 @@ class View {
             'column-width': 'auto',
             'height': 'auto',
             'width': 'auto',
+        })
+        setStyles(doc.documentElement, {
             '--page-margin-top': `${vertical ? marginTop * 1.5 : marginTop}px`,
             '--page-margin-right': `${vertical ? marginRight : marginRight + gap /2}px`,
             '--page-margin-bottom': `${vertical ? marginBottom * 1.5 : marginBottom}px`,
             '--page-margin-left': `${vertical ? marginLeft : marginLeft + gap / 2}px`,
-            '--available-width': `${Math.trunc(Math.min(window.innerWidth, columnWidth) - marginLeft - marginRight - gap - 60)}`,
-            '--available-height': `${Math.trunc(window.innerHeight - marginTop - marginBottom)}`,
             '--full-width': `${Math.trunc(window.innerWidth)}`,
             '--full-height': `${Math.trunc(window.innerHeight)}`,
+            '--available-width': `${Math.trunc(Math.min(window.innerWidth, columnWidth) - marginLeft - marginRight - gap - 60)}`,
+            '--available-height': `${Math.trunc(window.innerHeight - marginTop - marginBottom)}`,
         })
         setStylesImportant(doc.body, {
             [vertical ? 'max-height' : 'max-width']: `${columnWidth}px`,
@@ -348,14 +355,16 @@ class View {
             'min-height': 'none', 'min-width': 'none',
             // fix glyph clipping in WebKit
             '-webkit-line-box-contain': 'block glyphs replaced',
+        })
+        setStyles(doc.documentElement, {
             '--page-margin-top': `${vertical ? marginTop * 1.5 : marginTop}px`,
             '--page-margin-right': `${vertical ? marginRight : marginRight / 2 + gap /2}px`,
             '--page-margin-bottom': `${vertical ? marginBottom * 1.5 : marginBottom}px`,
             '--page-margin-left': `${vertical ? marginLeft : marginLeft / 2 + gap / 2}px`,
-            '--available-width': `${Math.trunc(columnWidth - marginLeft - marginRight - gap)}`,
-            '--available-height': `${Math.trunc(height - marginTop - marginBottom)}`,
             '--full-width': `${Math.trunc(window.innerWidth)}`,
             '--full-height': `${Math.trunc(window.innerHeight)}`,
+            '--available-width': `${Math.trunc(columnWidth - marginLeft - marginRight - gap)}`,
+            '--available-height': `${Math.trunc(height - marginTop - marginBottom)}`,
         })
         setStylesImportant(doc.body, {
             'max-height': 'none',
