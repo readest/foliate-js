@@ -1066,6 +1066,7 @@ ${doc.querySelector('parsererror').innerText}`)
                 id: item.href,
                 load: () => this.#loader.loadItem(item),
                 unload: () => this.#loader.unloadItem(item),
+                loadText: () => this.#loader.loadText(item.href),
                 loadContent: () => this.#loader.loadItemXHTMLContent(item),
                 createDocument: () => this.loadDocument(item),
                 size: this.getSize(item.href),
@@ -1256,7 +1257,7 @@ ${doc.querySelector('parsererror').innerText}`)
         const cached = contentCache.get(section.id)
         if (cached) return cached
 
-        const content = await section.loadContent()
+        const content = await section.loadText()
         if (content) contentCache.set(section.id, content)
 
         return content
