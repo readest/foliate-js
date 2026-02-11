@@ -457,6 +457,135 @@ class View {
     get overlayer() {
         return this.#overlayer
     }
+    #loupeEl = null
+    #loupeScaler = null
+    #loupeCursor = null
+    // Show a magnifier loupe inside the iframe document.
+    // winX/winY are in main-window (screen) coordinates.
+    showLoupe(winX, winY, { isVertical, color, radius }) {
+        const doc = this.document
+        if (!doc) return
+
+        const frameRect = this.#iframe.getBoundingClientRect()
+        // Cursor in iframe-viewport coordinates.
+        const vpX = winX - frameRect.left
+        const vpY = winY - frameRect.top
+
+        // Cursor in document coordinates (accounts for scroll).
+        const scrollX = doc.scrollingElement?.scrollLeft ?? 0
+        const scrollY = doc.scrollingElement?.scrollTop ?? 0
+        const docX = vpX + scrollX
+        const docY = vpY + scrollY
+
+        const MAGNIFICATION = 1.2
+        const diameter = radius * 2
+        const MARGIN = 8
+
+        // Position loupe above the cursor (or to the left for vertical text).
+        const loupeOffset = radius + 16
+        let loupeLeft = isVertical ? vpX - loupeOffset - diameter : vpX - radius
+        let loupeTop  = isVertical ? vpY - radius : vpY - loupeOffset - diameter
+        loupeLeft = Math.max(MARGIN, Math.min(loupeLeft, frameRect.width  - diameter - MARGIN))
+        loupeTop  = Math.max(MARGIN, Math.min(loupeTop,  frameRect.height - diameter - MARGIN))
+
+        // CSS-transform math: map document point (docX, docY) to loupe centre (radius, radius).
+        //   visual_pos = offset + coord × MAGNIFICATION = radius
+        //   ⟹ offset = radius − coord × MAGNIFICATION
+        const offsetX = radius - docX * MAGNIFICATION
+        const offsetY = radius - docY * MAGNIFICATION
+
+        // Build loupe DOM structure once; subsequent calls only update positions.
+        if (!this.#loupeEl || !this.#loupeEl.isConnected) {
+            this.#loupeEl = doc.createElement('div')
+
+            // Clone the live body once — inside the iframe the epub's CSS
+            // variables, @font-face fonts, and styles apply automatically.
+            const bodyClone = doc.body.cloneNode(true)
+
+            // Wrap the clone in a div that replicates documentElement's inline
+            // styles (column-width, column-gap, padding, height, etc.) so text
+            // flows with the same column layout as the original document.
+            const htmlWrapper = doc.createElement('div')
+            htmlWrapper.style.cssText = doc.documentElement.style.cssText
+            // expand() constrains documentElement's page-axis dimension to one
+            // page size (width for horizontal, height for vertical).  Override
+            // with the full scroll dimension so all columns are rendered.
+            if (this.#vertical)
+                htmlWrapper.style.height = `${doc.documentElement.scrollHeight}px`
+            else
+                htmlWrapper.style.width = `${doc.documentElement.scrollWidth}px`
+            htmlWrapper.appendChild(bodyClone)
+
+            this.#loupeScaler = doc.createElement('div')
+            this.#loupeScaler.appendChild(htmlWrapper)
+
+            const cursorLen = Math.round(diameter * 0.24)
+            this.#loupeCursor = doc.createElement('div')
+            this.#loupeCursor.style.cssText = isVertical
+                ? `position:absolute;left:calc(50% - ${cursorLen / 2}px);top:50%;`
+                + `margin-top:-1px;width:${cursorLen}px;height:2px;background:${color};pointer-events:none;z-index:1;box-sizing:border-box;`
+                : `position:absolute;left:50%;top:calc(50% - ${cursorLen / 2}px);`
+                + `margin-left:-1px;width:2px;height:${cursorLen}px;background:${color};pointer-events:none;z-index:1;box-sizing:border-box;`
+
+            this.#loupeEl.appendChild(this.#loupeScaler)
+            this.#loupeEl.appendChild(this.#loupeCursor)
+            doc.documentElement.appendChild(this.#loupeEl)
+
+            // Static loupe shell styles (set once).
+            this.#loupeEl.style.cssText = `
+                position: absolute;
+                width: ${diameter}px;
+                height: ${diameter}px;
+                border-radius: 50%;
+                overflow: hidden;
+                border: 2.5px solid ${color};
+                box-shadow: 0 6px 24px rgba(0,0,0,0.28);
+                background-color: var(--theme-bg-color);
+                z-index: 9999;
+                pointer-events: none;
+                user-select: none;
+                box-sizing: border-box;
+            `
+        }
+
+        // Update only the dynamic position values (fast path on every move).
+        this.#loupeScaler.style.cssText = `
+            position: absolute;
+            left: ${offsetX}px;
+            top: ${offsetY}px;
+            width: ${doc.documentElement.scrollWidth}px;
+            height: ${doc.documentElement.scrollHeight}px;
+            transform: scale(${MAGNIFICATION});
+            transform-origin: 0 0;
+            pointer-events: none;
+        `
+        this.#loupeEl.style.left = `${loupeLeft + scrollX}px`
+        this.#loupeEl.style.top = `${loupeTop + scrollY}px`
+
+        // Cut a circular hole in the overlayer so highlights don't paint
+        // over the loupe.
+        if (this.#overlayer) {
+            const overlayerRect = this.#overlayer.element.getBoundingClientRect()
+            const dx = frameRect.left - overlayerRect.left
+            const dy = frameRect.top - overlayerRect.top
+
+            const cx = loupeLeft + radius + dx
+            const cy = loupeTop + radius + dy
+            const maskRadius = radius + 3
+
+            this.#overlayer.setHole(cx, cy, maskRadius)
+        }
+    }
+    hideLoupe() {
+        if (this.#loupeEl) {
+            this.#loupeEl.remove()
+            this.#loupeEl = null
+            this.#loupeScaler = null
+            this.#loupeCursor = null
+        }
+        if (this.#overlayer)
+            this.#overlayer.clearHole()
+    }
     destroy() {
         if (this.document) this.#observer.unobserve(this.document.body)
     }
@@ -1266,6 +1395,12 @@ export class Paginator extends HTMLElement {
     }
     focusView() {
         this.#view.document.defaultView.focus()
+    }
+    showLoupe(winX, winY, { isVertical, color, radius }) {
+        this.#view?.showLoupe(winX, winY, { isVertical, color, radius })
+    }
+    hideLoupe() {
+        this.#view?.hideLoupe()
     }
     destroy() {
         this.#observer.unobserve(this)

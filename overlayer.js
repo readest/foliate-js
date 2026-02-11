@@ -5,6 +5,9 @@ export class Overlayer {
     #svg = createSVGElement('svg')
     #map = new Map()
     #doc = null
+    #clipPath = null
+    #clipPathPath = null
+
     constructor(doc) {
         this.#doc = doc
         Object.assign(this.#svg.style, {
@@ -12,7 +15,42 @@ export class Overlayer {
             width: '100%', height: '100%',
             pointerEvents: 'none',
         })
+
+        // Create a clipPath to cut a hole for the loupe.
+        // We use clip-rule="evenodd" with a large outer rect and inner circle
+        // to create the hole effect efficiently without mask compositing.
+        const defs = createSVGElement('defs')
+        this.#clipPath = createSVGElement('clipPath')
+        this.#clipPath.setAttribute('id', 'foliate-loupe-clip')
+        this.#clipPath.setAttribute('clipPathUnits', 'userSpaceOnUse')
+
+        this.#clipPathPath = createSVGElement('path')
+        this.#clipPathPath.setAttribute('clip-rule', 'evenodd')
+        this.#clipPathPath.setAttribute('fill-rule', 'evenodd') // for older renderers
+
+        this.#clipPath.append(this.#clipPathPath)
+        defs.append(this.#clipPath)
+        this.#svg.append(defs)
     }
+
+    setHole(x, y, r) {
+        // Define a path with a large outer rect and a circular hole
+        // "Infinite" outer rect coverage is safe for userSpaceOnUse
+        // (20,000px limit was too small for long scrolls; use 2,000,000px)
+        const outer = 'M -2000000 -2000000 H 4000000 V 4000000 H -2000000 Z'
+        const inner = `M ${x} ${y} m -${r} 0 a ${r} ${r} 0 1 0 ${2*r} 0 a ${r} ${r} 0 1 0 -${2*r} 0`
+        this.#clipPathPath.setAttribute('d', `${outer} ${inner}`)
+
+        this.#svg.setAttribute('clip-path', 'url(#foliate-loupe-clip)')
+        this.#svg.style.webkitClipPath = 'url(#foliate-loupe-clip)'
+    }
+
+    clearHole() {
+        this.#svg.removeAttribute('clip-path')
+        this.#svg.style.webkitClipPath = ''
+        this.#clipPathPath.removeAttribute('d')
+    }
+
     get element() {
         return this.#svg
     }
