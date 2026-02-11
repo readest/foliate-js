@@ -753,7 +753,7 @@ class Loader {
         const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#cache.set(href, url)
         this.#refCount.set(href, 1)
-        if (newType === MIME.XHTML) {
+        if (newType === MIME.XHTML || newType === MIME.HTML) {
             this.#cacheXHTMLContent.set(url, {href, type: newType, data: newData})
         }
         if (parent) {
