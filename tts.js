@@ -360,6 +360,12 @@ export class TTS {
             }
         return this.#speak(doc, ssml => this.#getMarkElement(ssml, mark))
     }
+    getLastRange() {
+        if (this.#lastMark) {
+            const range = this.#ranges.get(this.#lastMark)
+            if (range) return range.cloneRange()
+        }
+    }
     setMark(mark) {
         const range = this.#ranges.get(mark)
         if (range) {
