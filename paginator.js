@@ -622,9 +622,19 @@ export class Paginator extends HTMLElement {
     #touchScrolled
     #lastVisibleRange
     #scrollLocked = false
+    #isEPUB = false
+    #loadedStartIndex = -1
+    #loadedEndIndex = -1
+    #sectionStartByIndex = new Map()
+    #appendingTop = false
+    #appendingBottom = false
     constructor() {
         super()
         this.#root.innerHTML = `<style>
+        .epub-scrolled-view {
+            /*Hide scroll bar in scroll mode*/
+            /*scrollbar-color: color-mix(in oklch, oklch(0 0 0 / 0) 60%, #b7131300) transparent !important;*/
+        }
         :host {
             display: block;
             container-type: size;
@@ -739,12 +749,43 @@ export class Paginator extends HTMLElement {
 
         this.#observer.observe(this.#container)
         this.#container.addEventListener('scroll', () => this.dispatchEvent(new Event('scroll')))
-        this.#container.addEventListener('scroll', debounce(() => {
+
+        this.#container.addEventListener('scroll', debounce(async () => {
             if (this.scrolled) {
+                const threshold = 200 // 容差阈值
+                const { start, end, viewSize, page, pages } = this
+
                 if (this.#justAnchored) this.#justAnchored = false
                 else this.#afterScroll('scroll')
+
+                this.#syncIndexFromScrollPosition(start)
+
+                const atTop = start <= threshold
+                const atBottom = viewSize - end <= threshold
+
+                // console.debug('[paginator:scroll]', {
+                //     start,
+                //     end,
+                //     viewSize,
+                //     page,
+                //     pages,
+                //     atTop,
+                //     atBottom,
+                //     scrollProp: this.scrollProp,
+                //     containerPosition: this.containerPosition,
+                // })
+
+
+                if (atTop) {
+                    await this.#appendTop()
+                }
+                if (atBottom) {
+                    await this.#appendBottom()
+                }
+
+
             }
-        }, 250))
+        }, 150))
 
         const opts = { passive: false }
         this.addEventListener('touchstart', this.#onTouchStart.bind(this), opts)
@@ -812,6 +853,162 @@ export class Paginator extends HTMLElement {
         }
         this.#mediaQuery.addEventListener('change', this.#mediaQueryListener)
     }
+
+    #getScrollMetrics(scroller) {
+        const scrollProp = this.scrollProp
+        const scrollSizeProp = scrollProp === 'scrollTop' ? 'scrollHeight' : 'scrollWidth'
+        return {
+            scrollProp,
+            scrollSizeProp,
+            scrollPos: scroller[scrollProp],
+            scrollSize: scroller[scrollSizeProp],
+        }
+    }
+    async #compensatePrependScroll(scroller, { scrollProp, scrollSizeProp, scrollPos: prevScrollPos, scrollSize: prevScrollSize }) {
+        let totalAdded = 0
+        let sawGrowth = false
+        let stableFrames = 0
+
+        const syncToCurrentSize = () => {
+            const currentAdded = scroller[scrollSizeProp] - prevScrollSize
+            if (currentAdded !== totalAdded) {
+                totalAdded = currentAdded
+                scroller[scrollProp] = prevScrollPos + totalAdded
+                if (currentAdded !== 0) sawGrowth = true
+                return true
+            }
+            return false
+        }
+
+        // Synchronize once first to avoid obvious jitter in the first frame after prepend.
+        syncToCurrentSize()
+
+        for (let frame = 0; frame < 24; frame++) {
+            await new Promise(resolve => requestAnimationFrame(resolve))
+            if (syncToCurrentSize()) {
+                stableFrames = 0
+            } else if (sawGrowth) {
+                stableFrames++
+                if (stableFrames >= 2) break
+            }
+        }
+        return totalAdded
+    }
+    #shiftSectionStartOffsets(delta) {
+        if (!delta) return
+        for (const [index, offset] of this.#sectionStartByIndex.entries())
+            this.#sectionStartByIndex.set(index, offset + delta)
+    }
+    #syncIndexFromScrollPosition(position = this.start) {
+        const startIndex = this.#loadedStartIndex
+        const endIndex = this.#loadedEndIndex
+        if (startIndex < 0 || endIndex < startIndex) return
+
+        let matched = null
+        for (let index = startIndex; index <= endIndex; index++) {
+            const sectionStart = this.#sectionStartByIndex.get(index)
+            if (sectionStart == null) continue
+            const nextStart = this.#sectionStartByIndex.get(index + 1)
+            if (position >= sectionStart && (nextStart == null || position < nextStart)) {
+                matched = index
+                break
+            }
+        }
+
+        if (matched == null) {
+            const lastStart = this.#sectionStartByIndex.get(endIndex)
+            if (lastStart != null && position >= lastStart) matched = endIndex
+            else {
+                const firstStart = this.#sectionStartByIndex.get(startIndex)
+                if (firstStart != null && position < firstStart) matched = startIndex
+            }
+        }
+
+        if (matched != null && matched !== this.#index) this.#index = matched
+    }
+    #parseSectionFragment(data, doc) {
+        const parser = new DOMParser()
+        let parsed = parser.parseFromString(data, 'application/xhtml+xml')
+
+        if (parsed.getElementsByTagName('parsererror').length) {
+            parsed = parser.parseFromString(data, 'text/html')
+        }
+
+        const frag = doc.createDocumentFragment()
+        const body = parsed.body || parsed.getElementsByTagName('body')[0]
+        if (!body) return null
+        for (const node of Array.from(body.childNodes)) {
+            frag.appendChild(doc.importNode(node, true))
+        }
+        return frag
+    }
+    async #appendTop() {
+        const doc = this.#view?.document
+        if (!doc?.body) return
+
+        const scroller = this.#container ?? doc.scrollingElement ?? doc.documentElement
+        if (!scroller || this.#appendingTop) return
+
+        this.#appendingTop = true
+        try {
+            const currentStart = this.#loadedStartIndex >= 0 ? this.#loadedStartIndex : this.#index
+            const prevIndex = currentStart - 1
+            const section = this.sections[prevIndex]
+            if (!section) return
+
+            const data = await section.loadContent?.()
+            if (!data) return
+
+            const frag = this.#parseSectionFragment(data, doc)
+            if (!frag) return
+
+            const metrics = this.#getScrollMetrics(scroller)
+            doc.body.prepend(frag)
+            const addedSize = await this.#compensatePrependScroll(scroller, metrics)
+
+            this.#shiftSectionStartOffsets(addedSize)
+            this.#sectionStartByIndex.set(prevIndex, 0)
+            this.#loadedStartIndex = prevIndex
+            if (this.#loadedEndIndex < 0) this.#loadedEndIndex = prevIndex
+            this.#syncIndexFromScrollPosition(this.start)
+        } finally {
+            this.#appendingTop = false
+        }
+    }
+
+    async #appendBottom() {
+        const doc = this.#view?.document
+        if (!doc?.body) return
+
+        const scroller = this.#container ?? doc.scrollingElement ?? doc.documentElement
+        if (!scroller || this.#appendingBottom) return
+
+        this.#appendingBottom = true
+        try {
+            const currentEnd = this.#loadedEndIndex >= 0 ? this.#loadedEndIndex : this.#index
+            const nextIndex = currentEnd + 1
+            const section = this.sections[nextIndex]
+            if (!section) return
+
+            const data = await section.loadContent?.()
+            if (!data) return
+
+            const frag = this.#parseSectionFragment(data, doc)
+            if (!frag) return
+
+            const { scrollProp, scrollPos: prevScrollPos, scrollSize: prevScrollSize } = this.#getScrollMetrics(scroller)
+            doc.body.append(frag)
+            scroller[scrollProp] = prevScrollPos
+
+            this.#sectionStartByIndex.set(nextIndex, prevScrollSize)
+            this.#loadedEndIndex = nextIndex
+            if (this.#loadedStartIndex < 0) this.#loadedStartIndex = nextIndex
+            this.#syncIndexFromScrollPosition(this.start)
+        } finally {
+            this.#appendingBottom = false
+        }
+    }
+
     attributeChangedCallback(name, _, value) {
         switch (name) {
             case 'flow':
@@ -837,6 +1034,8 @@ export class Paginator extends HTMLElement {
     open(book) {
         this.bookDir = book.dir
         this.sections = book.sections
+        this.#isEPUB = typeof book?.splitTOCHref === 'function'
+            && typeof book?.getTOCFragment === 'function'
         book.transformTarget?.addEventListener('data', ({ detail }) => {
             if (detail.type !== 'text/css') return
             detail.data = Promise.resolve(detail.data).then(data => data
@@ -926,6 +1125,8 @@ export class Paginator extends HTMLElement {
         const gap = -g / (g - 1) * size
 
         const flow = this.getAttribute('flow')
+        this.#top.classList.toggle('epub-scrolled-view',
+            flow === 'scrolled' && this.#isEPUB)
         if (flow === 'scrolled') {
             // FIXME: vertical-rl only, not -lr
             this.setAttribute('dir', vertical ? 'rtl' : 'ltr')
@@ -1219,6 +1420,7 @@ export class Paginator extends HTMLElement {
             this.start - size, this.end - size, this.#getRectMapper())
     }
     #afterScroll(reason) {
+        if (this.scrolled) this.#syncIndexFromScrollPosition(this.start)
         const range = this.#getVisibleRange()
         this.#lastVisibleRange = range
         // don't set new anchor if relocation was to scroll to anchor
@@ -1242,6 +1444,10 @@ export class Paginator extends HTMLElement {
         this.#index = index
         const hasFocus = this.#view?.document?.hasFocus()
         if (src) {
+            this.#loadedStartIndex = index
+            this.#loadedEndIndex = index
+            this.#sectionStartByIndex.clear()
+            if (Number.isInteger(index)) this.#sectionStartByIndex.set(index, 0)
             const view = this.#createView()
             const afterLoad = doc => {
                 if (doc.head) {
@@ -1270,7 +1476,14 @@ export class Paginator extends HTMLElement {
     #canGoToIndex(index) {
         return index >= 0 && index <= this.sections.length - 1
     }
-    async #goTo({ index, anchor, select }) {
+    async #goTo({ index, anchor, select, preferSectionStartIfLoaded }) {
+        if (this.scrolled && preferSectionStartIfLoaded) {
+            const sectionStart = this.#sectionStartByIndex.get(index)
+            if (typeof sectionStart === 'number') {
+                await this.#scrollTo(sectionStart, 'navigation')
+                return
+            }
+        }
         if (index === this.#index) await this.#display({ index, anchor, select })
         else {
             const oldIndex = this.#index
