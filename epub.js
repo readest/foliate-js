@@ -1178,11 +1178,9 @@ ${doc.querySelector('parsererror').innerText}`)
             const newSubitems = []
 
             for (const [sectionId, subitems] of groupedBySection.entries()) {
-                const groupedItem = subitems.length === 1
-                    ? subitems[0]  // Single item, keep as-is
-                    : createGroupedItem(sectionId, subitems)  // Multiple items, group them
-
-                newSubitems.push(groupedItem)
+                for (const subitem of subitems) {
+                    newSubitems.push(subitem)
+                }
             }
 
             item.subitems = newSubitems
