@@ -1178,9 +1178,15 @@ ${doc.querySelector('parsererror').innerText}`)
             const newSubitems = []
 
             for (const [sectionId, subitems] of groupedBySection.entries()) {
-                for (const subitem of subitems) {
-                    newSubitems.push(subitem)
+                if (item.href === sectionId) {
+                    newSubitems.push(...subitems)
+                    continue
                 }
+                const groupedItem = subitems.length === 1
+                    ? subitems[0]  // Single item, keep as-is
+                    : createGroupedItem(sectionId, subitems)  // Multiple items, group them
+
+                newSubitems.push(groupedItem)
             }
 
             item.subitems = newSubitems
