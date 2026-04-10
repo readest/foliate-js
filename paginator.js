@@ -1404,9 +1404,8 @@ export class Paginator extends HTMLElement {
     scrollBy(dx, dy) {
         const delta = this.#vertical ? dy : dx
         const [offset, a, b] = this.#scrollBounds
-        const rtl = this.#rtl
-        const min = rtl ? offset - b : offset - a
-        const max = rtl ? offset + a : offset + b
+        const min = offset - a
+        const max = offset + b
         this.containerPosition = Math.max(min, Math.min(max,
             this.containerPosition + delta))
     }
@@ -1428,7 +1427,7 @@ export class Paginator extends HTMLElement {
         const max = Math.abs(offset) + b
         const snapping = this.hasAttribute('animated') && !this.hasAttribute('eink')
         const v =  snapping ? velocity : avgVelocity
-        const d = v * (this.#rtl ? -size : size) * (orthogonal ? 1 : 0)
+        const d = v * size * (orthogonal ? 1 : 0)
         const snapOffset = (isNaN(d) ? 0 : snapping ? d * 2 : d * 10)
         const page = Math.floor(Math.max(min, Math.min(max, (start + end) / 2 + snapOffset)) / size)
         const dir = page < 0 ? -1 : page >= pages ? 1 : null
@@ -1587,7 +1586,7 @@ export class Paginator extends HTMLElement {
         }
     }
     async #scrollToPage(page, reason, smooth) {
-        const offset = this.size * (this.#rtl ? -page : page)
+        const offset = this.size * page
         return this.#scrollTo(offset, reason, smooth)
     }
     async scrollToAnchor(anchor, select, smooth) {
