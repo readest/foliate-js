@@ -1156,7 +1156,10 @@ ${doc.querySelector('parsererror').innerText}`)
             console.warn(e)
         }
 
-        await this.#updateSubItems()
+        // Only the synchronous TOC tree restructuring runs eagerly; per-section
+        // XHTML loading is deferred to ensureSubItemsResolved() so init() does
+        // not block on loading every section for large books.
+        this.#prepareSubItems()
 
         this.landmarks ??= this.resources.guide
 
@@ -1344,34 +1347,40 @@ ${doc.querySelector('parsererror').innerText}`)
         return subitems
     }
 
-    // Update section subitems from TOC structure
-    async #updateSubItems() {
+    // Synchronous TOC tree restructuring. Pure href-based grouping, no I/O.
+    // Safe to run eagerly in init().
+    #prepareSubItems() {
+        if (!this.toc || !this.sections) return
+        this.#groupTocSubitems(this.toc)
+    }
+
+    // Lazy per-section subitem resolution. Loads and parses each TOC-referenced
+    // section's XHTML to annotate section.subitems with fragment anchors. For
+    // long books this is expensive, so it is deferred until a caller actually
+    // needs subitems (e.g. TOC sidebar, search). Idempotent via memoized promise.
+    #subItemsResolvedPromise = null
+    async ensureSubItemsResolved() {
+        if (this.#subItemsResolvedPromise) return this.#subItemsResolvedPromise
+        this.#subItemsResolvedPromise = this.#resolveSubItems()
+        return this.#subItemsResolvedPromise
+    }
+    async #resolveSubItems() {
         if (!this.toc || !this.sections) return
 
-        // Step 1: Group TOC items by section
-        this.#groupTocSubitems(this.toc)
-
-        // Step 2: Prepare section lookup and content cache
         const sectionMap = new Map(this.sections.map(s => [s.id, s]))
         const contentCache = new Map()
 
-        // Step 3: Flatten TOC and group by section ID
         const allTocItems = this.#collectAllTocItems(this.toc)
         const sectionGroups = this.#groupItemsBySection(allTocItems)
 
-        // Step 4: Process each section and create subitems
         for (const [sectionId, { base, fragments }] of sectionGroups.entries()) {
             const section = sectionMap.get(sectionId)
             if (!section || fragments.length === 0) continue
 
-            // Load HTML content for this section
             const content = await this.#loadSectionContent(section, contentCache)
             if (!content) continue
 
-            // Create subitems from fragments
             const subitems = this.#createSectionSubitems(fragments, base, content, section)
-
-            // Assign to section
             if (subitems.length > 0) {
                 section.subitems = subitems
             }
