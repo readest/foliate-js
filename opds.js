@@ -152,27 +152,33 @@ export const getPublication = entry => {
     }
     const links = children.filter(filter('link')).map(getLink)
     const linksByRel = groupByArray(links, link => link.rel)
+    const id = children.find(filter('id'))?.textContent
+    const updated = children.find(filter('updated'))?.textContent
+    const metadata = {
+        title: children.find(filter('title'))?.textContent ?? '',
+        author: children.filter(filter('author')).map(getPerson),
+        contributor: children.filter(filter('contributor')).map(getPerson),
+        publisher: children.find(filterDC('publisher'))?.textContent,
+        published: (children.find(filter('published'))
+            ?? children.find(filterDCTERMS('issued'))
+            ?? children.find(filterDC('date')))?.textContent,
+        language: children.find(filterDC('language'))?.textContent,
+        identifier: children.find(filterDC('identifier'))?.textContent,
+        subject: children.filter(filter('category')).map(category => ({
+            name: category.getAttribute('label'),
+            code: category.getAttribute('term'),
+            scheme: category.getAttribute('scheme'),
+        })),
+        rights: children.find(filter('rights'))?.textContent ?? '',
+        content: getContent(children.find(filter('content'))
+            ?? children.find(filter('summary'))),
+        [SYMBOL.CONTENT]: getContent(children.find(filter('content'))
+            ?? children.find(filter('summary'))),
+    }
+    if (id) metadata.id = id
+    if (updated) metadata.updated = updated
     return {
-        metadata: {
-            title: children.find(filter('title'))?.textContent ?? '',
-            author: children.filter(filter('author')).map(getPerson),
-            contributor: children.filter(filter('contributor')).map(getPerson),
-            publisher: children.find(filterDC('publisher'))?.textContent,
-            published: (children.find(filterDCTERMS('issued'))
-                ?? children.find(filterDC('date')))?.textContent,
-            language: children.find(filterDC('language'))?.textContent,
-            identifier: children.find(filterDC('identifier'))?.textContent,
-            subject: children.filter(filter('category')).map(category => ({
-                name: category.getAttribute('label'),
-                code: category.getAttribute('term'),
-                scheme: category.getAttribute('scheme'),
-            })),
-            rights: children.find(filter('rights'))?.textContent ?? '',
-            content: getContent(children.find(filter('content'))
-                ?? children.find(filter('summary'))),
-            [SYMBOL.CONTENT]: getContent(children.find(filter('content'))
-                ?? children.find(filter('summary'))),
-        },
+        metadata,
         links,
         images: REL.COVER.concat(REL.THUMBNAIL)
             .map(R => linksByRel.get(R)?.[0]).filter(x => x),
@@ -230,11 +236,16 @@ export const getFeed = doc => {
         }
         return result
     })
+    const feedId = children.find(filter('id'))?.textContent
+    const feedUpdated = children.find(filter('updated'))?.textContent
+    const feedMetadata = {
+        title: children.find(filter('title'))?.textContent,
+        subtitle: children.find(filter('subtitle'))?.textContent,
+    }
+    if (feedId) feedMetadata.id = feedId
+    if (feedUpdated) feedMetadata.updated = feedUpdated
     return {
-        metadata: {
-            title: children.find(filter('title'))?.textContent,
-            subtitle: children.find(filter('subtitle'))?.textContent,
-        },
+        metadata: feedMetadata,
         links,
         ...items,
         groups,
