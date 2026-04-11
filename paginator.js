@@ -1023,7 +1023,7 @@ export class Paginator extends HTMLElement {
                 const range = this.#lastVisibleRange
                 if (!range) return
                 const sel = doc.getSelection()
-                if (!sel.rangeCount) return
+                if (!sel || !sel.rangeCount) return
                 // FIXME: this won't work on Android WebView, disable for now
                 if (!isPointerSelecting && isPointerSelecting && sel.type === 'Range')
                     checkPointerSelection(range, sel)
