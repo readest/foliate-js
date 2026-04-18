@@ -55,7 +55,7 @@ const extractFootnote = (doc, anchor) => {
 
 export class FootnoteHandler extends EventTarget {
     detectFootnotes = true
-    #showFragment(book, { index, anchor }, href) {
+    #showFragment(book, { index, anchor, check }, href) {
         const view = document.createElement('foliate-view')
         return new Promise((resolve, reject) => {
             view.addEventListener('load', e => {
@@ -100,6 +100,13 @@ export class FootnoteHandler extends EventTarget {
                             } else {
                                 range.setEndAfter(el.parentNode.lastChild)
                             }
+                            if (check && el.children.length > 3) {
+                                reject(new Error('Failed to locate footnote content'))
+                                return
+                            }
+                        } else if (check) {
+                            reject(new Error('Failed to locate footnote content'))
+                            return
                         } else {
                             range = doc.createRange()
                             const hasContent = el.textContent?.trim() || el.children.length > 0
@@ -127,17 +134,17 @@ export class FootnoteHandler extends EventTarget {
         })
     }
     handle(book, e) {
-        const { a, href, follow } = e.detail
+        const { a, href, follow, check } = e.detail
         const { yes, maybe } = isFootnoteReference(a)
         if (yes || follow) {
             e.preventDefault()
             return Promise.resolve(book.resolveHref(href)).then(target =>
                 this.#showFragment(book, target, href))
         }
-        else if (this.detectFootnotes && maybe()) {
+        else if (this.detectFootnotes && (maybe() || check)) {
             e.preventDefault()
             return Promise.resolve(book.resolveHref(href)).then(({ index, anchor }) => {
-                const target = { index, anchor: doc => extractFootnote(doc, anchor) }
+                const target = { index, anchor: doc => extractFootnote(doc, anchor), check }
                 return this.#showFragment(book, target, href)
             })
         }
