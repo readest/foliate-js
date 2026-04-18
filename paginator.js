@@ -957,6 +957,8 @@ export class Paginator extends HTMLElement {
                         }
                     }
                 }
+            } else if (!this.scrolled) {
+              this.#afterScroll('container-scroll')
             }
         }, 250)
         this.#container.addEventListener('scroll', () => {
@@ -1127,7 +1129,24 @@ export class Paginator extends HTMLElement {
         const nextEntry = sorted[myPos + 1]
         if (nextEntry) this.#container.insertBefore(view.element, nextEntry[1].element)
         else this.#container.append(view.element)
+        this.#syncA11y()
         return view
+    }
+    // Hide non-primary views from accessibility tree so screen-reader
+    // swipe-next does not wander into pre-loaded adjacent sections
+    // (which would land several pages into the next section instead
+    // of its first paragraph). Uses `inert` (blocks focus/keyboard
+    // traversal) and `aria-hidden` (removes from accessibility tree).
+    #syncA11y() {
+        for (const [index, view] of this.#views) {
+            if (index === this.#primaryIndex) {
+                view.element.removeAttribute('inert')
+                view.element.removeAttribute('aria-hidden')
+            } else {
+                view.element.setAttribute('inert', '')
+                view.element.setAttribute('aria-hidden', 'true')
+            }
+        }
     }
     #destroyView(index) {
         const view = this.#views.get(index)
@@ -1697,6 +1716,7 @@ export class Paginator extends HTMLElement {
             if (visibleStart < offset + viewSize - 1) {
                 if (index !== this.#primaryIndex) {
                     this.#primaryIndex = index
+                    this.#syncA11y()
                     this.#trimDistantViews()
                     this.#replaceBackground()
                     this.#fillPromise = this.#preloadNext()
@@ -1773,6 +1793,7 @@ export class Paginator extends HTMLElement {
             const localColumn = localPage * this.columnCount
             detail.fraction = textPages > 0 ? Math.max(0, Math.min(1, localColumn / textPages)) : 0
             detail.size = textPages > 0 ? this.columnCount / textPages : 1
+            if (reason === 'container-scroll' && localPage === 0) return
         }
         // Update per-column backgrounds for the current scroll position
         if (!this.scrolled) this.#replaceBackground()
@@ -1783,6 +1804,7 @@ export class Paginator extends HTMLElement {
         this.#container.style.opacity = '0'
         const { index, src, data, anchor, onLoad, select } = await promise
         this.#primaryIndex = index
+        this.#syncA11y()
         const hasFocus = this.#primaryView?.document?.hasFocus()
         if (src) {
             const view = this.#createView(index)
@@ -1955,6 +1977,7 @@ export class Paginator extends HTMLElement {
             this.#container.style.opacity = '0'
             const hasFocus = this.#primaryView?.document?.hasFocus()
             this.#primaryIndex = index
+            this.#syncA11y()
             this.#trimDistantViews()
             // Handle short section alignment
             const primaryView = this.#primaryView
