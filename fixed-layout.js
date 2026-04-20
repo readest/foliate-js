@@ -235,7 +235,14 @@ export class FixedLayout extends HTMLElement {
             if (!iframe) return
             if (onZoom) {
                 const p = onZoom({ doc: frame.iframe.contentDocument, scale, pageColors: this.#pageColors })
-                if (p?.then) renderPromises.push(p)
+                if (p?.then) {
+                    // onZoom (e.g. pdf.js) may rebuild the text layer DOM,
+                    // invalidating Range objects stored in the overlayer. After
+                    // the rebuild, re-emit create-overlayer so listeners can
+                    // re-anchor annotations against the fresh DOM.
+                    const refreshed = p.then(() => this.#refreshOverlayerForFrame(frame))
+                    renderPromises.push(refreshed)
+                }
             }
             const iframeScale = onZoom ? scale : 1
             const zoomedOut = this.#scaleFactor < 1.0
@@ -1027,6 +1034,35 @@ export class FixedLayout extends HTMLElement {
         const idx = frame.iframe.dataset.sectionIndex != null
             ? parseInt(frame.iframe.dataset.sectionIndex) : undefined
         if (idx != null) this.#overlayers.delete(idx)
+    }
+    // Drop a frame's overlayer and re-emit create-overlayer so listeners can
+    // re-add annotations. Called after a text layer rebuild (e.g. pdf.js
+    // onZoom) which invalidates Range objects stored in the overlayer.
+    #refreshOverlayerForFrame(frame) {
+        if (!frame?.iframe) return
+        const index = frame.iframe.dataset.sectionIndex != null
+            ? parseInt(frame.iframe.dataset.sectionIndex) : undefined
+        if (index == null) return
+        const stale = this.#overlayers.get(index)
+        if (!stale) return
+        // Only refresh for frames currently visible; hidden frames keep their
+        // overlayer untouched until they are shown again.
+        const isVisible = frame.element?.parentNode
+            && frame.element.style.visibility !== 'hidden'
+        if (!isVisible) return
+        stale.element?.remove()
+        this.#overlayers.delete(index)
+        const doc = frame.iframe.contentDocument
+        if (!doc) return
+        this.dispatchEvent(new CustomEvent('create-overlayer', {
+            detail: {
+                doc, index,
+                attach: overlayer => {
+                    this.#overlayers.set(index, overlayer)
+                    frame.element.append(overlayer.element)
+                },
+            },
+        }))
     }
     async select(target) {
         await this.goTo(target)
