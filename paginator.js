@@ -801,6 +801,10 @@ export class Paginator extends HTMLElement {
     #fillPromise = null // tracks in-progress #fillVisibleArea for awaiting
     #stabilizing = false // true while #display is stabilizing layout
     #rendered = false // true after first #display completes
+    #lastLayout = null // cached layout from the last #beforeRender call
+    // Cache of section index → vertical (boolean). Populated as views
+    // are loaded so we can check direction *before* loading a section.
+    #directionCache = new Map()
     constructor() {
         super()
         this.#root.innerHTML = `<style>
@@ -955,10 +959,13 @@ export class Paginator extends HTMLElement {
                     const firstIndex = sorted[0]?.[0]
                     if (firstIndex != null) {
                         const prevIdx = this.#adjacentIndex(-1, firstIndex)
-                        if (prevIdx != null && !this.#views.has(prevIdx)) {
+                        if (prevIdx != null && !this.#views.has(prevIdx) && this.#isSameDirection(prevIdx)) {
                             this.#filling = true
                             this.#loadAdjacentSection(prevIdx)
-                                .finally(() => { this.#filling = false })
+                                .finally(() => {
+                                    this.#filling = false
+                                    this.dispatchEvent(new Event('stabilized'))
+                                })
                         }
                     }
                 }
@@ -979,10 +986,13 @@ export class Paginator extends HTMLElement {
                     const lastIndex = sorted[sorted.length - 1]?.[0]
                     if (lastIndex != null) {
                         const nextIdx = this.#adjacentIndex(1, lastIndex)
-                        if (nextIdx != null && !this.#views.has(nextIdx)) {
+                        if (nextIdx != null && !this.#views.has(nextIdx) && this.#isSameDirection(nextIdx)) {
                             this.#filling = true
                             this.#loadAdjacentSection(nextIdx)
-                                .finally(() => { this.#filling = false })
+                                .finally(() => {
+                                    this.#filling = false
+                                    this.dispatchEvent(new Event('stabilized'))
+                                })
                         }
                     }
                 }
@@ -1169,6 +1179,12 @@ export class Paginator extends HTMLElement {
             if (!keepIndices.has(index)) this.#destroyView(index)
         }
     }
+    // Check if a section has the same writing direction as current primary.
+    // Returns true if same or unknown (not yet cached).
+    #isSameDirection(index) {
+        if (!this.#directionCache.has(index)) return true
+        return this.#directionCache.get(index) === this.#vertical
+    }
     // Update the #background grid so each column shows the correct section's
     // background. Pass atPosition to pre-compute for a destination scroll
     // position (e.g. before an animation starts).
@@ -1255,6 +1271,15 @@ export class Paginator extends HTMLElement {
         }
     }
     #beforeRender({ vertical, rtl }) {
+        // If writing-mode is about to change, destroy all non-primary
+        // views BEFORE updating global state. This prevents stale views
+        // with the wrong direction from remaining in the container while
+        // flex-direction / scrollProp / sideProp flip.
+        if (this.#rendered && vertical !== this.#vertical) {
+            for (const [i] of this.#views) {
+                if (i !== this.#primaryIndex) this.#destroyView(i)
+            }
+        }
         this.#vertical = vertical
         this.#rtl = rtl
         this.#top.classList.toggle('vertical', vertical)
@@ -1308,7 +1333,9 @@ export class Paginator extends HTMLElement {
             this.columnCount = 1
             this.#replaceBackground()
 
-            return { width, height, flow, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: 1 }
+            const layout = { width, height, flow, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: 1 }
+            this.#lastLayout = layout
+            return layout
         }
 
         const divisor = Math.min(maxColumnCount + (vertical ? 1 : 0), Math.ceil(Math.floor(size) / Math.floor(maxInlineSize)))
@@ -1339,7 +1366,9 @@ export class Paginator extends HTMLElement {
         this.#header.replaceChildren(...heads)
         this.#footer.replaceChildren(...feet)
 
-        return { width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: divisor }
+        const layout = { width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: divisor }
+        this.#lastLayout = layout
+        return layout
     }
     render() {
         if (this.#views.size === 0) return
@@ -1766,6 +1795,8 @@ export class Paginator extends HTMLElement {
                 if (lastIndex == null) break
                 const nextIdx = this.#adjacentIndex(1, lastIndex)
                 if (nextIdx == null) break
+                // Stop preloading at writing-mode boundaries
+                if (!this.#isSameDirection(nextIdx)) break
                 await this.#loadAdjacentSection(nextIdx)
                 if (!this.#views.has(nextIdx)) break
             }
@@ -1775,6 +1806,7 @@ export class Paginator extends HTMLElement {
             await new Promise(r => requestAnimationFrame(r))
         } finally {
             this.#filling = false
+            this.dispatchEvent(new Event('stabilized'))
         }
     }
     #afterScroll(reason) {
@@ -1838,6 +1870,11 @@ export class Paginator extends HTMLElement {
             }
             const beforeRender = this.#beforeRender.bind(this)
             await view.load(src, data, afterLoad, beforeRender)
+            // Cache direction for future preload boundary checks
+            if (view.document) {
+                const dir = getDirection(view.document)
+                this.#directionCache.set(index, dir.vertical)
+            }
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
                     doc: view.document, index,
@@ -1857,7 +1894,7 @@ export class Paginator extends HTMLElement {
                 const firstIndex = sorted[0]?.[0]
                 if (firstIndex != null) {
                     const prevIdx = this.#adjacentIndex(-1, firstIndex)
-                    if (prevIdx != null) {
+                    if (prevIdx != null && this.#isSameDirection(prevIdx)) {
                         await this.#loadAdjacentSection(prevIdx)
                     }
                 }
@@ -1903,8 +1940,23 @@ export class Paginator extends HTMLElement {
                 this.setStyles(this.#styles)
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
             }
-            const beforeRender = this.#beforeRender.bind(this)
+            // Adjacent sections reuse the primary view's cached layout
+            // — they must NOT call #beforeRender, which would modify
+            // global state (direction, CSS classes, dir attribute, etc.).
+            const cachedLayout = this.#lastLayout
+            const beforeRender = () => cachedLayout
             await view.load(src, data, afterLoad, beforeRender)
+            // Cache direction for future preload boundary checks
+            if (view.document) {
+                const dir = getDirection(view.document)
+                this.#directionCache.set(index, dir.vertical)
+                // Destroy views with a different writing-mode immediately.
+                // Mixed-direction views corrupt scroll/page calculations.
+                if (dir.vertical !== this.#vertical) {
+                    this.#destroyView(index)
+                    return
+                }
+            }
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
                     doc: view.document, index,
@@ -1940,7 +1992,7 @@ export class Paginator extends HTMLElement {
                 const firstIndex = sorted[0]?.[0]
                 if (firstIndex != null && firstIndex >= this.#primaryIndex) {
                     const prevIdx = this.#adjacentIndex(-1, firstIndex)
-                    if (prevIdx != null) {
+                    if (prevIdx != null && this.#isSameDirection(prevIdx)) {
                         await this.#loadAdjacentSection(prevIdx)
                     }
                 }
@@ -1958,12 +2010,17 @@ export class Paginator extends HTMLElement {
                 if (lastIndex == null) break
                 const nextIdx = this.#adjacentIndex(1, lastIndex)
                 if (nextIdx == null) break
+                // Stop at writing-mode boundaries
+                if (!this.#isSameDirection(nextIdx)) break
                 await this.#loadAdjacentSection(nextIdx)
                 if (!this.#views.has(nextIdx)) break
             }
             if (reanchor) this.#scrollToAnchor(this.#anchor)
         } finally {
             this.#filling = false
+            // Emit stabilized so post-layout processing (e.g. warichu)
+            // runs for newly loaded adjacent sections.
+            this.dispatchEvent(new Event('stabilized'))
         }
     }
     // Trim views whose content is entirely more than 10 pages away
@@ -1986,7 +2043,23 @@ export class Paginator extends HTMLElement {
         return index >= 0 && index <= this.sections.length - 1
     }
     async #goTo({ index, anchor, select }) {
+        // Check if the target section has a different writing-mode.
+        // If direction changes, we must destroy all views and do a full
+        // rebuild via #display — mixed-direction views cannot coexist.
+        let directionChanged = false
         if (this.#views.has(index)) {
+            const view = this.#views.get(index)
+            if (view?.document) {
+                const { vertical } = getDirection(view.document)
+                directionChanged = vertical !== this.#vertical
+            }
+        } else if (this.#directionCache.has(index)) {
+            directionChanged = this.#directionCache.get(index) !== this.#vertical
+        }
+        // When direction is unknown (not cached), #beforeRender will
+        // detect and clean up stale views if a change actually occurs.
+
+        if (this.#views.has(index) && !directionChanged) {
             // View already loaded — reuse it without
             // clearing/reloading. Just change primary and scroll.
             this.#stabilizing = true
@@ -2024,16 +2097,21 @@ export class Paginator extends HTMLElement {
             this.#fillPromise = this.#fillVisibleArea()
             this.#fillPromise.then(() => { this.#stabilizing = false })
         } else {
-            // Keep already-loaded views near the target instead of
-            // clearing everything — avoids reloading sections that
-            // are still useful as adjacent views
-            const keep = new Set([index])
-            if (!this.noContinuousScroll) {
-                for (const [i] of this.#views) {
-                    if (Math.abs(i - index) <= 2) keep.add(i)
+            // When direction changes, clear ALL views — no reuse possible
+            // across writing-mode boundaries. When direction is unknown
+            // (not yet cached), keep nearby views; #beforeRender will
+            // clean up if the loaded section turns out to differ.
+            if (directionChanged) {
+                this.#destroyAllViews()
+            } else {
+                const keep = new Set([index])
+                if (!this.noContinuousScroll) {
+                    for (const [i] of this.#views) {
+                        if (Math.abs(i - index) <= 2) keep.add(i)
+                    }
                 }
+                this.#clearViewsExcept(keep)
             }
-            this.#clearViewsExcept(keep)
             const oldIndex = this.#primaryIndex
             const onLoad = detail => {
                 if (oldIndex >= 0 && !this.#views.has(oldIndex))
