@@ -498,14 +498,19 @@ class View {
                 'box-sizing': 'border-box',
             })
             if (pageFullscreen) {
+                setStylesImportant(doc.documentElement, {
+                    position: 'relative',
+                })
                 setStylesImportant(el, {
-                    position: 'fixed',
+                    position: 'absolute',
                     inset: '0',
+                    width: '100%',
+                    height: '100%',
+                    margin: '0',
                 })
                 let ancestor = el.parentElement
                 while (ancestor && ancestor !== doc.body) {
                     setStylesImportant(ancestor, {
-                        position: 'relative',
                         width: '100%',
                         height: '100%',
                         margin: '0',
