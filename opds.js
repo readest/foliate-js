@@ -122,7 +122,7 @@ const getPrice = link => {
     if (!prices.length) return
     const parsed = prices.reduce((acc, price) => {
         const value = parseFloat(price.textContent)
-        if (!isNaN(value)) {
+        if (!Number.isNaN(value)) {
             acc.push({
                 currency: price.getAttribute('currencycode') ?? undefined,
                 value,
@@ -178,7 +178,7 @@ const getLink = link => {
         type: link.getAttribute('type') ?? undefined,
         title: link.getAttribute('title') ?? undefined,
         // --- Facet Grouping ---
-        [FACET_GROUP]: link.getAttributeNS(NS.OPDS, 'facetGroup') || link.getAttribute('opds:facetGroup') ?? undefined,
+        [FACET_GROUP]: (link.getAttributeNS(NS.OPDS, 'facetGroup') || link.getAttribute('opds:facetGroup')) ?? undefined,
         properties: {
             price: (isAcquisition || isStream) ? getPrice(link) : undefined,
             indirectAcquisition: (isAcquisition || isStream) ? getIndirectAcquisition(link) : undefined,
