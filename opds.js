@@ -210,11 +210,15 @@ export const getPublication = entry => {
     const linksByRel = groupByArray(links, link => link.rel)
     return {
         metadata: {
+            id: children.find(filter('id'))?.textContent ?? undefined,
+            updated: children.find(filter('updated'))?.textContent ?? undefined,
             title: children.find(filter('title'))?.textContent ?? undefined,
             author: children.filter(filter('author')).map(getPerson),
             contributor: children.filter(filter('contributor')).map(getPerson),
             publisher: children.find(filterDC('publisher'))?.textContent ?? undefined,
-            published: (children.find(filterDCTERMS('issued')) ?? children.find(filterDC('date')))?.textContent ?? undefined,
+            published: (children.find(filter('published'))
+                ?? children.find(filterDCTERMS('issued'))
+                ?? children.find(filterDC('date')))?.textContent ?? undefined,
             language: children.find(filterDC('language'))?.textContent ?? undefined,
             identifier: children.find(filterDC('identifier'))?.textContent ?? undefined,
             subject: children.filter(filter('category')).map(category => ({
@@ -319,6 +323,8 @@ export const getFeed = doc => {
 
     return {
         metadata: {
+            id: children.find(filter('id'))?.textContent ?? undefined,
+            updated: children.find(filter('updated'))?.textContent ?? undefined,
             title: children.find(filter('title'))?.textContent ?? undefined,
             subtitle: children.find(filter('subtitle'))?.textContent ?? undefined,
             numberOfItems: totalResults != null ? Number(totalResults) : undefined,
