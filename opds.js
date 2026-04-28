@@ -266,13 +266,33 @@ export const getFeed = doc => {
                     children.find(filter('content'))) ?? undefined,
             })
 
+        // Flag the item with its resolved OPDS 2.0 type
+        item.__type = isPub ? 'publication' : 'navigation'
+
         const arr = groupedItems.get(groupLink?.href)
         if (arr) arr.push(item)
         else groupedItems.set(groupLink.href, [item])
     }
-    const [items, ...groups] = Array.from(groupedItems, ([key, items]) => {
-        const itemsKey = items[0]?.metadata ? 'publications' : 'navigation'
-        if (key === undefined) return { [itemsKey]: items }
+
+    const [items, ...groups] = Array.from(groupedItems, ([key, groupItems]) => {
+        // Separate publications and navigation items within the group
+        const publications = []
+        const navigation = []
+        for (const item of groupItems) {
+            if (item.__type === 'publication') {
+                delete item.__type
+                publications.push(item)
+            } else {
+                delete item.__type
+                navigation.push(item)
+            }
+        }
+
+        const groupContent = {}
+        if (publications.length) groupContent.publications = publications
+        if (navigation.length) groupContent.navigation = navigation
+
+        if (key === undefined) return groupContent
         const link = groupLinkMap.get(key)
         return {
             metadata: {
@@ -280,7 +300,7 @@ export const getFeed = doc => {
                 numberOfItems: link?.properties?.numberOfItems,
             },
             links: [{ rel: 'self', href: link?.href, type: link?.type }],
-            [itemsKey]: items,
+            ...groupContent,
         }
     })
 
@@ -308,7 +328,7 @@ export const getFeed = doc => {
         links,
         isComplete: !!children.find(filterFH('complete')) || undefined,
         isArchive: !!children.find(filterFH('archive')) || undefined,
-        ...items,
+        ...items, // contains top-level 'publications' and/or 'navigation' arrays
         groups: groups.length ? groups : undefined,
         facets: Array.from(
             groupByArray(linksByRel.get(REL.FACET) ?? [], link => link[FACET_GROUP]),
