@@ -1066,6 +1066,27 @@ export class Paginator extends HTMLElement {
     get primaryIndex() {
         return this.#primaryIndex
     }
+    setAttribute(name, value) {
+        // The scrolled-mode scroll handler is debounced, so #anchor and
+        // #primaryIndex can lag behind the user's actual viewport by up to
+        // ~250ms. Toggling out of scrolled mode within that window made
+        // render() restore the stale anchor — reverting the position to a
+        // previously visible section. Flush the pending scroll state here,
+        // before the attribute change so the layout is still in scrolled
+        // mode and `this.scrolled` (which reads the attribute) is still true.
+        if (name === 'flow'
+            && this.scrolled
+            && String(value) !== 'scrolled'
+            && this.#views.size > 0) {
+            this.#flushScrolledState()
+        }
+        super.setAttribute(name, value)
+    }
+    #flushScrolledState() {
+        if (this.#views.size > 1) this.#detectPrimaryView()
+        const result = this.#getVisibleRange()
+        if (result?.range && !result.range.collapsed) this.#anchor = result.range
+    }
     attributeChangedCallback(name, _, value) {
         switch (name) {
             case 'flow':
