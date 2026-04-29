@@ -336,7 +336,7 @@ class View {
                 // in scrolled mode the view expands to fit the image.
                 const bgUrl = this.docBackground
                     ?.match(/url\(["']?([^"')]+)["']?\)/)?.[1]
-                if (bgUrl) {
+                if (bgUrl && !this.container.noBackground) {
                     const img = new Image()
                     img.onload = () => {
                         this.#bgImageSize = {
@@ -390,14 +390,16 @@ class View {
         })
         const availableWidth = Math.trunc(width - marginLeft - marginRight)
         const availableHeight = Math.trunc(height - marginTop - marginBottom)
+        const sidePaddingLeft = marginLeft / 2 + gap / 2
+        const sidePaddingRight = marginRight / 2 + gap / 2
         setStyles(doc.documentElement, {
             'padding': vertical
                 ? `${marginTop * 1.5}px 0px ${marginBottom * 1.5}px 0px`
-                : `0px ${gap / 2 + marginRight / 2}px 0px ${gap / 2 + marginLeft / 2}px`,
+                : `0px ${sidePaddingRight}px 0px ${sidePaddingLeft}px`,
             '--page-margin-top': `${vertical ? marginTop * 1.5 : marginTop}px`,
-            '--page-margin-right': `${vertical ? marginRight : marginRight + gap /2}px`,
+            '--page-margin-right': `${vertical ? marginRight : sidePaddingRight}px`,
             '--page-margin-bottom': `${vertical ? marginBottom * 1.5 : marginBottom}px`,
-            '--page-margin-left': `${vertical ? marginLeft : marginLeft + gap / 2}px`,
+            '--page-margin-left': `${vertical ? marginLeft : sidePaddingLeft}px`,
             '--full-width': `${Math.trunc(window.innerWidth)}`,
             '--full-height': `${Math.trunc(window.innerHeight)}`,
             '--available-width': `${availableWidth}`,
@@ -419,10 +421,13 @@ class View {
         this.#columnCount = columnCount || 1
 
         const doc = this.document
+        const horizontalColumnGap = (marginLeft + marginRight) / 2 + gap
+        const sidePaddingLeft = marginLeft / 2 + gap / 2
+        const sidePaddingRight = marginRight / 2 + gap / 2
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': `${Math.trunc(columnWidth)}px`,
-            'column-gap': vertical ? `${(marginTop + marginBottom) * 1.5}px` : `${gap + marginRight / 2 + marginLeft / 2}px`,
+            'column-gap': vertical ? `${(marginTop + marginBottom) * 1.5}px` : `${horizontalColumnGap}px`,
             'column-fill': 'auto',
             ...(vertical
                 ? { 'width': `${width}px` }
@@ -446,11 +451,11 @@ class View {
         setStyles(doc.documentElement, {
             'padding': vertical
                 ? `${marginTop * 1.5}px ${marginRight}px ${marginBottom * 1.5}px ${marginLeft}px`
-                : `${marginTop}px ${gap / 2 + marginRight / 2}px ${marginBottom}px ${gap / 2 + marginLeft / 2}px`,
+                : `${marginTop}px ${sidePaddingRight}px ${marginBottom}px ${sidePaddingLeft}px`,
             '--page-margin-top': `${vertical ? marginTop * 1.5 : marginTop}px`,
-            '--page-margin-right': `${vertical ? marginRight : marginRight / 2 + gap /2}px`,
+            '--page-margin-right': `${vertical ? marginRight : sidePaddingRight}px`,
             '--page-margin-bottom': `${vertical ? marginBottom * 1.5 : marginBottom}px`,
-            '--page-margin-left': `${vertical ? marginLeft : marginLeft / 2 + gap / 2}px`,
+            '--page-margin-left': `${vertical ? marginLeft : sidePaddingLeft}px`,
             '--full-width': `${Math.trunc(window.innerWidth)}`,
             '--full-height': `${Math.trunc(window.innerHeight)}`,
             '--available-width': `${availableWidth}`,
@@ -769,7 +774,7 @@ export class Paginator extends HTMLElement {
     static observedAttributes = [
         'flow', 'gap', 'margin-top', 'margin-bottom', 'margin-left', 'margin-right',
         'max-inline-size', 'max-block-size', 'max-column-count',
-        'no-preload', 'no-continuous-scroll',
+        'no-preload', 'no-background', 'no-continuous-scroll',
     ]
     #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.render())
@@ -1196,6 +1201,7 @@ export class Paginator extends HTMLElement {
     #replaceBackground(atPosition) {
         const doc = this.#primaryView?.document
         if (!doc?.documentElement) return
+        if (this.noBackground) return
         const htmlStyle = doc.defaultView.getComputedStyle(doc.documentElement)
         const themeBgColor = htmlStyle.getPropertyValue('--theme-bg-color')
         const overrideColor = htmlStyle.getPropertyValue('--override-color') === 'true'
@@ -1386,6 +1392,9 @@ export class Paginator extends HTMLElement {
     }
     get noPreload() {
         return this.hasAttribute('no-preload')
+    }
+    get noBackground() {
+        return this.hasAttribute('no-background')
     }
     get noContinuousScroll() {
         return this.scrolled && this.hasAttribute('no-continuous-scroll')
