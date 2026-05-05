@@ -316,6 +316,35 @@ const makeTOCItem = async (item, pdf) => {
 
 const MAX_CACHED_PAGES = 8
 
+const CALIBRE_NS = 'http://calibre-ebook.com/xmp-namespace'
+const CALIBRE_SI_NS = 'http://calibre-ebook.com/xmp-namespace-series-index'
+const RDF_NS = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
+
+// Calibre writes series metadata into the XMP packet as
+// <calibre:series rdf:parseType="Resource">
+//   <rdf:value>Name</rdf:value>
+//   <calibreSI:series_index>1.00</calibreSI:series_index>
+// </calibre:series>
+const parseCalibreSeriesFromXMP = raw => {
+    if (!raw || typeof raw !== 'string') return null
+    let doc
+    try {
+        doc = new DOMParser().parseFromString(raw, 'application/xml')
+    } catch {
+        return null
+    }
+    if (!doc || doc.getElementsByTagName('parsererror').length) return null
+    const seriesEls = doc.getElementsByTagNameNS(CALIBRE_NS, 'series')
+    const seriesEl = seriesEls.item(0)
+    if (!seriesEl) return null
+    const valueEl = seriesEl.getElementsByTagNameNS(RDF_NS, 'value').item(0)
+    const name = valueEl?.textContent?.trim()
+    if (!name) return null
+    const indexEl = seriesEl.getElementsByTagNameNS(CALIBRE_SI_NS, 'series_index').item(0)
+    const position = indexEl?.textContent?.trim()
+    return position ? { name, position } : { name }
+}
+
 export const makePDF = async file => {
     const transport = new pdfjsLib.PDFDataRangeTransport(file.size, [])
     transport.requestDataRange = (begin, end) => {
@@ -353,6 +382,9 @@ export const makePDF = async file => {
         source: metadata?.get('dc:source'),
         rights: metadata?.get('dc:rights'),
     }
+
+    const calibreSeries = parseCalibreSeriesFromXMP(metadata?.getRaw?.())
+    if (calibreSeries) book.metadata.belongsTo = { series: calibreSeries }
 
     const outline = await pdf.getOutline()
     book.toc = outline ? await Promise.all(outline.map(item => makeTOCItem(item, pdf))) : null
