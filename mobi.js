@@ -643,6 +643,7 @@ export class MOBI extends PDB {
 
 const mbpPagebreakRegex = /<\s*(?:mbp:)?pagebreak[^>]*>/gi
 const fileposRegex = /<[^<>]+filepos=['"]{0,1}(\d+)[^<>]*>/gi
+const selfClosingRegex = /<(a|div|span|p)\s*\/>/gi
 
 const getIndent = el => {
     let x = 0
@@ -840,9 +841,14 @@ class MOBI6 {
         this.#textCache.set(section, str)
         return str
     }
+    #sanitize(str) {
+        // HTML5 ignores the `/` in `<tag/>` for non-void elements,
+        // leaving the tag unclosed. Rewrite the ones we've seen in MOBI.
+        return str.replace(selfClosingRegex, '<$1></$1>')
+    }
     async createDocument(section) {
         const str = await this.loadText(section)
-        return this.parser.parseFromString(str, this.#type)
+        return this.parser.parseFromString(this.#sanitize(str), this.#type)
     }
     async loadSection(section) {
         if (this.#cache.has(section)) return this.#cache.get(section)
