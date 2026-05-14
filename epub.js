@@ -1147,7 +1147,14 @@ ${doc.querySelector('parsererror').innerText}`)
         } catch(e) {
             console.warn(e)
         }
-        if (!this.toc && ncxPath) try {
+        // Some publishers ship an EPUB3 nav doc whose <li>s contain only
+        // plain text (no <a href>). parseNav returns a non-empty array, so
+        // the original check `if (!this.toc)` would skip the NCX fallback
+        // and the reader ends up with an unusable empty TOC. Detect this
+        // case by recursively checking whether any item has a real href.
+        const hasNavigableHref = items => Array.isArray(items) && items.some(
+            it => (it && (it.href || hasNavigableHref(it.subitems))))
+        if (!hasNavigableHref(this.toc) && ncxPath) try {
             const resolve = url => resolveURL(url, ncxPath)
             const ncx = parseNCX(await this.#loadXML(ncxPath), resolve)
             this.toc = ncx.toc
