@@ -204,7 +204,7 @@ function* getPDFSentenceBlocks(doc, textLayer) {
     }
 }
 
-function* getBlocks(doc) {
+function* getBlocks(doc, nodeFilter) {
     const root = doc.body
         ?? doc.querySelector('body')
         ?? doc.documentElement
@@ -217,9 +217,30 @@ function* getBlocks(doc) {
     }
 
     let last
+    let sawBlock = false
+    let sawSkipped = false
     const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT)
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    let node = walker.nextNode()
+    while (node) {
         const name = node.tagName.toLowerCase()
+        // A rejected block element (e.g. a footnote/endnote aside) must not be
+        // read: skip its whole subtree and end the preceding block before it
+        // so its text doesn't leak into the adjacent block. Inline rejects are
+        // left to the text walker in getFragmentWithMarks().
+        if (blockTags.has(name)
+                && nodeFilter?.(node) === NodeFilter.FILTER_REJECT) {
+            sawSkipped = true
+            if (last) {
+                last.setEndBefore(node)
+                if (!rangeIsEmpty(last)) yield last
+                last = null
+            }
+            const skipped = node
+            do node = walker.nextNode()
+            while (node && (skipped.compareDocumentPosition(node)
+                & Node.DOCUMENT_POSITION_CONTAINED_BY))
+            continue
+        }
         if (blockTags.has(name)) {
             if (last) {
                 last.setEndBefore(node)
@@ -227,14 +248,19 @@ function* getBlocks(doc) {
             }
             last = doc.createRange()
             last.setStart(node, 0)
+            sawBlock = true
         }
+        node = walker.nextNode()
     }
-    if (!last) {
+    if (last) {
+        last.setEndAfter(root.lastChild ?? root)
+        if (!rangeIsEmpty(last)) yield last
+    } else if (!sawBlock && !sawSkipped) {
         last = doc.createRange()
         last.setStart(root.firstChild ?? root, 0)
+        last.setEndAfter(root.lastChild ?? root)
+        if (!rangeIsEmpty(last)) yield last
     }
-    last.setEndAfter(root.lastChild ?? root)
-    if (!rangeIsEmpty(last)) yield last
 }
 
 class ListIterator {
@@ -305,7 +331,7 @@ export class TTS {
     constructor(doc, textWalker, nodeFilter, highlight, granularity) {
         this.doc = doc
         this.highlight = highlight
-        this.#list = new ListIterator(getBlocks(doc), range => {
+        this.#list = new ListIterator(getBlocks(doc, nodeFilter), range => {
             const { entries, ssml } = getFragmentWithMarks(range, textWalker, nodeFilter, granularity)
             this.#ranges = new Map(entries)
             return [ssml, range]
