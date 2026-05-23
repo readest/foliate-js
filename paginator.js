@@ -221,6 +221,18 @@ const setSelectionTo = (target, collapse) => {
     }
 }
 
+// Whether a view's bounding rect overlaps the visible region of its container.
+// Used by #syncA11y to mark only the pre-loaded views that lie outside the
+// viewport as `aria-hidden`. Views still visible to sighted users (e.g. the
+// right column in a dual-page spread that belongs to a different section
+// than the left column) stay exposed to assistive tech.
+// See readest/readest#4243 and readest/readest#4259.
+export const isViewVisibleInContainer = (viewRect, containerRect) =>
+    viewRect.right > containerRect.left
+    && viewRect.left < containerRect.right
+    && viewRect.bottom > containerRect.top
+    && viewRect.top < containerRect.bottom
+
 export const getDirection = doc => {
     const { defaultView } = doc
     let { writingMode, direction } = defaultView.getComputedStyle(doc.body)
@@ -1176,20 +1188,26 @@ export class Paginator extends HTMLElement {
         this.#syncA11y()
         return view
     }
-    // Hide non-primary views from accessibility tree so screen-reader
-    // swipe-next does not wander into pre-loaded adjacent sections
-    // (which would land several pages into the next section instead
-    // of its first paragraph). Uses `inert` (blocks focus/keyboard
-    // traversal) and `aria-hidden` (removes from accessibility tree).
+    // Hide off-screen pre-loaded views from the accessibility tree so
+    // screen-reader swipe-next does not wander into them (which would land
+    // several pages into the next section instead of its first paragraph).
+    //
+    // Only `aria-hidden` is used — `inert` would also block pointer events
+    // and text selection, which breaks visible non-primary views such as
+    // the right column of a dual-page spread when each column belongs to
+    // a different section (readest/readest#4243, readest/readest#4259).
+    //
+    // Visible non-primary views stay exposed to assistive tech because a
+    // sighted user can read them on the same spread.
     #syncA11y() {
+        const containerRect = this.#container.getBoundingClientRect()
         for (const [index, view] of this.#views) {
-            if (index === this.#primaryIndex) {
-                view.element.removeAttribute('inert')
-                view.element.removeAttribute('aria-hidden')
-            } else {
-                view.element.setAttribute('inert', '')
-                view.element.setAttribute('aria-hidden', 'true')
-            }
+            const isPrimary = index === this.#primaryIndex
+            const isVisible = isPrimary
+                || isViewVisibleInContainer(
+                    view.element.getBoundingClientRect(), containerRect)
+            if (isVisible) view.element.removeAttribute('aria-hidden')
+            else view.element.setAttribute('aria-hidden', 'true')
         }
     }
     #destroyView(index) {
@@ -1863,6 +1881,12 @@ export class Paginator extends HTMLElement {
         // In multi-view, detect which section is primary
         if (this.#views.size > 1 && reason !== 'anchor' && reason !== 'navigation') {
             this.#detectPrimaryView()
+            // Scrolling can bring a previously off-screen view into the
+            // viewport (e.g. the next section's first column joining the
+            // current section's last column in a dual-page spread) without
+            // changing which view is primary. Re-sync a11y attributes so
+            // a newly visible view stops being aria-hidden.
+            this.#syncA11y()
         }
         const { range, index: visibleIndex } = this.#getVisibleRange() || {}
         if (!range) return
