@@ -2,6 +2,7 @@
 // Spec: https://anansi-project.github.io/docs/comicinfo/intro
 const readComicInfoXML = async ({ entries, loadBlob }) => {
     const entry = entries.find(e => e.filename.toLowerCase() === 'comicinfo.xml')
+        ?? entries.find(e => e.filename.split('/').pop()?.toLowerCase() === 'comicinfo.xml')
     if (!entry) return null
     let text
     try {
@@ -17,11 +18,33 @@ const readComicInfoXML = async ({ entries, loadBlob }) => {
     }
     if (!doc || doc.getElementsByTagName('parsererror').length) return null
     const get = name => doc.getElementsByTagName(name).item(0)?.textContent?.trim() || undefined
+    const getPositiveInteger = name => {
+        const value = Number.parseInt(get(name), 10)
+        return Number.isFinite(value) && value > 0 ? value : undefined
+    }
+    const getSubjects = () => [...new Set([get('Genre'), get('Tags')]
+        .flatMap(value => value?.split(/[,;|]/).map(x => x.trim()).filter(Boolean) ?? []))]
+    const getPublished = () => {
+        const year = getPositiveInteger('Year')
+        if (!year) return undefined
+        const month = getPositiveInteger('Month')
+        const day = getPositiveInteger('Day')
+        const yyyy = String(year).padStart(4, '0')
+        if (!month || month > 12) return yyyy
+        const yyyyMm = `${yyyy}-${String(month).padStart(2, '0')}`
+        if (!day || day > 31) return yyyyMm
+        return `${yyyyMm}-${String(day).padStart(2, '0')}`
+    }
+    const subjects = getSubjects()
     return {
         title: get('Title'),
         publisher: get('Publisher'),
         language: get('LanguageISO'),
         author: get('Writer'),
+        published: getPublished(),
+        description: get('Summary'),
+        subject: subjects.length ? subjects : undefined,
+        identifier: get('Web'),
         series: get('Series'),
         seriesPosition: get('Number'),
         seriesTotal: get('Count'),
@@ -87,6 +110,9 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
         language: merged.language,
         author: merged.author,
         published: merged.published,
+        description: merged.description,
+        subject: merged.subject,
+        identifier: merged.identifier,
     }
     if (merged.series) {
         const series = { name: merged.series }
