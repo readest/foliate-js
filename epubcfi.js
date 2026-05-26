@@ -185,9 +185,13 @@ export const compare = (a, b) => {
     return 0
 }
 
-const isTextNode = ({ nodeType }) => nodeType === 3 || nodeType === 4
-const isElementNode = ({ nodeType }) => nodeType === 1
-const isInertNode = (node) => node.hasAttribute?.('cfi-inert')
+// Defensive: any of these may be called with null / undefined / string
+// sentinels ('first', 'last', 'before', 'after') that indexChildNodes mixes
+// into its result array. The original implementation destructured nodeType
+// blindly and crashed.
+const isTextNode = (n) => !!n && (n.nodeType === 3 || n.nodeType === 4)
+const isElementNode = (n) => !!n && n.nodeType === 1
+const isInertNode = (node) => node?.hasAttribute?.('cfi-inert')
 
 const getChildNodes = (node, filter) => {
     const nodes = Array.from(node.childNodes)
@@ -225,9 +229,15 @@ const indexChildNodes = (node, filter) => {
             return arr
         }, [])
     // "the first chunk is located before the first child element"
-    if (isElementNode(nodes[0])) nodes.unshift('first')
+    // Guard against an empty result (e.g. parentNode contains only comments /
+    // processing instructions, or every child was filtered out). Without the
+    // null check, isElementNode destructures `undefined.nodeType` and crashes
+    // the relocate callback, which in turn aborts CFI persistence and breaks
+    // the reader after a touch/scroll on certain slice boundaries.
+    if (nodes[0] && isElementNode(nodes[0])) nodes.unshift('first')
     // "the last chunk is located after the last child element"
-    if (isElementNode(nodes[nodes.length - 1])) nodes.push('last')
+    const last = nodes[nodes.length - 1]
+    if (last && isElementNode(last)) nodes.push('last')
     // "'virtual' elements"
     nodes.unshift('before') // "0 is a valid index"
     nodes.push('after') // "n+2 is a valid index"
@@ -261,6 +271,11 @@ const partsToNode = (node, parts, filter) => {
 }
 
 const nodeToParts = (node, offset, filter) => {
+    // Defensive: range may have a detached or null start/end container
+    // (e.g. when a slice document failed to parse cleanly, or the view was
+    // swapped out between scroll and CFI computation). Without this guard,
+    // destructuring undefined.parentNode crashes the whole reader.
+    if (!node || !node.parentNode) return []
     const { parentNode, id } = node
     const indexed = indexChildNodes(parentNode, filter)
     const index = indexed.findIndex(x =>
@@ -278,7 +293,8 @@ const nodeToParts = (node, offset, filter) => {
         offset = sum
     }
     const part = { id, index, offset }
-    return (parentNode !== node.ownerDocument.documentElement
+    const docEl = node.ownerDocument?.documentElement
+    return (parentNode !== docEl && parentNode?.parentNode
         ? nodeToParts(parentNode, null, filter).concat(part) : [part])
         // remove ignored nodes
         .filter(x => x.index !== -1)

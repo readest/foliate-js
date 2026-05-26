@@ -1,5 +1,11 @@
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+// Sections this large skip background preloading — laying them out off-screen
+// will saturate the main thread for seconds (esp. on mobile WebView) for no
+// user-visible benefit. The EPUB loader may split such items virtually; this
+// is the second layer of defence in case splitting wasn't possible.
+const LARGE_SECTION_BYTES = 350 * 1024
+
 const debounce = (f, wait, immediate) => {
     let timeout
     return (...args) => {
@@ -1536,6 +1542,11 @@ export class Paginator extends HTMLElement {
 
     scrollBy(dx, dy) {
         const delta = this.#vertical ? dy : dx
+        // Guard: #scrollBounds is populated lazily inside #scrollToAnchor /
+        // #scrollToPage. A touch swipe (or programmatic scroll) fired before
+        // the first paint will hit this path with #scrollBounds === undefined
+        // and crash the destructure. Bail out silently in that case.
+        if (!this.#scrollBounds) return
         const [offset, a, b] = this.#scrollBounds
         const rtl = this.#rtl
         const min = rtl ? offset - b : offset - a
@@ -1548,6 +1559,11 @@ export class Paginator extends HTMLElement {
     // dx, dy: total distance swiped
     // dt: total time of the swipe (ms)
     snap(vx, vy, dx, dy, dt) {
+        // Guard: snap() runs inside a requestAnimationFrame callback after
+        // touch-end. If the user lifted their finger before the renderer ever
+        // finished its first #scrollToAnchor (very large slice still loading,
+        // or view swap in flight), #scrollBounds is undefined.
+        if (!this.#scrollBounds) return
         const velocity = this.#vertical ? vy : vx
         const avgVelocity = this.#vertical ? dy / dt : dx / dt
         const horizontal = Math.abs(vx) * 2 > Math.abs(vy)
@@ -1997,6 +2013,11 @@ export class Paginator extends HTMLElement {
         if (this.#views.has(index) || !this.#canGoToIndex(index)) return
         const section = this.sections[index]
         if (!section || section.linear === 'no') return
+        // Skip preloading huge sections — laying out a multi-MB iframe on a
+        // background thread we don't have is worse than the small UX win of
+        // having it ready. The user will pay the cost only when actually
+        // navigating into it.
+        if (section.size && section.size > LARGE_SECTION_BYTES) return
         try {
             const src = await section.load()
             const data = await section.loadContent?.()

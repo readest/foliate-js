@@ -860,6 +860,87 @@ class Loader {
         const url = await this.loadItem(item, parents)
         if (url) return this.#cacheXHTMLContent.get(url)?.data
     }
+    // Load an XHTML/HTML spine item, perform resource replacement, and return
+    // BOTH the parsed DOM doc and a callback that registers a Blob URL for a
+    // serialized variant. Used by the virtual-splitting path so we can carve
+    // a huge spine doc into smaller slices without re-running expensive
+    // resource replacement for every slice.
+    async loadReplacedDoc(item) {
+        const { href, mediaType } = item
+        if (![MIME.XHTML, MIME.HTML, MIME.SVG].includes(mediaType)) return null
+        let str = ''
+        try {
+            str = await this.loadText(href)
+        } catch {
+            return null
+        }
+        if (!str) return null
+        let doc = new DOMParser().parseFromString(str, mediaType)
+        let actualMediaType = mediaType
+        if (mediaType === MIME.XHTML && (doc.querySelector('parsererror')
+            || !doc.documentElement?.namespaceURI)) {
+            actualMediaType = MIME.HTML
+            item.mediaType = MIME.HTML
+            doc = new DOMParser().parseFromString(str, item.mediaType)
+        }
+        if ([MIME.XHTML, MIME.SVG].includes(actualMediaType)) {
+            let child = doc.firstChild
+            while (child instanceof ProcessingInstruction) {
+                if (child.data) {
+                    const replacedData = await replaceSeries(child.data,
+                        /(?:^|\s*)(href\s*=\s*['"])([^'"]*)(['"])/i,
+                        (_, p1, p2, p3) => this.loadHref(p2, href, [])
+                            .then(p2 => `${p1}${p2}${p3}`))
+                    child.replaceWith(doc.createProcessingInstruction(
+                        child.target, replacedData))
+                }
+                child = child.nextSibling
+            }
+        }
+        const replace = async (el, attr) => el.setAttribute(attr,
+            await this.loadHref(el.getAttribute(attr), href, []))
+        for (const el of doc.querySelectorAll('link[href]')) await replace(el, 'href')
+        for (const el of doc.querySelectorAll('[src]')) await replace(el, 'src')
+        for (const el of doc.querySelectorAll('[poster]')) await replace(el, 'poster')
+        for (const el of doc.querySelectorAll('object[data]')) await replace(el, 'data')
+        for (const el of doc.querySelectorAll('[*|href]:not([href])'))
+            el.setAttributeNS(NS.XLINK, 'href', await this.loadHref(
+                el.getAttributeNS(NS.XLINK, 'href'), href, []))
+        for (const el of doc.querySelectorAll('[srcset]'))
+            el.setAttribute('srcset', await replaceSeries(el.getAttribute('srcset'),
+                /(\s*)(.+?)\s*((?:\s[\d.]+[wx])+\s*(?:,|$)|,\s+|$)/g,
+                (_, p1, p2, p3) => this.loadHref(p2, href, [])
+                    .then(p2 => `${p1}${p2}${p3}`)))
+        for (const el of doc.querySelectorAll('style'))
+            if (el.textContent) el.textContent =
+                await this.replaceCSS(el.textContent, href, [])
+        for (const el of doc.querySelectorAll('[style]'))
+            el.setAttribute('style',
+                await this.replaceCSS(el.getAttribute('style'), href, []))
+        return { doc, mediaType: actualMediaType }
+    }
+    // Register a serialized slice as a virtual cache entry. Returns a Blob URL.
+    // The slice URL is NOT ref-counted against the parent item — callers are
+    // responsible for revoking via unloadVirtualSlice when done.
+    createVirtualSliceURL(parentHref, sliceIdx, data, mediaType) {
+        const key = `${parentHref}#__slice_${sliceIdx}__`
+        const existing = this.#cache.get(key)
+        if (existing) return existing
+        const url = URL.createObjectURL(new Blob([data], { type: mediaType }))
+        this.#cache.set(key, url)
+        this.#cacheXHTMLContent.set(url, { href: parentHref, type: mediaType, data })
+        this.#refCount.set(key, 1)
+        return url
+    }
+    unloadVirtualSlice(parentHref, sliceIdx) {
+        const key = `${parentHref}#__slice_${sliceIdx}__`
+        const url = this.#cache.get(key)
+        if (!url) return
+        URL.revokeObjectURL(url)
+        this.#cache.delete(key)
+        this.#cacheXHTMLContent.delete(url)
+        this.#refCount.delete(key)
+    }
     tryImageEntryItem(path) {
         if (!IMAGE_EXTENSIONS.some(ext => path.toLowerCase().endsWith(`.${ext}`))) {
             return null
@@ -1020,6 +1101,224 @@ class Loader {
 const getHTMLFragment = (doc, id) => doc.getElementById(id)
     ?? doc.querySelector(`[name="${CSS.escape(id)}"]`)
 
+// --- Large-spine virtual splitting -------------------------------------------
+// Some EPUBs (notably full-book single-file editions like Project Gutenberg's
+// "War and Peace") pack the entire text into one ~3-4MB XHTML file. WebView
+// parse + CSS multi-column layout on that scale freezes the UI for tens of
+// seconds (or hangs on mobile). We mitigate by splitting such items into
+// several smaller virtual sections sharing the original spine item identity
+// (idref / cfi prefix), so existing bookmarks and TOC anchors keep working.
+//
+// Threshold tuned to leave normal chaptered EPUBs untouched while catching
+// the pathological single-file case.
+const SPLIT_MIN_BYTES = 1280 * 1024           // only split items >= 1.2 MB
+const SPLIT_TARGET_BYTES = 512 * 1024         // aim for slices around 512 KB
+const SPLIT_MAX_SLICES = 64                   // hard cap to bound work
+
+// Build a split plan for a spine document. Returns an array of slice
+// descriptors `{ start, end, anchorIds }` indexing into the split container's
+// children. The plan also carries `.container` and `.wrapperChain` so the
+// serializer can rebuild the original DOM context. We try to break on heading
+// boundaries (<h1>..<h6>) first; fall back to size-based slicing.
+//
+// `findSplitContainer` walks down a chain of single/dominant wrapper elements
+// until we find a container that has enough children to split on. Some
+// single-file EPUBs (e.g. Project Gutenberg's "War and Peace") wrap the entire
+// book in one or two `<div>`s under <body>, so body.children.length is tiny
+// (<8) even though there are thousands of splittable elements inside. We
+// follow the "only child that's a block container" or "dominant text-bearing
+// child" down to the real content layer, while recording the wrapper chain so
+// serializeSlice can rebuild the same DOM context (preserves CSS that targets
+// `.chapter p` etc.).
+const findSplitContainer = (body) => {
+    const wrapperChain = [] // elements between body (exclusive) and container (inclusive)
+    let container = body
+    const BLOCK_RE = /^(DIV|SECTION|ARTICLE|MAIN|NAV|ASIDE)$/i
+    // Bound the descent to avoid pathological infinite loops.
+    for (let depth = 0; depth < 6; depth++) {
+        const kids = Array.from(container.children)
+        if (kids.length >= 8) break
+        if (kids.length === 0) break
+        let next = null
+        if (kids.length === 1 && BLOCK_RE.test(kids[0].tagName)) {
+            next = kids[0]
+        } else {
+            // Pick the child that carries the overwhelming majority of text.
+            const totalText = kids.reduce((a, b) => a + (b.textContent?.length ?? 0), 0) || 1
+            const biggest = kids.reduce((a, b) =>
+                (b.textContent?.length ?? 0) > (a.textContent?.length ?? 0) ? b : a)
+            const biggestLen = biggest.textContent?.length ?? 0
+            if (BLOCK_RE.test(biggest.tagName) && biggestLen / totalText > 0.85) {
+                next = biggest
+            }
+        }
+        if (!next) break
+        wrapperChain.push(next)
+        container = next
+    }
+    return { container, wrapperChain }
+}
+
+const buildSplitPlan = (doc, textSize) => {
+    const body = doc?.body
+    if (!body) return null
+    const { container, wrapperChain } = findSplitContainer(body)
+    const topLevel = Array.from(container.children)
+    if (topLevel.length < 8) return null
+    // Approximate per-child size proportional to its serialized length.
+    // Counting outerHTML length on every node is expensive on huge docs, so
+    // approximate with textContent length + an HTML overhead factor.
+    const sizes = topLevel.map(el => (el.textContent?.length ?? 0) + 64)
+    const totalApprox = sizes.reduce((a, b) => a + b, 0) || 1
+    const scale = textSize / totalApprox   // map approx to actual bytes
+    const targetSize = SPLIT_TARGET_BYTES
+    const maxSize = SPLIT_TARGET_BYTES * 2
+
+    // Collect heading boundaries (preferred split points)
+    const isHeading = el => /^H[1-6]$/i.test(el.tagName)
+    const headingIdx = new Set()
+    topLevel.forEach((el, i) => { if (isHeading(el)) headingIdx.add(i) })
+
+    const plan = []
+    let cur = { start: 0, bytes: 0 }
+    for (let i = 0; i < topLevel.length; i++) {
+        const b = sizes[i] * scale
+        // Prefer to break right BEFORE a heading when current slice has
+        // accumulated something substantial.
+        if (i > cur.start && headingIdx.has(i) && cur.bytes >= targetSize * 0.6) {
+            plan.push({ start: cur.start, end: i })
+            cur = { start: i, bytes: 0 }
+        }
+        cur.bytes += b
+        // Hard cut if this slice has grown beyond max even without a heading
+        if (cur.bytes >= maxSize && i + 1 < topLevel.length) {
+            plan.push({ start: cur.start, end: i + 1 })
+            cur = { start: i + 1, bytes: 0 }
+        }
+    }
+    if (cur.start < topLevel.length) {
+        plan.push({ start: cur.start, end: topLevel.length })
+    }
+    if (plan.length <= 1) return null
+    if (plan.length > SPLIT_MAX_SLICES) {
+        // too many slices means our heuristic produced something pathological,
+        // collapse evenly into SPLIT_MAX_SLICES buckets
+        const buckets = []
+        const per = Math.ceil(topLevel.length / SPLIT_MAX_SLICES)
+        for (let i = 0; i < topLevel.length; i += per) {
+            buckets.push({ start: i, end: Math.min(i + per, topLevel.length) })
+        }
+        plan.splice(0, plan.length, ...buckets)
+    }
+    // Collect anchor id sets per slice — used for href routing.
+    for (const slice of plan) {
+        const ids = new Set()
+        for (let i = slice.start; i < slice.end; i++) {
+            const el = topLevel[i]
+            if (el.id) ids.add(el.id)
+            for (const child of el.querySelectorAll('[id]')) ids.add(child.id)
+            // legacy <a name="..."> anchors
+            for (const a of el.querySelectorAll('a[name]')) ids.add(a.getAttribute('name'))
+        }
+        slice.anchorIds = ids
+    }
+    // Stash the wrapper context so serializeSlice can rebuild the same DOM
+    // hierarchy around each slice's children.
+    plan.wrapperChain = wrapperChain
+    plan.container = container
+    return plan
+}
+
+// Serialize a slice of a parsed XHTML/HTML doc into a standalone string,
+// preserving <html>/<head> wrappers (and their namespaces) so styles and
+// metadata still apply.
+//
+// IMPORTANT: we must not use doc.implementation.createHTMLDocument() and
+// then bolt an XHTML <html> element onto it — the resulting document has the
+// wrong namespace context, and XMLSerializer produces a string that DOMParser
+// then refuses to parse (or parses with an empty <body>). That in turn makes
+// the iframe document essentially blank, and paginator's getVisibleRange
+// returns a range whose containers are detached / unreachable from
+// documentElement, which crashes nodeToParts in epubcfi.js.
+//
+// The safe approach is to clone the *original* document (shallow), clone its
+// <html> shallowly, copy <head> verbatim, then build a fresh <body> that only
+// holds the children for this slice. All nodes are created from the original
+// doc, so they share its namespace and document type.
+const serializeSlice = (doc, plan, sliceIdx) => {
+    const slice = plan[sliceIdx]
+    const body = doc.body
+    // When buildSplitPlan descended into a wrapper chain, slice.start/end
+    // index into plan.container.children, not body.children. We then need to
+    // re-wrap the slice in the same wrapper hierarchy so CSS selectors that
+    // target ancestors (e.g. ".chapter p { ... }") still apply.
+    const container = plan.container || body
+    const wrapperChain = plan.wrapperChain || []
+    const topLevel = Array.from(container.children)
+
+    // Shallow clone of the document itself (preserves doctype / contentType)
+    const clone = doc.cloneNode(false)
+
+    // Re-create <html> with original attributes & namespaces preserved
+    const newHtml = doc.documentElement.cloneNode(false)
+
+    // <head> verbatim — needed for <link rel=stylesheet>, <style>, <meta>
+    if (doc.head) newHtml.appendChild(doc.head.cloneNode(true))
+
+    // Fresh <body> in the original namespace, with original attrs
+    const NS = body.namespaceURI || 'http://www.w3.org/1999/xhtml'
+    const newBody = doc.createElementNS(NS, 'body')
+    for (const attr of Array.from(body.attributes)) {
+        newBody.setAttribute(attr.name, attr.value)
+    }
+
+    // Rebuild the wrapper chain (shallow clones preserve class/id/style) and
+    // descend into the innermost wrapper before appending the slice's children.
+    // Each link is cloned shallowly so the rebuilt subtree mirrors the path
+    // body -> wrapper1 -> wrapper2 -> ... -> container -> [slice children].
+    let mountPoint = newBody
+    for (const wrapper of wrapperChain) {
+        const cloned = wrapper.cloneNode(false)
+        mountPoint.appendChild(cloned)
+        mountPoint = cloned
+    }
+    for (let i = slice.start; i < slice.end; i++) {
+        mountPoint.appendChild(topLevel[i].cloneNode(true))
+    }
+    newHtml.appendChild(newBody)
+
+    // Attach doctype if the original had one
+    if (doc.doctype) clone.appendChild(doc.doctype.cloneNode(true))
+    clone.appendChild(newHtml)
+
+    // NOTE: previously we did a synchronous round-trip parse here to verify
+    // the slice survived. That was the single biggest CPU hog on huge spine
+    // items (War and Peace ~3MB → 10 slices × 512KB reparse each = several
+    // seconds of main-thread freeze). Removed. The cloning approach above is
+    // the safe path; if XMLSerializer itself throws, fall back to a minimal
+    // wrapper string.
+    let str
+    try {
+        str = new XMLSerializer().serializeToString(clone)
+    } catch {
+        const headHTML = doc.head ? doc.head.innerHTML : ''
+        // For the fallback, approximate the wrapper chain via outerHTML of
+        // each shallow wrapper (manually closed in reverse).
+        const openTags = wrapperChain.map(w => {
+            const attrs = Array.from(w.attributes)
+                .map(a => `${a.name}="${a.value.replace(/"/g, '&quot;')}"`).join(' ')
+            return `<${w.tagName.toLowerCase()}${attrs ? ' ' + attrs : ''}>`
+        }).join('')
+        const closeTags = wrapperChain.slice().reverse()
+            .map(w => `</${w.tagName.toLowerCase()}>`).join('')
+        const partHTML = topLevel.slice(slice.start, slice.end)
+            .map(el => el.outerHTML).join('\n')
+        str = '<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml">'
+            + `<head>${headHTML}</head><body>${openTags}${partHTML}${closeTags}</body></html>`
+    }
+    return str
+}
+
 const getPageSpread = properties => {
     for (const p of properties) {
         if (p === 'page-spread-left' || p === 'rendition:page-spread-left')
@@ -1042,6 +1341,9 @@ export class EPUB {
     parser = new DOMParser()
     #loader
     #encryption
+    #splitState
+    #virtualSectionMap
+    #splitSectionsByHref
     constructor({ entries, loadText, loadBlob, getSize, sha1 }) {
         this.entries = entries.reduce((map, entry) => {
             map.set(entry.filename, entry)
@@ -1112,7 +1414,18 @@ ${doc.querySelector('parsererror').innerText}`)
             entries: this.entries,
         })
         this.transformTarget = this.#loader.eventTarget
-        this.sections = this.resources.spine.map((spineItem, index) => {
+        // Per-item virtual split state. Map<item.href, {
+        //   plan: SplitPlan[], replacedDoc: Doc, mediaType: string,
+        //   docPromise: Promise<{doc, mediaType}>, sliceUrls: Map<idx, url>,
+        // }>. Populated lazily when a large item is loaded the first time.
+        this.#splitState = new Map()
+        // Reverse map: virtual section index -> { parentItem, sliceIdx, planLen }
+        // Filled by #buildSpineWithSplits below.
+        this.#virtualSectionMap = new Map()
+        // Map<parent item.href, [sectionIndex,...]> for href routing.
+        this.#splitSectionsByHref = new Map()
+
+        const rawSpineSections = this.resources.spine.map((spineItem, index) => {
             const { idref, linear, properties = [] } = spineItem
             const item = this.resources.getItemByID(idref)
             if (!item) {
@@ -1120,22 +1433,16 @@ ${doc.querySelector('parsererror').innerText}`)
                 return null
             }
             return {
-                id: item.href,
-                load: () => this.#loader.loadItem(item),
-                unload: () => this.#loader.unloadItem(item),
-                loadText: () => this.#loader.loadText(item.href),
-                loadContent: () => this.#loader.loadItemXHTMLContent(item),
-                createDocument: () => this.loadDocument(item),
-                size: this.getSize(item.href),
-                cfi: this.resources.cfis[index],
+                item,
+                idref,
                 linear,
-                spineProperties: properties,
-                pageSpread: getPageSpread(properties),
-                resolveHref: href => resolveURL(href, item.href),
-                mediaOverlay: item.mediaOverlay
-                    ? this.resources.getItemByID(item.mediaOverlay) : null,
+                properties,
+                spineIndex: index,
+                cfi: this.resources.cfis[index],
             }
         }).filter(s => s)
+
+        this.sections = await this.#buildSpineWithSplits(rawSpineSections)
 
         const { navPath, ncxPath } = this.resources
         if (navPath) try {
@@ -1182,6 +1489,188 @@ ${doc.querySelector('parsererror').innerText}`)
         }
         return this
     }
+    // ---- Virtual splitting for huge single-file spine items ---------------
+    async #buildSpineWithSplits(rawSections) {
+        const built = []
+        for (const raw of rawSections) {
+            const { item, linear } = raw
+            const size = this.getSize(item.href)
+            const isHTMLish = item.mediaType === MIME.XHTML || item.mediaType === MIME.HTML
+            // Only consider splitting linear, large HTML/XHTML items.
+            const shouldConsider = isHTMLish && linear !== 'no' && size >= SPLIT_MIN_BYTES
+            if (!shouldConsider) {
+                built.push(this.#makeSimpleSection(raw, size))
+                continue
+            }
+            // Build the plan. We need the parsed (resource-replaced) doc to
+            // both detect heading boundaries and to later serve slices, so
+            // do it now and cache.
+            let plan = null
+            let prepared = null
+            try {
+                prepared = await this.#loader.loadReplacedDoc(item)
+                if (prepared?.doc) plan = buildSplitPlan(prepared.doc, size)
+            } catch (e) {
+                console.warn('buildSplitPlan failed for', item.href, e)
+                plan = null
+            }
+            if (!plan) {
+                built.push(this.#makeSimpleSection(raw, size))
+                continue
+            }
+            // Stash state for lazy slice serving.
+            // totalTextLen is computed ONCE here — calling textContent on the
+            // entire 3MB doc is itself a several-hundred-ms operation and we
+            // used to do it inside #makeVirtualSection per slice (10× cost).
+            const totalTextLen = prepared.doc?.body?.textContent?.length || 1
+            this.#splitState.set(item.href, {
+                plan,
+                doc: prepared.doc,
+                mediaType: prepared.mediaType,
+                sliceUrls: new Map(),
+                serializedCache: new Map(),  // sliceIdx -> serialized string
+                totalTextLen,
+            })
+            const sectionIndices = []
+            for (let i = 0; i < plan.length; i++) {
+                const startIdx = built.length
+                built.push(this.#makeVirtualSection(raw, plan, i))
+                this.#virtualSectionMap.set(startIdx, {
+                    parentHref: item.href,
+                    parentItem: item,
+                    sliceIdx: i,
+                    planLen: plan.length,
+                })
+                sectionIndices.push(startIdx)
+            }
+            this.#splitSectionsByHref.set(item.href, sectionIndices)
+        }
+        return built
+    }
+    #makeSimpleSection(raw, size) {
+        const { item, linear, properties, cfi } = raw
+        return {
+            id: item.href,
+            load: () => this.#loader.loadItem(item),
+            unload: () => this.#loader.unloadItem(item),
+            loadText: () => this.#loader.loadText(item.href),
+            loadContent: () => this.#loader.loadItemXHTMLContent(item),
+            createDocument: () => this.loadDocument(item),
+            size,
+            cfi,
+            linear,
+            spineProperties: properties,
+            pageSpread: getPageSpread(properties),
+            resolveHref: href => resolveURL(href, item.href),
+            mediaOverlay: item.mediaOverlay
+                ? this.resources.getItemByID(item.mediaOverlay) : null,
+        }
+    }
+    #makeVirtualSection(raw, plan, sliceIdx) {
+        const { item, linear, properties } = raw
+        const slice = plan[sliceIdx]
+        const state = this.#splitState.get(item.href)
+        // crude proportional sizing using text-length ratio of the slice.
+        // Only walks the slice's children, not the entire doc — totalTextLen
+        // is precomputed once in #buildSpineWithSplits.
+        const sliceTextLen = (() => {
+            try {
+                // slice.start/end index into plan.container.children, which
+                // may be a descendant wrapper rather than body itself (see
+                // findSplitContainer).
+                const container = plan.container || state?.doc?.body
+                if (!container) return 0
+                const children = Array.from(container.children)
+                let n = 0
+                for (let i = slice.start; i < slice.end; i++) {
+                    n += children[i]?.textContent?.length ?? 0
+                }
+                return n
+            } catch { return 0 }
+        })()
+        const totalTextLen = state?.totalTextLen || 1
+        const realTotal = this.getSize(item.href) || 0
+        const approxSize = Math.max(1, Math.round(realTotal * sliceTextLen / totalTextLen))
+        // Cached serializer — serializeSlice on a 512KB slice + 3MB head clone
+        // costs tens of ms; load/loadText/loadContent/createDocument all want
+        // the same string, so cache per (href, sliceIdx).
+        const getStr = () => {
+            const s = this.#splitState.get(item.href)
+            if (!s) return ''
+            const cached = s.serializedCache.get(sliceIdx)
+            if (cached != null) return cached
+            const str = serializeSlice(s.doc, s.plan, sliceIdx)
+            s.serializedCache.set(sliceIdx, str)
+            return str
+        }
+        return {
+            id: `${item.href}#__slice_${sliceIdx}__`,
+            load: () => this.#loadSlice(item, sliceIdx),
+            unload: () => this.#unloadSlice(item, sliceIdx),
+            loadText: async () => getStr(),
+            loadContent: async () => getStr(),
+            createDocument: async () => {
+                const s = this.#splitState.get(item.href)
+                if (!s) return null
+                const str = getStr()
+                return this.parser.parseFromString(str, s.mediaType)
+            },
+            size: approxSize,
+            // Intentionally null: makes view.js generate a fake CFI keyed on
+            // the flat virtual-section index, so the user's progress CFI
+            // round-trips back to the exact slice they were reading.
+            cfi: null,
+            linear,
+            spineProperties: properties,
+            pageSpread: sliceIdx === 0 ? getPageSpread(properties) : undefined,
+            resolveHref: href => resolveURL(href, item.href),
+            mediaOverlay: item.mediaOverlay
+                ? this.resources.getItemByID(item.mediaOverlay) : null,
+            // Mark for debugging / external introspection
+            _virtual: { parentHref: item.href, sliceIdx, total: plan.length },
+        }
+    }
+    async #loadSlice(item, sliceIdx) {
+        const state = this.#splitState.get(item.href)
+        if (!state) return null
+        const existing = state.sliceUrls.get(sliceIdx)
+        if (existing) return existing
+        let str = state.serializedCache.get(sliceIdx)
+        if (str == null) {
+            str = serializeSlice(state.doc, state.plan, sliceIdx)
+            state.serializedCache.set(sliceIdx, str)
+        }
+        const url = this.#loader.createVirtualSliceURL(
+            item.href, sliceIdx, str, state.mediaType)
+        state.sliceUrls.set(sliceIdx, url)
+        return url
+    }
+    #unloadSlice(item, sliceIdx) {
+        const state = this.#splitState.get(item.href)
+        if (!state) return
+        // Drop the cached string so memory isn't held while the slice isn't
+        // mounted. The blob URL is the heavy resource and is freed below.
+        state.serializedCache.delete(sliceIdx)
+        if (!state.sliceUrls.has(sliceIdx)) return
+        this.#loader.unloadVirtualSlice(item.href, sliceIdx)
+        state.sliceUrls.delete(sliceIdx)
+    }
+    // Find the virtual section index whose slice contains the given anchor id.
+    // Returns null when href has no hash or item isn't split.
+    #findSliceForAnchor(item, hash) {
+        if (!hash) {
+            const indices = this.#splitSectionsByHref.get(item.href)
+            return indices ? indices[0] : null
+        }
+        const state = this.#splitState.get(item.href)
+        if (!state) return null
+        const indices = this.#splitSectionsByHref.get(item.href)
+        if (!indices) return null
+        for (let i = 0; i < state.plan.length; i++) {
+            if (state.plan[i].anchorIds.has(hash)) return indices[i]
+        }
+        return null
+    }
     async loadDocument(item) {
         const str = await this.loadText(item.href)
         return this.parser.parseFromString(str, item.mediaType)
@@ -1190,15 +1679,65 @@ ${doc.querySelector('parsererror').innerText}`)
         return new MediaOverlay(this, this.#loadXML.bind(this))
     }
     resolveCFI(cfi) {
-        return this.resources.resolveCFI(cfi)
+        // Fake CFIs (used by view.js when section.cfi is null) directly
+        // encode the section index. Virtual slices intentionally set cfi=null
+        // so newly-generated progress CFIs round-trip back to the exact
+        // slice the user was on.
+        let parts
+        try { parts = CFI.parse(cfi) } catch { parts = null }
+        if (parts) {
+            const top = (parts.parent ?? parts)[0]
+            if (top && Array.isArray(top) && top.length === 1
+                && top[0].index != null && !top[0].id) {
+                // Looks like a fake CFI prefix: /6/N with no idref assertion.
+                // Verify the spine path doesn't actually resolve in the OPF.
+                let resolvedFromOpf = null
+                try { resolvedFromOpf = this.resources.resolveCFI(cfi) } catch { /* ignore */ }
+                if (!resolvedFromOpf || resolvedFromOpf.index < 0
+                    || resolvedFromOpf.index >= this.resources.spine.length) {
+                    const flatIdx = CFI.fake.toIndex((parts.parent ?? parts).shift())
+                    if (flatIdx >= 0 && flatIdx < this.sections.length) {
+                        const anchor = doc => CFI.toRange(doc, parts)
+                        return { index: flatIdx, anchor }
+                    }
+                }
+            }
+        }
+        const resolved = this.resources.resolveCFI(cfi)
+        if (!resolved) return resolved
+        // resolved.index is the opf-spine index. If that spine item was
+        // virtually split, the actual reader sections array uses different
+        // indices — remap to the first slice (legacy CFIs cannot pinpoint
+        // which slice they belong to, so we default to slice 0; the user's
+        // position is still close enough and they can navigate from there).
+        const spineItem = this.resources.spine[resolved.index]
+        if (!spineItem) return resolved
+        const item = this.resources.getItemByID(spineItem.idref)
+        if (!item) return resolved
+        const indices = this.#splitSectionsByHref.get(item.href)
+        if (indices && indices.length) {
+            return { index: indices[0], anchor: resolved.anchor }
+        }
+        // Not split — translate opf-spine index into our flat sections index.
+        const sectionIdx = this.sections.findIndex(s => s.id === item.href)
+        return { index: sectionIdx >= 0 ? sectionIdx : resolved.index, anchor: resolved.anchor }
     }
     resolveHref(href) {
         const [path, hash] = href.split('#')
         const item = this.resources.getItemByHref(decodeURI(path))
         if (!item) return null
-        const index = this.resources.spine.findIndex(({ idref }) => idref === item.id)
+        // If this item is virtually split, route to the slice that contains
+        // the anchor (or the first slice when no anchor was given).
+        const sliceIndex = this.#findSliceForAnchor(item, hash)
+        if (sliceIndex != null) {
+            const anchor = hash ? doc => getHTMLFragment(doc, hash) : () => 0
+            return { index: sliceIndex, anchor }
+        }
+        // Default: locate by section.id in the flat sections array. We can't
+        // use resources.spine index directly because splits make them diverge.
+        const index = this.sections.findIndex(s => s.id === item.href)
         const anchor = hash ? doc => getHTMLFragment(doc, hash) : () => 0
-        return { index, anchor }
+        return { index: index >= 0 ? index : 0, anchor }
     }
     splitTOCHref(href) {
         return href?.split('#') ?? []
