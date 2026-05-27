@@ -59,6 +59,28 @@ export const restoreScrollModeAnchor = (pages, anchor, maxScrollTop) => {
     return clamp(page.top + page.height * anchor.fraction, 0, maxScrollTop)
 }
 
+// Align the SVG overlayer's coord system with the iframe's unscaled content.
+// When the iframe is visually scaled via CSS transform (non-PDF path),
+// getClientRects() inside the iframe returns positions in the iframe's native
+// coord system, so the SVG must use a matching viewBox to scale rects to the
+// on-screen size. PDFs re-render their text layer at scale via onZoom, so
+// rects are already in scaled coords and no viewBox is needed.
+export const applyOverlayerViewBox = (frame, overlayer) => {
+    if (!overlayer?.element) return
+    const el = overlayer.element
+    if (frame?.onZoom) {
+        el.removeAttribute('viewBox')
+        el.removeAttribute('preserveAspectRatio')
+    } else {
+        const w = frame?.width ?? frame?.vpWidth
+        const h = frame?.height ?? frame?.vpHeight
+        if (w && h) {
+            el.setAttribute('viewBox', `0 0 ${w} ${h}`)
+            el.setAttribute('preserveAspectRatio', 'none')
+        }
+    }
+}
+
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow']
     #root = this.attachShadow({ mode: 'open' })
@@ -335,6 +357,11 @@ export class FixedLayout extends HTMLElement {
                         width: `${(width ?? blankWidth) * scale}px`,
                         height: `${(height ?? blankHeight) * scale}px`,
                     })
+                    applyOverlayerViewBox({
+                        onZoom,
+                        width: width ?? blankWidth,
+                        height: height ?? blankHeight,
+                    }, overlayer)
                     overlayer.redraw()
                 }
             }
@@ -439,6 +466,7 @@ export class FixedLayout extends HTMLElement {
                             attach: overlayer => {
                                 this.#overlayers.set(index, overlayer)
                                 frame.element.append(overlayer.element)
+                                applyOverlayerViewBox(frame, overlayer)
                             },
                         },
                     }))
@@ -655,6 +683,7 @@ export class FixedLayout extends HTMLElement {
                         attach: overlayer => {
                             this.#overlayers.set(pageData.index, overlayer)
                             frame.element.append(overlayer.element)
+                            applyOverlayerViewBox(frame, overlayer)
                         },
                     },
                 }))
@@ -751,6 +780,7 @@ export class FixedLayout extends HTMLElement {
                 width: `${vw * scale}px`,
                 height: `${vh * scale}px`,
             })
+            applyOverlayerViewBox(frame, overlayer)
             overlayer.redraw()
         }
     }
