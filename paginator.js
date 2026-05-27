@@ -509,7 +509,7 @@ class View {
                 'max-width': vertical
                     ? `${width - (pageFullscreen ? 0 : (marginLeft + marginRight))}px`
                     : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth : '100%'),
-                'object-fit': pageFullscreen ? 'cover': 'contain',
+                'object-fit': 'contain',
                 'page-break-inside': 'avoid',
                 'break-inside': 'avoid',
                 'box-sizing': 'border-box',
@@ -536,7 +536,7 @@ class View {
                     ancestor = ancestor.parentElement
                 }
                 if (el.localName === 'svg') {
-                    el.setAttribute('preserveAspectRatio', 'xMidYMid slice')
+                    el.setAttribute('preserveAspectRatio', 'xMidYMid meet')
                 }
             }
         }
