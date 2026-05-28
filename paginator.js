@@ -1600,6 +1600,10 @@ export class Paginator extends HTMLElement {
         if (state.pinched) return
         state.pinched = globalThis.visualViewport.scale > 1
         if (this.scrolled || state.pinched) return
+        // When the host opts out of swipe-to-paginate, let touch events reach
+        // native behavior (text selection, etc.) without us tracking or
+        // pre-empting them.
+        if (this.hasAttribute('no-swipe')) return
         if (e.touches.length > 1) {
             if (this.#touchScrolled) e.preventDefault()
             return
@@ -1641,6 +1645,7 @@ export class Paginator extends HTMLElement {
         if (!this.#touchScrolled) return
         this.#touchScrolled = false
         if (this.scrolled) return
+        if (this.hasAttribute('no-swipe')) return
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
         // at this point I'm basically throwing `requestAnimationFrame` at
