@@ -971,24 +971,8 @@ export class Paginator extends HTMLElement {
                 if (this.#stabilizing) return
                 if (this.#justAnchored) this.#justAnchored = false
                 else this.#afterScroll('scroll')
-                // Load previous section when user scrolls near the top.
-                // Done in debounced handler (not instant) to avoid cascade
-                // from rapid DOM insertions breaking scroll anchoring.
-                if (!this.noPreload && !this.noContinuousScroll && !this.#filling && this.#renderedStart < this.size) {
-                    const sorted = this.#sortedViews
-                    const firstIndex = sorted[0]?.[0]
-                    if (firstIndex != null) {
-                        const prevIdx = this.#adjacentIndex(-1, firstIndex)
-                        if (prevIdx != null && !this.#views.has(prevIdx) && this.#isSameDirection(prevIdx)) {
-                            this.#filling = true
-                            this.#loadAdjacentSection(prevIdx)
-                                .finally(() => {
-                                    this.#filling = false
-                                    this.dispatchEvent(new Event('stabilized'))
-                                })
-                        }
-                    }
-                }
+                // Backward preloading is handled eagerly in the (non-debounced)
+                // scroll listener below, mirroring the forward buffer.
             } else if (!this.scrolled) {
               this.#afterScroll('container-scroll')
             }
@@ -1009,6 +993,33 @@ export class Paginator extends HTMLElement {
                         if (nextIdx != null && !this.#views.has(nextIdx) && this.#isSameDirection(nextIdx)) {
                             this.#filling = true
                             this.#loadAdjacentSection(nextIdx)
+                                .finally(() => {
+                                    this.#filling = false
+                                    this.dispatchEvent(new Event('stabilized'))
+                                })
+                        }
+                    }
+                }
+            }
+            // Preload backward when fewer than minPages behind, mirroring the
+            // forward buffer so scrolling up never dead-ends at the top with the
+            // previous section unloaded (readest/readest#4112). The
+            // #loadAdjacentSection scroll compensation keeps the viewport
+            // anchored as the section is inserted above.
+            if (this.scrolled && !this.noPreload && !this.noContinuousScroll
+                && !this.#filling && !this.#stabilizing) {
+                const minPages = 5
+                const pagesBehind = this.size > 0
+                    ? Math.floor(this.#renderedStart / this.size)
+                    : 0
+                if (pagesBehind < minPages) {
+                    const sorted = this.#sortedViews
+                    const firstIndex = sorted[0]?.[0]
+                    if (firstIndex != null) {
+                        const prevIdx = this.#adjacentIndex(-1, firstIndex)
+                        if (prevIdx != null && !this.#views.has(prevIdx) && this.#isSameDirection(prevIdx)) {
+                            this.#filling = true
+                            this.#loadAdjacentSection(prevIdx)
                                 .finally(() => {
                                     this.#filling = false
                                     this.dispatchEvent(new Event('stabilized'))
@@ -2002,6 +2013,15 @@ export class Paginator extends HTMLElement {
         if (this.#views.has(index) || !this.#canGoToIndex(index)) return
         const section = this.sections[index]
         if (!section || section.linear === 'no') return
+        // Detect a prepend: a section being inserted *above* every currently
+        // loaded view in scrolled mode. The browser suppresses scroll
+        // anchoring while scrollTop is 0, so the inserted section would push
+        // the visible content down and the viewport would drift into the
+        // previous section (readest/readest#4112). Capture the scroll position
+        // before the insertion so it can be restored once the view renders.
+        const firstIndex = this.#sortedViews[0]?.[0]
+        const isPrepend = this.scrolled && firstIndex != null && index < firstIndex
+        const startBefore = isPrepend ? this.#renderedStart : 0
         try {
             const src = await section.load()
             const data = await section.loadContent?.()
@@ -2035,6 +2055,17 @@ export class Paginator extends HTMLElement {
                     this.#destroyView(index)
                     return
                 }
+            }
+            // Keep the previously visible content anchored: the new view added
+            // `addedSize` px above it, so the scroll position must grow by the
+            // same amount. This corrects the browser's scroll-anchoring
+            // suppression at scrollTop 0 and is a no-op when anchoring already
+            // handled the shift (correction ≈ 0).
+            if (isPrepend) {
+                const addedSize = view.element.getBoundingClientRect()[this.sideProp]
+                const correction = startBefore + addedSize - this.#renderedStart
+                if (Math.abs(correction) > 0.5)
+                    this.containerPosition += (this.#vertical ? -1 : 1) * correction
             }
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
@@ -2142,34 +2173,50 @@ export class Paginator extends HTMLElement {
             // View already loaded — reuse it without
             // clearing/reloading. Just change primary and scroll.
             this.#stabilizing = true
-            this.#container.style.opacity = '0'
+            // Continuous scrolled mode keeps the target view rendered, so we
+            // scroll straight to it without fading the container — fading
+            // produced a hard blank-screen flash on adjacent navigation
+            // (readest/readest#4112 follow-up). Paginated mode and discrete
+            // no-continuous-scroll still fade to hide the page reposition.
+            const blank = !this.scrolled || this.noContinuousScroll
+            if (blank) this.#container.style.opacity = '0'
             const hasFocus = this.#primaryView?.document?.hasFocus()
             this.#primaryIndex = index
             this.#syncA11y()
             this.#trimDistantViews()
-            // Handle short section alignment
-            const primaryView = this.#primaryView
-            if (!this.noPreload && !this.noContinuousScroll && primaryView
-                && primaryView.contentPages > 0
-                && primaryView.contentPages < this.columnCount) {
-                const sorted = this.#sortedViews
-                const firstIndex = sorted[0]?.[0]
-                if (firstIndex != null) {
-                    const prevIdx = this.#adjacentIndex(-1, firstIndex)
-                    if (prevIdx != null) {
-                        await this.#loadAdjacentSection(prevIdx)
-                    }
-                }
-            }
             // In noContinuousScroll mode, destroy all non-primary views
             if (this.noContinuousScroll) {
                 for (const [i] of this.#views) {
                     if (i !== index) this.#destroyView(i)
                 }
             }
-            await this.scrollToAnchor((typeof anchor === 'function'
-                ? anchor(primaryView.document) : anchor) ?? 0, select)
-            this.#container.style.opacity = '1'
+            const primaryView = this.#primaryView
+            const resolvedAnchor = (typeof anchor === 'function'
+                ? anchor(primaryView.document) : anchor) ?? 0
+            // Pre-load the previous section so the user can move backward right
+            // away: a short paginated primary needs it to fill the leading
+            // columns; scrolled mode needs it so scrolling up reveals the
+            // previous section instead of dead-ending at the top (the debounced
+            // backward-preload can't cover this — it bails while navigation is
+            // stabilizing). Paginated must load it before revealing; scrolled
+            // mode loads it after the scroll so the transition stays instant,
+            // with #loadAdjacentSection compensation keeping the viewport
+            // anchored as the section is inserted above.
+            const needsPrev = primaryView && primaryView.contentPages > 0
+                && primaryView.contentPages < this.columnCount
+            const loadPrev = async () => {
+                if (this.noPreload || this.noContinuousScroll) return
+                if (!(needsPrev || this.scrolled)) return
+                const firstIndex = this.#sortedViews[0]?.[0]
+                if (firstIndex == null) return
+                const prevIdx = this.#adjacentIndex(-1, firstIndex)
+                if (prevIdx != null && this.#isSameDirection(prevIdx))
+                    await this.#loadAdjacentSection(prevIdx)
+            }
+            if (!this.scrolled) await loadPrev()
+            await this.scrollToAnchor(resolvedAnchor, select)
+            if (this.scrolled) await loadPrev()
+            if (blank) this.#container.style.opacity = '1'
             if (hasFocus) this.focusView()
             // Load remaining adjacent sections progressively;
             // keep #stabilizing true until fill completes
