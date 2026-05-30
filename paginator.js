@@ -136,6 +136,10 @@ const getBoundingClientRect = target => {
 }
 
 const getVisibleRange = (doc, start, end, mapRect) => {
+    // A resize/scroll callback can fire after the view's document has been
+    // torn down (e.g. during teardown, or while an async section load is still
+    // settling); there is nothing to measure without a body.
+    if (!doc?.body) return
     // first get all visible nodes
     const acceptNode = node => {
         const name = node.localName?.toLowerCase()
@@ -334,7 +338,7 @@ class View {
     async load(src, data, afterLoad, beforeRender) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
         return new Promise(resolve => {
-            this.#iframe.addEventListener('load', () => {
+            this.#iframe.addEventListener('load', async () => {
                 const doc = this.document
                 afterLoad?.(doc)
 
@@ -344,21 +348,52 @@ class View {
                 const { vertical, rtl } = getDirection(doc)
                 this.docBackground = getBackground(doc)
                 doc.body.style.background = 'none'
-                // Preload background image to get natural dimensions;
-                // in scrolled mode the view expands to fit the image.
+                // Resolve the body background image's natural size BEFORE the
+                // first render so the scrolled-mode view is sized to fit it
+                // from the start. Sizing it lazily — expanding only once the
+                // image loads — grows the view *after* navigation has already
+                // scrolled to it. On reopen that growth lands above the saved
+                // position (e.g. a preloaded previous section's full-page
+                // illustration) and, with no reliable cross-iframe scroll
+                // anchoring on WebKit, drifts the viewport to the chapter
+                // start. Awaiting a local EPUB resource here is near-instant.
+                let bgRendered = false
                 const bgUrl = this.docBackground
                     ?.match(/url\(["']?([^"')]+)["']?\)/)?.[1]
                 if (bgUrl && !this.container.noBackground) {
                     const img = new Image()
+                    let resolveWait
+                    const waited = new Promise(res => { resolveWait = res })
                     img.onload = () => {
                         this.#bgImageSize = {
                             width: img.naturalWidth,
                             height: img.naturalHeight,
                         }
-                        if (!this.#column) this.expand()
+                        // If the image only resolves after this view has
+                        // already rendered (slower than the bounded wait
+                        // below), grow to fit it now — the original lazy path,
+                        // kept as a fallback rather than the norm.
+                        if (bgRendered && !this.#column) this.expand()
+                        resolveWait()
                     }
+                    // A missing or broken image just renders without the
+                    // background, exactly as before.
+                    img.onerror = () => resolveWait()
                     img.src = bgUrl
+                    // Bound the wait so a missing, broken, or hung image (one
+                    // that fires neither load nor error) can never block the
+                    // section from rendering.
+                    let timer
+                    await Promise.race([
+                        waited,
+                        new Promise(res => { timer = setTimeout(res, 3000) }),
+                    ])
+                    clearTimeout(timer)
                 }
+                // Awaiting the background image yields control, so the view may
+                // have been torn down or reloaded meanwhile — don't render into
+                // a stale document.
+                if (this.document !== doc) return resolve()
                 this.#iframe.style.display = 'none'
 
                 this.#vertical = vertical
@@ -368,6 +403,7 @@ class View {
                 const layout = beforeRender?.({ vertical, rtl })
                 this.#iframe.style.display = 'block'
                 this.render(layout)
+                bgRendered = true
                 this.#observer.observe(doc.body)
 
                 // the resize observer above doesn't work in Firefox
