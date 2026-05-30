@@ -185,8 +185,8 @@ export const compare = (a, b) => {
     return 0
 }
 
-const isTextNode = ({ nodeType }) => nodeType === 3 || nodeType === 4
-const isElementNode = ({ nodeType }) => nodeType === 1
+const isTextNode = node => node?.nodeType === 3 || node?.nodeType === 4
+const isElementNode = node => node?.nodeType === 1
 const isInertNode = (node) => node.hasAttribute?.('cfi-inert')
 
 const getChildNodes = (node, filter) => {

@@ -145,6 +145,11 @@ const getVisibleRange = (doc, start, end, mapRect) => {
         const name = node.localName?.toLowerCase()
         // ignore all scripts, styles, and their children
         if (name === 'script' || name === 'style') return FILTER_REJECT
+        // ignore cfi-inert nodes (e.g. injected a11y skip-links) and their
+        // subtree: they are invisible to CFI, so anchoring the visible range on
+        // one yields a degenerate CFI and can crash `fromRange` when such a node
+        // is the only child of its parent (content-less background sections).
+        if (node.nodeType === 1 && node.hasAttribute?.('cfi-inert')) return FILTER_REJECT
         if (node.nodeType === 1) {
             const { left, right } = mapRect(node.getBoundingClientRect())
             if (left === 0 && right === 0) return FILTER_REJECT
