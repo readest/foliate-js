@@ -272,6 +272,36 @@ const getBackground = doc => {
         : bodyStyle.background
 }
 
+// Compute the full-bleed background segments for paginated mode. Each rendered
+// view yields one segment positioned so it tracks its content on screen
+// (segStart = inset + viewOffset - scrollPos). Because the paginator rebuilds
+// these on every scroll, the backgrounds stay glued to the content while the
+// user drags a swipe; when two sections with different backgrounds are both on
+// screen the seam falls on the real content boundary instead of one flat colour
+// spanning the viewport. A segment that meets a content edge is stretched out
+// into the full-bleed gutter (outside #container) so a coloured page fills the
+// screen edge to edge, matching its content area. `views` is the sorted list of
+// { size, bg } with bg already resolved ('' = transparent → no segment).
+export const computeBackgroundSegments = (views, scrollPos, bgSize, inset, containerSize) => {
+    const containerStart = inset
+    const containerEnd = inset + containerSize
+    const segments = []
+    let offset = 0
+    for (const view of views) {
+        const segStart = inset + offset - scrollPos
+        const segEnd = segStart + view.size
+        offset += view.size
+        if (segEnd <= 0 || segStart >= bgSize) continue // off screen
+        if (!view.bg) continue // transparent → let the host/theme show through
+        let start = segStart
+        let end = segEnd
+        if (start <= containerStart && end > containerStart) start = 0
+        if (start < containerEnd && end >= containerEnd) end = bgSize
+        segments.push({ start, size: end - start, bg: view.bg })
+    }
+    return segments
+}
+
 const makeMarginals = (length, part) => Array.from({ length }, () => {
     const div = document.createElement('div')
     const child = document.createElement('div')
@@ -924,6 +954,8 @@ export class Paginator extends HTMLElement {
         #background {
             grid-column: 1 / -1;
             grid-row: 1 / -1;
+            position: relative;
+            overflow: hidden;
         }
         #container {
             grid-column: 2 / 5;
@@ -1020,6 +1052,11 @@ export class Paginator extends HTMLElement {
         }, 250)
         this.#container.addEventListener('scroll', () => {
             if (!this.#isAnimating) this.dispatchEvent(new Event('scroll'))
+            // Keep the per-view backgrounds glued to the content while a swipe
+            // drag scrolls the container (no animation runs then). During the
+            // snap animation #isAnimating is set and the destination background
+            // is already in place, so the rebuild is skipped.
+            if (!this.scrolled && !this.#isAnimating) this.#replaceBackground()
             // Preload forward when fewer than minPages ahead
             if (!this.noPreload && !this.noContinuousScroll && !this.#filling && !this.#stabilizing) {
                 const minPages = 5
@@ -1334,40 +1371,41 @@ export class Paginator extends HTMLElement {
             return
         }
 
-        const cc = this.columnCount
-        const columnSize = this.size / cc
-        const sorted = this.#sortedViews
+        // Paint one full-bleed background segment per rendered view, positioned
+        // so each tracks its content on screen. Rebuilding on every scroll keeps
+        // the backgrounds glued to the content during a swipe drag — so when two
+        // sections with different backgrounds are both visible, each half shows
+        // its own colour instead of one flat colour flashing across the viewport.
+        const bgRect = this.#background.getBoundingClientRect()
+        const containerRect = this.#container.getBoundingClientRect()
+        const startEdge = this.#vertical ? 'top' : 'left'
+        const bgSize = bgRect[this.sideProp]
+        const inset = containerRect[startEdge] - bgRect[startEdge]
+        const scrollPos = Math.abs(atPosition ?? this.#renderedStart)
+        const views = this.#sortedViews.map(([, view]) => ({
+            size: view.element.getBoundingClientRect()[this.sideProp],
+            bg: resolveBackground(view.docBackground),
+        }))
+        const segments = computeBackgroundSegments(views, scrollPos, bgSize, inset, this.size)
 
         this.#background.innerHTML = ''
-        this.#background.style.display = 'grid'
-        this.#background.style.gridTemplateColumns = `repeat(${cc}, 1fr)`
+        this.#background.style.display = ''
+        this.#background.style.background = fallbackBg
 
-        const scrollPos = atPosition ?? this.#renderedStart
-        for (let i = 0; i < cc; i++) {
-            const columnMid = Math.abs(scrollPos) + (i + 0.5) * columnSize
-            let bg = fallbackBg
-
-            // Find which view's content area contains this column
-            let offset = 0
-            for (const [, view] of sorted) {
-                const viewSize = view.element.getBoundingClientRect()[this.sideProp]
-                if (columnMid < offset + viewSize) {
-                    const contentStart = offset
-                    const contentEnd = contentStart + view.contentPages * columnSize
-                    if (columnMid >= contentStart && columnMid < contentEnd) {
-                        bg = resolveBackground(view.docBackground)
-                    }
-                    break
-                }
-                offset += viewSize
-            }
-
-            const col = document.createElement('div')
-            col.style.background = bg
-            col.style.backgroundAttachment = 'initial'
-            col.style.width = '100%'
-            col.style.height = '100%'
-            this.#background.appendChild(col)
+        const posProp = this.#vertical ? 'top' : 'left'
+        const sizeProp = this.#vertical ? 'height' : 'width'
+        const crossPosProp = this.#vertical ? 'left' : 'top'
+        const crossSizeProp = this.#vertical ? 'width' : 'height'
+        for (const { start, size, bg } of segments) {
+            const seg = document.createElement('div')
+            seg.style.position = 'absolute'
+            seg.style[posProp] = `${start}px`
+            seg.style[sizeProp] = `${size}px`
+            seg.style[crossPosProp] = '0'
+            seg.style[crossSizeProp] = '100%'
+            seg.style.background = bg
+            seg.style.backgroundAttachment = 'initial'
+            this.#background.appendChild(seg)
         }
     }
     #beforeRender({ vertical, rtl }) {
@@ -1754,11 +1792,28 @@ export class Paginator extends HTMLElement {
         if (this.scrolled && this.#vertical) offset = -offset
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
             const startPosition = this.containerPosition
-            // Pre-set background for the destination so it's already
-            // correct when the slide animation reveals the new page
-            if (!this.scrolled) this.#replaceBackground(offset)
-            // Use GPU-accelerated scroll animation for smoother experience on high refresh rate screens
             this.#isAnimating = true
+            // Slide the per-view backgrounds in lockstep with the content. The
+            // content animates via a transform on each view; we re-sync the
+            // backgrounds to that animated offset every frame so each page's
+            // colour stays glued to its content as it slides. Pre-setting the
+            // destination instead made the outgoing page lose its background the
+            // instant the animation started, flashing the wrong colour across
+            // the part of the screen it still covered until it slid off.
+            if (!this.scrolled) {
+                this.#replaceBackground(startPosition)
+                const child = this.#container.children[0]
+                const syncBackground = () => {
+                    if (!this.#isAnimating) return
+                    const transform = child && getComputedStyle(child).transform
+                    const tx = transform && transform !== 'none'
+                        ? new DOMMatrix(transform)[this.#vertical ? 'm42' : 'm41'] : 0
+                    this.#replaceBackground(startPosition - tx)
+                    requestAnimationFrame(syncBackground)
+                }
+                requestAnimationFrame(syncBackground)
+            }
+            // Use GPU-accelerated scroll animation for smoother experience on high refresh rate screens
             return animateScroll(
                 this.#container,
                 this.scrollProp,
