@@ -560,6 +560,12 @@ class View {
         const vertical = this.#vertical
         const doc = this.document
         const pageFullscreen = doc.documentElement.hasAttribute('data-duokan-page-fullscreen')
+        // The fullscreen treatment pins the image with position:absolute and
+        // height:100% so it fills the fixed-height page. That only works in
+        // paginated (columnized) mode; in scrolled mode the container height is
+        // `auto`, so height:100% resolves to 0 and the cover collapses out of
+        // sight (#4379). Apply it only when columnized.
+        const applyFullscreen = pageFullscreen && this.#column
         for (const el of doc.body.querySelectorAll('img, svg, video')) {
             // clear previous inline constraints so we read CSS-authored values,
             // not stale pixel values from a previous resize (#3634)
@@ -576,16 +582,16 @@ class View {
             setStylesImportant(el, {
                 'max-height': vertical
                     ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight : '100%')
-                    : `${height - (pageFullscreen ? 0 : (marginTop + marginBottom))}px`,
+                    : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))}px`,
                 'max-width': vertical
-                    ? `${width - (pageFullscreen ? 0 : (marginLeft + marginRight))}px`
+                    ? `${width - (applyFullscreen ? 0 : (marginLeft + marginRight))}px`
                     : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth : '100%'),
                 'object-fit': 'contain',
                 'page-break-inside': 'avoid',
                 'break-inside': 'avoid',
                 'box-sizing': 'border-box',
             })
-            if (pageFullscreen) {
+            if (applyFullscreen) {
                 setStylesImportant(doc.documentElement, {
                     position: 'relative',
                 })
@@ -608,6 +614,24 @@ class View {
                 }
                 if (el.localName === 'svg') {
                     el.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+                }
+            } else if (pageFullscreen) {
+                // Scrolled mode for a fullscreen-cover doc: undo any absolute
+                // pinning left over from a previous paginated render so the
+                // image flows normally, bounded by the max-height set above
+                // (#4379). Without this, toggling paginated -> scrolled keeps
+                // the stale position:absolute/height:100% and the cover stays
+                // collapsed.
+                doc.documentElement.style.removeProperty('position')
+                for (const prop of ['position', 'inset', 'width', 'height', 'margin']) {
+                    el.style.removeProperty(prop)
+                }
+                let ancestor = el.parentElement
+                while (ancestor && ancestor !== doc.body) {
+                    for (const prop of ['width', 'height', 'margin', 'padding']) {
+                        ancestor.style.removeProperty(prop)
+                    }
+                    ancestor = ancestor.parentElement
                 }
             }
         }
