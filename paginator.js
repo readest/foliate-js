@@ -304,16 +304,23 @@ const getBackground = doc => {
         : bodyStyle.background
 }
 
-// Compute the full-bleed background segments for paginated mode. Each rendered
-// view yields one segment positioned so it tracks its content on screen
+// Compute the background segments for paginated mode. Each rendered view yields
+// one segment positioned so it tracks its content on screen
 // (segStart = inset + viewOffset - scrollPos). Because the paginator rebuilds
 // these on every scroll, the backgrounds stay glued to the content while the
 // user drags a swipe; when two sections with different backgrounds are both on
 // screen the seam falls on the real content boundary instead of one flat colour
-// spanning the viewport. A segment that meets a content edge is stretched out
-// into the full-bleed gutter (outside #container) so a coloured page fills the
-// screen edge to edge, matching its content area. `views` is the sorted list of
-// { size, bg } with bg already resolved ('' = transparent → no segment).
+// spanning the viewport.
+//
+// Each segment is clamped to the content area [containerStart, containerEnd] so
+// a coloured page stays inside its own column and never bleeds into the outer
+// margin gutters (the --_outer-min tracks that keep the left/right margins in
+// step with the centre gap). Otherwise a body-coloured page would spill its
+// colour into the outer gutter while an adjacent transparent/image page did not,
+// shifting the spread off-centre (~250px wide on a desktop, readest#4394). In
+// single-column mode the gutters are zero, so the clamp still fills the viewport
+// edge to edge. `views` is the sorted list of { size, bg } with bg already
+// resolved ('' = transparent → no segment).
 export const computeBackgroundSegments = (views, scrollPos, bgSize, inset, containerSize) => {
     const containerStart = inset
     const containerEnd = inset + containerSize
@@ -325,10 +332,9 @@ export const computeBackgroundSegments = (views, scrollPos, bgSize, inset, conta
         offset += view.size
         if (segEnd <= 0 || segStart >= bgSize) continue // off screen
         if (!view.bg) continue // transparent → let the host/theme show through
-        let start = segStart
-        let end = segEnd
-        if (start <= containerStart && end > containerStart) start = 0
-        if (start < containerEnd && end >= containerEnd) end = bgSize
+        const start = Math.max(segStart, containerStart)
+        const end = Math.min(segEnd, containerEnd)
+        if (end <= start) continue // entirely in an outer gutter
         segments.push({ start, size: end - start, bg: view.bg })
     }
     return segments
