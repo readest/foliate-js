@@ -187,14 +187,23 @@ export const compare = (a, b) => {
 
 const isTextNode = node => node?.nodeType === 3 || node?.nodeType === 4
 const isElementNode = node => node?.nodeType === 1
+// cfi-inert: the node AND its subtree are invisible to CFI (e.g. injected a11y
+// skip-links). cfi-skip: only the node itself is invisible — its children are
+// hoisted into its parent, so they keep the indices they'd have without the
+// wrapper (e.g. a layout-only <div> that wraps a table/equation for scrolling).
 const isInertNode = (node) => node.hasAttribute?.('cfi-inert')
+const isSkipNode = (node) => node.hasAttribute?.('cfi-skip')
+
+// CFI-relevant children: text + elements, with cfi-inert nodes removed and
+// cfi-skip wrappers spliced out (their own children hoisted in place, recursively).
+const rawChildNodes = (node) => Array.from(node.childNodes)
+    // "content other than element and character data is ignored"
+    .filter(node => isTextNode(node) || isElementNode(node))
+    .filter(node => !isInertNode(node))
+    .flatMap(node => isSkipNode(node) ? rawChildNodes(node) : [node])
 
 const getChildNodes = (node, filter) => {
-    const nodes = Array.from(node.childNodes)
-        // "content other than element and character data is ignored"
-        .filter(node => isTextNode(node) || isElementNode(node))
-        // always skip nodes marked with cfi-inert attribute
-        .filter(node => !isInertNode(node))
+    const nodes = rawChildNodes(node)
     return filter ? nodes.map(node => {
         const accept = filter(node)
         if (accept === NodeFilter.FILTER_REJECT) return null
@@ -261,7 +270,13 @@ const partsToNode = (node, parts, filter) => {
 }
 
 const nodeToParts = (node, offset, filter) => {
-    const { parentNode, id } = node
+    const { id } = node
+    // A cfi-skip wrapper is invisible to CFI, so index this node within the
+    // wrapper's nearest non-skip ancestor — where rawChildNodes has hoisted it —
+    // rather than within the wrapper. Otherwise its index would be computed
+    // relative to the wrapper and not match the same node without the wrapper.
+    let parentNode = node.parentNode
+    while (parentNode && isSkipNode(parentNode)) parentNode = parentNode.parentNode
     const indexed = indexChildNodes(parentNode, filter)
     const index = indexed.findIndex(x =>
         Array.isArray(x) ? x.some(x => x === node) : x === node)
