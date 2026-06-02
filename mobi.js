@@ -519,7 +519,7 @@ export class MOBI extends PDB {
         super()
         this.unzlib = unzlib
     }
-    async open(file) {
+    async open(file, { metadataOnly = false } = {}) {
         await super.open(file)
         // TODO: if (this.pdb.type === 'TEXt')
         this.headers = this.#getHeaders(await super.loadRecord(0))
@@ -538,6 +538,13 @@ export class MOBI extends PDB {
             }
         }
         await this.#setup()
+        // Metadata-only short-circuit. Skips the (expensive) MOBI6 /
+        // KF8 init(), which walks every text record and parses
+        // fdst/skel/frag indices the importer never reads.
+        // `this.headers` and `this.decode()` are already populated by
+        // #setup, so `this.getMetadata()` and `this.getCover()` are
+        // the only surfaces the caller is allowed to use here.
+        if (metadataOnly) return this
         return isKF8 ? new KF8(this).init() : new MOBI6(this).init()
     }
     #getHeaders(buf) {
@@ -1238,5 +1245,35 @@ class KF8 {
     }
     destroy() {
         for (const url of this.#cache.values()) URL.revokeObjectURL(url)
+    }
+}
+
+// Standalone MOBI metadata + cover extractor.
+//
+// Drives just enough of `MOBI.open()` to populate `this.headers` and
+// `this.decode()` — the PalmDB header, the record offsets table,
+// record 0 (PalmDoc header + MobiHeader + EXTH), and the decoder /
+// decompressor hookup. Crucially it does **not** drive
+// `new MOBI6(this).init()` / `new KF8(this).init()`: those walk every
+// text record in the book (decompressing and parsing fdst/skel/frag
+// indices), which is the expensive part of opening a MOBI and the
+// importer never reads any of their outputs.
+//
+// The result is byte-stable against `MOBI.open()`'s metadata path —
+// `identifier` is `mobi.uid.toString()` (PalmDB UID, foliate's
+// canonical MOBI identifier), title/author/etc. go through the same
+// `unescapeHTML` paths in `getMetadata()` — so callers (e.g. a
+// platform-native pre-parser) can build a `Book.metadata` that
+// matches what the reader path produces, without paying for the
+// `init()` work the importer doesn't consume.
+//
+// Returns `{ metadata, getCover }` where `getCover` is a thunk that
+// loads the cover record on demand (the importer typically prefers
+// a pre-resized cover from the native side and ignores this).
+export const readMobiMetadata = async (file, { unzlib } = {}) => {
+    const m = await new MOBI({ unzlib }).open(file, { metadataOnly: true })
+    return {
+        metadata: m.getMetadata(),
+        getCover: m.getCover.bind(m),
     }
 }
