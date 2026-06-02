@@ -17,7 +17,7 @@ const debounce = (f, wait, immediate) => {
 // Transforms ALL children of the container so multi-view layouts
 // animate as a unified whole. Extra elements (e.g. background) are
 // also transformed so they slide in sync with the content.
-const animateScroll = (element, scrollProp, startValue, endValue, duration, extraElements = []) => new Promise(resolve => {
+const cssAnimateScroll = (element, scrollProp, startValue, endValue, duration, extraElements = []) => new Promise(resolve => {
     if (document.hidden) {
         element[scrollProp] = endValue
         return resolve()
@@ -79,6 +79,38 @@ const animateScroll = (element, scrollProp, startValue, endValue, duration, extr
     // Fallback timeout in case transitionend doesn't fire
     setTimeout(cleanup, duration + 50)
 })
+
+const lerp = (min, max, x) => x * (max - min) + min
+const easeOutQuad = x => 1 - (1 - x) * (1 - x)
+// rAF animation of a scalar (used for the native scroll offset). Unlike the
+// CSS-transform animate, this never composites the whole section as a
+// single layer, so it doesn't block when the section exceeds the GPU texture
+// limit — it just changes scroll offset each frame (incremental/tiled).
+const rafAnimateScroll = (a, b, duration, ease, render) => new Promise(resolve => {
+    let start
+    const step = now => {
+        if (document.hidden) {
+            render(lerp(a, b, 1))
+            return resolve()
+        }
+        start ??= now
+        const fraction = Math.min(1, (now - start) / duration)
+        render(lerp(a, b, ease(fraction)))
+        if (fraction < 1) requestAnimationFrame(step)
+        else resolve()
+    }
+    if (document.hidden) {
+        render(lerp(a, b, 1))
+        return resolve()
+    }
+    requestAnimationFrame(step)
+})
+
+// A CSS-transform page-turn must composite the whole section as one layer. Once
+// that layer is past the GPU texture limit (large sections; worse at high DPR on
+// Android) Blink blocks the UI for ~1s preparing it before the turn snaps. Above
+// this accumulated rendered-view size, animate the native scroll offset instead.
+const RAF_ANIMATE_SCROLL_THRESHOLD = 20000
 
 // collapsed range doesn't return client rects sometimes (or always?)
 // try make get a non-collapsed range or element
@@ -987,22 +1019,10 @@ export class Paginator extends HTMLElement {
             overflow: hidden;
             display: flex;
             flex-direction: row;
-            /* GPU acceleration hints for smoother scrolling on high refresh rate displays */
-            transform: translateZ(0);
-            backface-visibility: hidden;
-            -webkit-backface-visibility: hidden;
-            perspective: 1000px;
-            -webkit-perspective: 1000px;
             transition: opacity 50ms ease-in;
         }
         #container.vertical {
             flex-direction: column;
-        }
-        #container > * {
-            /* Ensure child elements are GPU-accelerated for smooth transform animations */
-            transform: translateZ(0);
-            backface-visibility: hidden;
-            -webkit-backface-visibility: hidden;
         }
         :host([flow="scrolled"]) #container {
             grid-column: 2 / 5;
@@ -1817,6 +1837,20 @@ export class Paginator extends HTMLElement {
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
             const startPosition = this.containerPosition
             this.#isAnimating = true
+            // For a large section the CSS-transform animation blocks the UI while
+            // Blink composites the oversized layer; animate the native scroll
+            // offset instead (incremental/tiled, like a swipe), keeping the
+            // per-page backgrounds synced each frame.
+            if (this.#renderedViewSize > RAF_ANIMATE_SCROLL_THRESHOLD) {
+                return rafAnimateScroll(startPosition, offset, 300, easeOutQuad, x => {
+                    this.#container[this.scrollProp] = x
+                    if (!this.scrolled) this.#replaceBackground()
+                }).then(() => {
+                    this.#isAnimating = false
+                    this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+                    this.#afterScroll(reason)
+                })
+            }
             // Slide the per-view backgrounds in lockstep with the content. The
             // content animates via a transform on each view; we re-sync the
             // backgrounds to that animated offset every frame so each page's
@@ -1838,7 +1872,7 @@ export class Paginator extends HTMLElement {
                 requestAnimationFrame(syncBackground)
             }
             // Use GPU-accelerated scroll animation for smoother experience on high refresh rate screens
-            return animateScroll(
+            return cssAnimateScroll(
                 this.#container,
                 this.scrollProp,
                 startPosition,
