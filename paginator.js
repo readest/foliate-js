@@ -334,6 +334,18 @@ export const computeBackgroundSegments = (views, scrollPos, bgSize, inset, conta
     return segments
 }
 
+// When a host background texture is active (mounted on the reader container as
+// `.foliate-viewer::before`), a page whose own background is transparent must
+// NOT paint a fill — an opaque fill would occlude the texture. Returns '' (no
+// fill, so the texture shows through) for a transparent page under a texture,
+// and the resolved colour otherwise. Shared by scrolled-mode view elements and
+// paginated-mode segments so both modes treat textures identically (readest#4399).
+export const textureAwareBackground = (resolved, hasTexture) => {
+    const isTransparent = !resolved
+        || /^\s*(transparent|rgba\(0,\s*0,\s*0,\s*0\))/.test(resolved)
+    return hasTexture && isTransparent ? '' : resolved
+}
+
 const makeMarginals = (length, part) => Array.from({ length }, () => {
     const div = document.createElement('div')
     const child = document.createElement('div')
@@ -1378,6 +1390,7 @@ export class Paginator extends HTMLElement {
         const bgTextureId = htmlStyle.getPropertyValue('--bg-texture-id')
         const isDarkMode = htmlStyle.getPropertyValue('color-scheme') === 'dark'
         const fallbackBg = themeBgColor || ''
+        const hasTexture = !!bgTextureId && bgTextureId !== 'none'
 
         const resolveBackground = (background) => {
             if (!background) return fallbackBg
@@ -1402,15 +1415,12 @@ export class Paginator extends HTMLElement {
             // In scrolled mode, set background directly on each view element
             // so it scrolls with the content. The static #background provides
             // the fallback color for margins and gaps between views.
-            const hasTexture = !!bgTextureId && bgTextureId !== 'none'
             this.#background.innerHTML = ''
             this.#background.style.display = ''
             this.#background.style.background = hasTexture ? '' : fallbackBg
             for (const [, view] of this.#sortedViews) {
                 const resolved = resolveBackground(view.docBackground)
-                const isTransparent = !resolved
-                    || /^\s*(transparent|rgba\(0,\s*0,\s*0,\s*0\))/.test(resolved)
-                view.element.style.background = hasTexture && isTransparent ? '' : resolved
+                view.element.style.background = textureAwareBackground(resolved, hasTexture)
             }
             return
         }
@@ -1428,13 +1438,15 @@ export class Paginator extends HTMLElement {
         const scrollPos = Math.abs(atPosition ?? this.#renderedStart)
         const views = this.#sortedViews.map(([, view]) => ({
             size: view.element.getBoundingClientRect()[this.sideProp],
-            bg: resolveBackground(view.docBackground),
+            bg: textureAwareBackground(resolveBackground(view.docBackground), hasTexture),
         }))
         const segments = computeBackgroundSegments(views, scrollPos, bgSize, inset, this.size)
 
         this.#background.innerHTML = ''
         this.#background.style.display = ''
-        this.#background.style.background = fallbackBg
+        // Under a texture, leave the container transparent so the host texture
+        // shows through the gaps a transparent page no longer fills (readest#4399).
+        this.#background.style.background = hasTexture ? '' : fallbackBg
 
         const posProp = this.#vertical ? 'top' : 'left'
         const sizeProp = this.#vertical ? 'height' : 'width'
