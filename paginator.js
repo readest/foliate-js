@@ -1820,10 +1820,24 @@ export class Paginator extends HTMLElement {
                     ({ left: size - right - marginTop, right: size - left - marginBottom })
                 : ({ top, bottom }) => ({ left: top - marginTop, right: bottom - marginBottom })
         }
-        const pxSize = this.#renderedPages * this.size
+        // For RTL the mapper mirrors a rect within the iframe-local
+        // coordinate space of the *target view* (each view is a separate
+        // document with its own column layout), not across the whole
+        // container. Using `#renderedPages * size` (= total width of all
+        // loaded views) was correct only when a single view was loaded;
+        // once #fillVisibleArea pre-loads adjacent sections the total
+        // width grows but the per-view rect coordinates do not change,
+        // so the mapper would scroll the same anchor to a different
+        // (further-right) container offset on every re-anchor — driving
+        // the page off the user's saved position. Use the supplied
+        // view's width when available, falling back to the primary view.
+        const targetView = view ?? this.#primaryView
+        const viewSize = targetView
+            ? targetView.element.getBoundingClientRect()[this.sideProp]
+            : this.#renderedViewSize
         return this.#rtl
             ? ({ left, right }) =>
-                ({ left: pxSize - right, right: pxSize - left })
+                ({ left: viewSize - right, right: viewSize - left })
             : this.#vertical
                 ? ({ top, bottom }) => ({ left: top, right: bottom })
                 : f => f
