@@ -1687,6 +1687,13 @@ export class Paginator extends HTMLElement {
     }
 
     scrollBy(dx, dy) {
+        // #scrollBounds is populated by #scrollToPage and stays unset until
+        // the first page settles. A swipe that lands before that happens
+        // (for example a fast swipe right after the reader mounts, or
+        // before a section has finished loading) would otherwise blow up
+        // on the destructuring below — bail out and let the next settled
+        // scroll re-enable swipe-driven motion.
+        if (!this.#scrollBounds) return
         const delta = this.#vertical ? dy : dx
         const [offset, a, b] = this.#scrollBounds
         const rtl = this.#rtl
@@ -1700,6 +1707,11 @@ export class Paginator extends HTMLElement {
     // dx, dy: total distance swiped
     // dt: total time of the swipe (ms)
     snap(vx, vy, dx, dy, dt) {
+        // Same guard as scrollBy: an early swipe whose touchend fires
+        // before the first #scrollToPage seeds #scrollBounds would crash
+        // on the destructuring. Skip the snap; the next settled scroll
+        // populates the bounds and subsequent swipes work normally.
+        if (!this.#scrollBounds) return
         const velocity = this.#vertical ? vy : vx
         const avgVelocity = this.#vertical ? dy / dt : dx / dt
         const horizontal = Math.abs(vx) * 2 > Math.abs(vy)
