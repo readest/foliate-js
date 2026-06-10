@@ -1228,3 +1228,24 @@ ${doc.querySelector('parsererror').innerText}`)
         this.#loader?.destroy()
     }
 }
+
+// Standalone OPF metadata extractor.
+//
+// Exposed so callers that already have the OPF bytes in hand (e.g. a
+// platform-native pre-parser that read the zip on a faster runtime)
+// can derive `Book.metadata` without driving the full `EPUB.init()` —
+// which would force `@zip.js/zip.js` to scan the central directory
+// and inflate nav.xhtml/ncx the importer never reads. The output
+// shape is identical to what `EPUB.init()` would produce, so the
+// import-path BookDoc and the reader-path BookDoc remain byte-stable
+// across `Book.metadata.identifier`, title, contributors, refines
+// chains, ONIX5, and `belongs-to-collection`.
+//
+// Two entry points to fit different callers:
+//   - `getEpubMetadata(opfDoc)`        — already-parsed OPF Document
+//   - `parseEpubMetadataFromXML(xml)`  — raw OPF XML string
+export const getEpubMetadata = opf => getMetadata(opf)
+export const parseEpubMetadataFromXML = xml => {
+    const opf = new DOMParser().parseFromString(xml, 'application/xml')
+    return getMetadata(opf)
+}
