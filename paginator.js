@@ -1048,6 +1048,14 @@ export class Paginator extends HTMLElement {
             overflow: auto;
             overflow-anchor: auto;
             flex-direction: column;
+            /* Composite the scroll container so its scrollbar repaints on the
+               compositor thread; the main-thread scrollbar fails to
+               re-invalidate after content-size changes (adjacent-section
+               preloading right after open), so on Windows' always-on
+               scrollbars it vanishes shortly after the book opens
+               (readest#4470). Scoped to scrolled mode to leave the paginated
+               page-turn path un-composited. */
+            transform: translateZ(0);
         }
         :host([flow="scrolled"]) #container.vertical {
             flex-direction: row;
