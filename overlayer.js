@@ -74,42 +74,61 @@ export class Overlayer {
         }
         return 1.0
     }
-    #splitRangeByParagraph(range) {
+    // Split a range into per-text-node sub-ranges (plus replaced elements
+    // like images), so `getClientRects()` only ever returns line-level boxes.
+    // Collecting rects on the whole range would also include the border boxes
+    // of fully contained block elements, over-highlighting blank space.
+    #splitRange(range) {
         const ancestor = range.commonAncestorContainer
-        const paragraphs = Array.from(ancestor.querySelectorAll?.('p, h1, h2, h3, h4') || [])
-
+        if (ancestor.nodeType !== Node.ELEMENT_NODE
+            && ancestor.nodeType !== Node.DOCUMENT_NODE) return [range]
+        const doc = ancestor.ownerDocument ?? ancestor
+        const walker = doc.createTreeWalker(ancestor,
+            NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+                acceptNode: node => {
+                    if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT
+                    if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT
+                    return node.matches?.('img, svg')
+                        ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
+                },
+            })
         const splitRanges = []
-        paragraphs.forEach((p) => {
-            const pRange = document.createRange()
-            if (range.intersectsNode(p)) {
-                pRange.selectNodeContents(p)
-                if (pRange.compareBoundaryPoints(Range.START_TO_START, range) < 0) {
-                    pRange.setStart(range.startContainer, range.startOffset)
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const subRange = doc.createRange()
+            if (node.nodeType === Node.TEXT_NODE) {
+                subRange.selectNodeContents(node)
+                if (subRange.compareBoundaryPoints(Range.START_TO_START, range) < 0) {
+                    subRange.setStart(range.startContainer, range.startOffset)
                 }
-                if (pRange.compareBoundaryPoints(Range.END_TO_END, range) > 0) {
-                    pRange.setEnd(range.endContainer, range.endOffset)
+                if (subRange.compareBoundaryPoints(Range.END_TO_END, range) > 0) {
+                    subRange.setEnd(range.endContainer, range.endOffset)
                 }
-                splitRanges.push(pRange)
-            }
-        })
+            } else subRange.selectNode(node)
+            splitRanges.push(subRange)
+        }
         return splitRanges.length === 0 ? [range] : splitRanges
+    }
+    #getRects(range) {
+        const zoom = this.#zoom
+        const rects = []
+        for (const subRange of this.#splitRange(range)) {
+            for (const rect of subRange.getClientRects()) {
+                rects.push({
+                    left: rect.left * zoom,
+                    top: rect.top * zoom,
+                    right: rect.right * zoom,
+                    bottom: rect.bottom * zoom,
+                    width: rect.width * zoom,
+                    height: rect.height * zoom,
+                })
+            }
+        }
+        return rects
     }
     add(key, range, draw, options) {
         if (this.#map.has(key)) this.remove(key)
         if (typeof range === 'function') range = range(this.#svg.getRootNode())
-        const zoom = this.#zoom
-        let rects = []
-        this.#splitRangeByParagraph(range).forEach((pRange) => {
-            const pRects = Array.from(pRange.getClientRects()).map(rect => ({
-                left: rect.left * zoom,
-                top: rect.top * zoom,
-                right: rect.right * zoom,
-                bottom: rect.bottom * zoom,
-                width: rect.width * zoom,
-                height: rect.height * zoom,
-            }))
-            rects = rects.concat(pRects)
-        })
+        const rects = this.#getRects(range)
         const element = draw(rects, options)
         this.#svg.append(element)
         this.#map.set(key, { range, draw, options, element, rects })
@@ -123,19 +142,7 @@ export class Overlayer {
         for (const obj of this.#map.values()) {
             const { range, draw, options, element } = obj
             this.#svg.removeChild(element)
-            const zoom = this.#zoom
-            let rects = []
-            this.#splitRangeByParagraph(range).forEach((pRange) => {
-                const pRects = Array.from(pRange.getClientRects()).map(rect => ({
-                    left: rect.left * zoom,
-                    top: rect.top * zoom,
-                    right: rect.right * zoom,
-                    bottom: rect.bottom * zoom,
-                    width: rect.width * zoom,
-                    height: rect.height * zoom,
-                }))
-                rects = rects.concat(pRects)
-            })
+            const rects = this.#getRects(range)
             const el = draw(rects, options)
             this.#svg.append(el)
             obj.element = el
