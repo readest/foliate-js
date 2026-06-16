@@ -252,8 +252,18 @@ export const getFeed = doc => {
         const children = Array.from(entry.children)
         const links = children.filter(filter('link')).map(getLink)
         const linksByRel = groupByArray(links, link => link.rel)
-        const isPub = Array.from(linksByRel.keys())
+        const hasAcquisition = Array.from(linksByRel.keys())
             .some(rel => rel?.startsWith(REL.ACQ) || rel === 'preview' || rel === REL.STREAM)
+        // An entry with neither an acquisition link nor a link to a sub-catalog,
+        // but which carries a cover/thumbnail image, is a publication that simply
+        // has no downloadable format (e.g. a Calibre book whose file was removed
+        // but whose metadata is kept). Treat it as a publication so its metadata
+        // is shown; otherwise it falls through to the navigation branch with the
+        // cover image as its href, and tapping it tries to parse the image as a
+        // feed (readest issue #4599).
+        const hasNavLink = links.some(link => isOPDSCatalog(link.type))
+        const hasImage = REL.COVER.concat(REL.THUMBNAIL).some(rel => linksByRel.has(rel))
+        const isPub = hasAcquisition || (!hasNavLink && hasImage)
 
         const groupLinks = linksByRel.get(REL.GROUP) ?? linksByRel.get('collection')
         const groupLink = groupLinks?.length
