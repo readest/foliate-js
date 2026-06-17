@@ -3,16 +3,33 @@ const CONTEXT_LENGTH = 50
 
 const normalizeWhitespace = str => str.replace(/\s+/g, ' ')
 
+// Gather context preceding the match by walking back across text nodes until we
+// have enough for the excerpt. A match can sit in its own text node (e.g. a word
+// wrapped in <i>/<em>/<b>), leaving no context within the start node itself.
+const collectBefore = (strs, index, offset) => {
+    let str = strs[index].slice(0, offset)
+    for (let i = index - 1; i >= 0 && normalizeWhitespace(str).trim().length < CONTEXT_LENGTH; i--)
+        str = strs[i] + str
+    return str
+}
+
+const collectAfter = (strs, index, offset) => {
+    let str = strs[index].slice(offset)
+    for (let i = index + 1; i < strs.length && normalizeWhitespace(str).trim().length < CONTEXT_LENGTH; i++)
+        str += strs[i]
+    return str
+}
+
 const makeExcerpt = (strs, { startIndex, startOffset, endIndex, endOffset }) => {
     const start = strs[startIndex]
     const end = strs[endIndex]
-    const match = start === end
+    const match = startIndex === endIndex
         ? start.slice(startOffset, endOffset)
         : start.slice(startOffset)
-            + strs.slice(start + 1, end).join('')
+            + strs.slice(startIndex + 1, endIndex).join('')
             + end.slice(0, endOffset)
-    const trimmedStart = normalizeWhitespace(start.slice(0, startOffset)).trimStart()
-    const trimmedEnd = normalizeWhitespace(end.slice(endOffset)).trimEnd()
+    const trimmedStart = normalizeWhitespace(collectBefore(strs, startIndex, startOffset)).trimStart()
+    const trimmedEnd = normalizeWhitespace(collectAfter(strs, endIndex, endOffset)).trimEnd()
     const ellipsisPre = trimmedStart.length < CONTEXT_LENGTH ? '' : '…'
     const ellipsisPost = trimmedEnd.length < CONTEXT_LENGTH ? '' : '…'
     const pre = `${ellipsisPre}${trimmedStart.slice(-CONTEXT_LENGTH)}`
