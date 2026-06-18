@@ -603,7 +603,34 @@ class View {
             'position': 'static',
         })
         this.setImageSize(availableWidth, availableHeight)
+        this.#demoteUnfragmentableBoxes(availableHeight)
         this.expand()
+    }
+    // Atomic inline-level boxes (inline-block / inline-flex / inline-grid /
+    // inline-table) cannot be fragmented across columns. When an EPUB declares
+    // such a display on a tall block container, the box overflows the page and
+    // every column past the first is clipped, so whole sections silently vanish
+    // (e.g. a chapter that jumps straight to its references). Detect the
+    // vertical overflow this causes in paginated mode and demote the offending
+    // boxes to their fragmentable block-level equivalents so the content
+    // paginates normally. The querySelectorAll scan only runs when the document
+    // actually overflows its column, which is the (rare) bug case.
+    #demoteUnfragmentableBoxes(availableHeight) {
+        const doc = this.document
+        const root = doc?.documentElement
+        if (!root || root.scrollHeight <= root.clientHeight + 1) return
+        const view = doc.defaultView
+        const fragmentable = {
+            'inline-block': 'block',
+            'inline-flex': 'flex',
+            'inline-grid': 'grid',
+            'inline-table': 'table',
+        }
+        for (const el of doc.body.querySelectorAll('*')) {
+            const replacement = fragmentable[view.getComputedStyle(el).display]
+            if (replacement && el.getBoundingClientRect().height > availableHeight)
+                setStylesImportant(el, { display: replacement })
+        }
     }
     setImageSize(availableWidth, availableHeight) {
         const { width, height, marginTop, marginRight, marginBottom, marginLeft } = this.#layout
