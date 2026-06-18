@@ -235,6 +235,13 @@ export const makeFB2 = async blob => {
     }
     const getDate = el => el?.getAttribute('value') ?? getElementText(el)
     const annotation = $('title-info annotation')
+    // FB2 stores series info as `<sequence name="…" number="…"/>` in title-info
+    const series = $$('title-info > sequence')
+        .map(el => ({
+            name: normalizeWhitespace(el.getAttribute('name')),
+            position: el.getAttribute('number') || undefined,
+        }))
+        .filter(x => x.name)
     book.metadata = {
         title: getElementText($('title-info book-title')),
         identifier: getElementText($('document-info id')),
@@ -247,6 +254,7 @@ export const makeFB2 = async blob => {
             .concat($$('document-info program-used').map(getElementText))
             .map(x => Object.assign(typeof x === 'string' ? { name: x } : x,
                 { role: 'bkp' })),
+        belongsTo: series.length ? { series } : undefined,
         publisher: getElementText($('publish-info publisher')),
         published: getDate($('title-info date')),
         modified: getDate($('document-info date')),
