@@ -451,12 +451,15 @@ export class TTS {
         this.#lastMark = null
         const [doc] = this.#list.find(range_ =>
             range.compareBoundaryPoints(Range.END_TO_START, range_) <= 0)
+        // Pick the mark whose sentence contains the selection: the last mark
+        // that begins at or before it. Taking the first mark beginning at or
+        // after the selection skipped to the next sentence whenever the
+        // selected word was not its sentence's first word.
         let mark
-        for (const [name, range_] of this.#ranges.entries())
-            if (range.compareBoundaryPoints(Range.START_TO_START, range_) <= 0) {
-                mark = name
-                break
-            }
+        for (const [name, range_] of this.#ranges.entries()) {
+            if (range.compareBoundaryPoints(Range.START_TO_START, range_) < 0) break
+            mark = name
+        }
         return this.#speak(doc, ssml => this.#getMarkElement(ssml, mark))
     }
     getLastRange() {
