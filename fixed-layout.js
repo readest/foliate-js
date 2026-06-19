@@ -59,6 +59,11 @@ export const restoreScrollModeAnchor = (pages, anchor, maxScrollTop) => {
     return clamp(page.top + page.height * anchor.fraction, 0, maxScrollTop)
 }
 
+export const scrollGapToCss = (value) => {
+    const n = parseFloat(value)
+    return Number.isFinite(n) && n >= 0 ? `${n}px` : null
+}
+
 // Align the SVG overlayer's coord system with the iframe's unscaled content.
 // When the iframe is visually scaled via CSS transform (non-PDF path),
 // getClientRects() inside the iframe returns positions in the iframe's native
@@ -82,7 +87,7 @@ export const applyOverlayerViewBox = (frame, overlayer) => {
 }
 
 export class FixedLayout extends HTMLElement {
-    static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow']
+    static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow', 'scroll-gap']
     #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
@@ -181,7 +186,7 @@ export class FixedLayout extends HTMLElement {
             position: relative;
             flex-shrink: 0;
             overflow: hidden;
-            margin: 4px 0;
+            margin: var(--scroll-page-gap, 4px) 0;
         }
         :host([flow="scrolled"]) .scroll-page iframe {
             pointer-events: none;
@@ -215,6 +220,14 @@ export class FixedLayout extends HTMLElement {
                     this.#render()
                 }
                 break
+            case 'scroll-gap': {
+                const css = scrollGapToCss(value)
+                const anchor = this.#scrollMode ? this.#captureScrollModeAnchor() : null
+                if (css === null) this.style.removeProperty('--scroll-page-gap')
+                else this.style.setProperty('--scroll-page-gap', css)
+                if (anchor) this.#restoreScrollModeAnchor(anchor)
+                break
+            }
         }
     }
     async #createFrame({ index, src: srcOption, detached = false }) {
