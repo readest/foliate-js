@@ -685,6 +685,10 @@ class View {
                     width: '100%',
                     height: '100%',
                     margin: '0',
+                    // stretch edge-to-edge, ignoring aspect ratio, so the cover
+                    // fills the whole page like Duokan's native full-page render
+                    // (overrides the 'contain' set for all images above)
+                    'object-fit': 'fill',
                 })
                 let ancestor = el.parentElement
                 while (ancestor && ancestor !== doc.body) {
@@ -697,7 +701,7 @@ class View {
                     ancestor = ancestor.parentElement
                 }
                 if (el.localName === 'svg') {
-                    el.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+                    el.setAttribute('preserveAspectRatio', 'none')
                 }
             } else if (pageFullscreen) {
                 // Scrolled mode for a fullscreen-cover doc: undo any absolute
