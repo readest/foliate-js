@@ -64,6 +64,18 @@ export const scrollGapToCss = (value) => {
     return Number.isFinite(n) && n >= 0 ? `${n}px` : null
 }
 
+// Scroll offsets to apply to the host (`overflow:auto`) after rendering a
+// paginated page. Horizontal is always re-centered so the page sits in the
+// middle of the viewport. Vertical is reset to the top only on a page turn:
+// a tall fit-width page overflows the host vertically, and without the reset the
+// freshly-shown page inherits the previous page's offset and opens scrolled to
+// the bottom (#4683). Plain re-renders (resize, zoom, theme) keep the reader's
+// current vertical position within the page.
+export const computePaginatedScroll = ({ elementWidth, containerWidth, scrollTop, pageTurn }) => ({
+    scrollLeft: (elementWidth - containerWidth) / 2,
+    scrollTop: pageTurn ? 0 : scrollTop,
+})
+
 // Align the SVG overlayer's coord system with the iframe's unscaled content.
 // When the iframe is visually scaled via CSS transform (non-PDF path),
 // getClientRects() inside the iframe returns positions in the iframe's native
@@ -282,7 +294,7 @@ export class FixedLayout extends HTMLElement {
             }
         })
     }
-    #render(side = this.#side) {
+    #render(side = this.#side, pageTurn = false) {
         if (this.#scrollMode) {
             this.#renderScrollMode()
             return []
@@ -383,7 +395,14 @@ export class FixedLayout extends HTMLElement {
             if (!container) return
             const containerWidth = container.clientWidth
             const containerHeight = container.clientHeight
-            container.scrollLeft = (element.clientWidth - containerWidth) / 2
+            const { scrollLeft, scrollTop } = computePaginatedScroll({
+                elementWidth: element.clientWidth,
+                containerWidth,
+                scrollTop: container.scrollTop,
+                pageTurn,
+            })
+            container.scrollLeft = scrollLeft
+            container.scrollTop = scrollTop
 
             return {
                 width: element.clientWidth,
@@ -459,8 +478,9 @@ export class FixedLayout extends HTMLElement {
 
         // Render layout and await any async onZoom callbacks (e.g. PDF text
         // layer rendering) so the document is fully populated before overlayers
-        // try to resolve CFIs against it.
-        const renderPromises = this.#render()
+        // try to resolve CFIs against it. Pass pageTurn so a tall fit-width page
+        // starts at the top instead of inheriting the previous page's scroll.
+        const renderPromises = this.#render(this.#side, true)
         if (renderPromises.length) await Promise.all(renderPromises)
 
         const showingFrames = center
@@ -824,7 +844,7 @@ export class FixedLayout extends HTMLElement {
         if (this.#center || this.#left?.blank) return
         if (this.#portrait && this.#left?.element?.style?.display === 'none') {
             this.#side = 'left'
-            this.#render()
+            this.#render(this.#side, true)
             this.#reportLocation('page')
             return true
         }
@@ -833,7 +853,7 @@ export class FixedLayout extends HTMLElement {
         if (this.#center || this.#right?.blank) return
         if (this.#portrait && this.#right?.element?.style?.display === 'none') {
             this.#side = 'right'
-            this.#render()
+            this.#render(this.#side, true)
             this.#reportLocation('page')
             return true
         }
