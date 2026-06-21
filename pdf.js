@@ -158,6 +158,16 @@ const render = async (page, doc, zoom, pageColors) => {
     const canvas = document.createElement('canvas')
     canvas.height = viewport.height
     canvas.width = viewport.width
+    // `canvas.width`/`canvas.height` are the bitmap size and must be integers,
+    // so the fractional `viewport.{width,height}` (= pageSizeCss *
+    // devicePixelRatio) is truncated. The iframe content is displayed scaled by
+    // `1 / devicePixelRatio` (see the `documentElement` transform above), so a
+    // truncated bitmap renders up to ~1 device pixel narrower than the page box,
+    // leaving a one-pixel white seam at the spine of a two-page spread (#4587).
+    // Pin an explicit CSS size to the un-truncated viewport dimensions so the
+    // bitmap scales to fill the page box exactly.
+    canvas.style.width = `${viewport.width}px`
+    canvas.style.height = `${viewport.height}px`
     const canvasContext = canvas.getContext('2d')
     const renderTask = page.render({ canvasContext, viewport, pageColors })
     activeRenderTasks.set(doc, renderTask)
