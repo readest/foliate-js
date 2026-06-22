@@ -2057,9 +2057,18 @@ export class Paginator extends HTMLElement {
         if (!targetView?.document) return
         const viewOffset = this.#getViewOffset(this.#primaryIndex)
         if (this.scrolled) {
-            // In scrolled mode, the primary view may be scrolled out of
-            // the viewport at a section boundary. Try all visible views
-            // and return the first valid (non-collapsed) range.
+            // In scrolled mode several sections can share the viewport at a
+            // section boundary, and the primary view may even be scrolled out
+            // of view. Prefer the view that covers the viewport centre — that
+            // is the section the reader is actually reading, so its title is
+            // the one to show. Falling back to the first overlapping view (the
+            // old behaviour) would report a thin sliver at the top edge, whose
+            // chapter title no longer matches the dominant content
+            // (readest#4436). Keep that first valid range as a fallback for
+            // when no loaded view covers the centre (e.g. at the very top or
+            // bottom of the book).
+            const center = this.#renderedStart + this.size / 2
+            let fallback
             for (const [index, v] of this.#sortedViews) {
                 if (!v.document) continue
                 const off = this.#getViewOffset(index)
@@ -2069,9 +2078,11 @@ export class Paginator extends HTMLElement {
                 const range = getVisibleRange(v.document,
                     this.#renderedStart - off, this.#renderedEnd - off,
                     this.#getRectMapper(v))
-                if (range && !range.collapsed) return { range, index }
+                if (!range || range.collapsed) continue
+                if (center >= off && center < off + vSize) return { range, index }
+                fallback ??= { range, index }
             }
-            return
+            return fallback
         }
         const range = getVisibleRange(targetView.document,
             this.#renderedStart - viewOffset,
@@ -2160,9 +2171,13 @@ export class Paginator extends HTMLElement {
         const primaryView = this.#primaryView
         const detail = { reason, range, index }
         if (this.scrolled) {
+            // The relocated index may differ from #primaryIndex (the centre of
+            // the viewport can sit in a different view than its top edge), so
+            // size the fraction against the relocated view to keep it in sync.
+            const indexView = this.#views.get(index) ?? primaryView
             const primaryOffset = this.#getViewOffset(index)
-            const primarySize = primaryView
-                ? primaryView.element.getBoundingClientRect()[this.sideProp] : this.#renderedViewSize
+            const primarySize = indexView
+                ? indexView.element.getBoundingClientRect()[this.sideProp] : this.#renderedViewSize
             detail.fraction = primarySize > 0
                 ? Math.max(0, Math.min(1, (this.#renderedStart - primaryOffset) / primarySize)) : 0
         } else if (this.#renderedPages > 0 && primaryView) {
