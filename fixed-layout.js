@@ -720,13 +720,18 @@ export class FixedLayout extends HTMLElement {
                         },
                     },
                 }))
-                // Forward wheel events to host when iframe has pointer-events
-                // (fallback for the brief window after scroll settles)
-                doc.addEventListener('wheel', e => {
-                    // Disable pointer-events immediately so subsequent
-                    // wheel ticks use native scroll
+                // During the brief idle window after scrolling settles the
+                // iframe is interactive (pointer-events: auto), so the first
+                // wheel tick of a new gesture lands on it. The browser already
+                // chains that tick to the host scroller natively (a single
+                // smooth scroll, matching the page margins) — so we must NOT
+                // scroll the host ourselves here, or the manual scroll stacks
+                // on top of the native one and the page jumps twice as far in
+                // an instant lurch (readest#4727). Just drop pointer-events so
+                // the iframe stops intercepting and the rest of the gesture
+                // scrolls the host natively too.
+                doc.addEventListener('wheel', () => {
                     this.#setScrollIframeInteraction(false)
-                    this.scrollBy({ top: e.deltaY, left: e.deltaX, behavior: 'instant' })
                 }, { passive: true })
             }
         } catch (e) {
