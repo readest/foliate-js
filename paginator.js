@@ -1080,6 +1080,18 @@ export class Paginator extends HTMLElement {
         #container.vertical {
             flex-direction: column;
         }
+        /* Apple WebKit (iOS/macOS) composites large, persistent layers without
+           the ~1s Blink freeze Android Chromium hits at high DPR (the reason
+           these promotion hints were dropped and rafAnimateScroll was added).
+           When the host opts in, restore persistent compositor layers for the
+           container and each view so the GPU cssAnimateScroll page-turn stays
+           smooth on 120Hz ProMotion instead of promoting a layer on-demand
+           every turn (readest#4768). Paginated mode only; scrolled mode does
+           its own compositing below. */
+        :host([gpu-composite]:not([flow="scrolled"])) #container,
+        :host([gpu-composite]:not([flow="scrolled"])) #container > * {
+            transform: translateZ(0);
+        }
         :host([flow="scrolled"]) #container {
             grid-column: 2 / 5;
             grid-row: 1 / -1;
@@ -1930,8 +1942,12 @@ export class Paginator extends HTMLElement {
             // For a large section the CSS-transform animation blocks the UI while
             // Blink composites the oversized layer; animate the native scroll
             // offset instead (incremental/tiled, like a swipe), keeping the
-            // per-page backgrounds synced each frame.
-            if (this.#renderedViewSize > RAF_ANIMATE_SCROLL_THRESHOLD) {
+            // per-page backgrounds synced each frame. Hosts that composite large
+            // layers without that freeze (Apple WebKit, via the gpu-composite
+            // opt-in) skip this main-thread fallback and keep the smooth GPU
+            // cssAnimateScroll path even for large sections (readest#4768).
+            if (!this.hasAttribute('gpu-composite')
+                && this.#renderedViewSize > RAF_ANIMATE_SCROLL_THRESHOLD) {
                 return rafAnimateScroll(startPosition, offset, 300, easeOutQuad, x => {
                     this.#container[this.scrollProp] = x
                     if (!this.scrolled) this.#replaceBackground()
