@@ -191,6 +191,10 @@ export class FixedLayout extends HTMLElement {
     #scrollLoadingCount = 0
     #scrollIdleTimer = null
     #scrollCurrentIndex = -1
+    // True while the host is actively scrolling. Pages load interactive only
+    // when idle so a page that finishes loading mid-scroll can't flip its iframe
+    // interactive and let its own pointer handlers hijack the native scroll.
+    #scrolling = false
     // True while a pinch gesture is live. Suppresses page load/eviction so the
     // placeholder layout (and thus scrollTop) can't drift mid-pinch, which would
     // make the live preview and the committed zoom land in different places.
@@ -272,6 +276,13 @@ export class FixedLayout extends HTMLElement {
             /* auto (not hidden) so a zoomed page wider than the viewport can be
                panned horizontally; collapses to no scrollbar when pages fit. */
             overflow-x: auto;
+            /* Keep one-finger pan (native scroll) but reserve two-finger
+               gestures for JS so a pinch is delivered instead of triggering the
+               browser's own pinch-zoom or being swallowed by the scroller. */
+            touch-action: pan-x pan-y;
+        }
+        :host([flow="scrolled"]) .scroll-page {
+            touch-action: pan-x pan-y;
         }
         :host([flow="scrolled"]) .scroll-container {
             display: flex;
@@ -291,7 +302,11 @@ export class FixedLayout extends HTMLElement {
             position: relative;
             flex-shrink: 0;
             overflow: hidden;
-            margin: var(--scroll-page-gap, 4px) 0;
+            /* Scale the gap with the zoom so the committed layout matches the
+               pinch preview, whose transform scales the whole container (gaps
+               included). Without this the gap snaps back to a fixed px on
+               release and the pages shift. */
+            margin: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1)) 0;
         }
         :host([flow="scrolled"]) .scroll-page iframe {
             pointer-events: none;
@@ -688,10 +703,18 @@ export class FixedLayout extends HTMLElement {
         for (const index of load) this.#loadScrollPage(this.#scrollPages[index])
     }
     #handleScrollEvent = () => {
-        // Disable iframe interaction during scroll for native smooth scrolling
+        // Drop iframe interaction while the host is actively scrolling so the
+        // scroll stays native-smooth (the iframe's own pointer handlers can't
+        // hijack it), then restore it on settle so text selection, taps, and
+        // same-page pinch work again. (Cross-page pinch is intentionally not
+        // supported in this mode: a gesture spanning two page iframes can't be
+        // owned by one document — keeping the iframes interactive is the
+        // trade-off for native selection.)
+        this.#scrolling = true
         this.#setScrollIframeInteraction(false)
         if (this.#scrollIdleTimer) clearTimeout(this.#scrollIdleTimer)
         this.#scrollIdleTimer = setTimeout(() => {
+            this.#scrolling = false
             this.#setScrollIframeInteraction(true)
             // Report location only after scroll settles to avoid
             // expensive React re-renders on every frame
@@ -839,6 +862,14 @@ export class FixedLayout extends HTMLElement {
             this.#renderScrollPage(pageData)
             this.#restoreScrollModeAnchor(scrollAnchor)
 
+            // Make the page interactive right away when idle so text selection
+            // and taps work without first scrolling. While scrolling, leave it
+            // inert (the scroll-settle handler turns it back on) so its pointer
+            // handlers can't hijack the native scroll.
+            if (!this.#scrolling && !this.#pinching && frame.iframe) {
+                frame.iframe.style.pointerEvents = 'auto'
+            }
+
             // Create overlayer
             const doc = frame.iframe.contentDocument
             if (doc) {
@@ -895,6 +926,9 @@ export class FixedLayout extends HTMLElement {
     #renderScrollMode() {
         const { width: hostWidth } = this.getBoundingClientRect()
         if (!hostWidth) return
+        // Scale the inter-page gap with the zoom so the committed layout matches
+        // the pinch preview (which scales the whole container, gaps included).
+        this.style.setProperty('--scroll-zoom', String(this.#scaleFactor))
         // A pinch commit restores the viewport-centre anchor (both axes) so the
         // zoom lands exactly where the live preview showed it; every other
         // re-render keeps the reader's vertical position via the top anchor.
