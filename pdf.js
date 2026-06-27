@@ -324,7 +324,12 @@ const makeTOCItem = async (item, pdf) => {
     }
 }
 
-const MAX_CACHED_PAGES = 8
+// Cache of decoded pdf.js page objects and their rendered HTML blobs. These are
+// cheap (page metadata + a small blob URL, not the large canvas bitmap, which
+// lives in the visible iframe) so this can comfortably exceed the live-canvas
+// cap in fixed-layout's scroll mode, sparing a re-parse when the reader scrolls
+// back over a recently seen page.
+const MAX_CACHED_PAGES = 16
 
 const CALIBRE_NS = 'http://calibre-ebook.com/xmp-namespace'
 const CALIBRE_SI_NS = 'http://calibre-ebook.com/xmp-namespace-series-index'

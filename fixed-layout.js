@@ -64,6 +64,39 @@ export const scrollGapToCss = (value) => {
     return Number.isFinite(n) && n >= 0 ? `${n}px` : null
 }
 
+// Decide which scroll-mode pages to begin loading and which to evict, given the
+// reader's current page and each page's load state. `visible` is set by the
+// IntersectionObserver (true while the page sits within the widened preload
+// margin). Visible idle pages closest to the reader load first, bounded by how
+// many loads may run at once; loaded pages farthest from the reader are evicted
+// once over the in-memory cap, but a visible page is never torn out from under
+// the reader. Prioritising the nearest page and bounding concurrency keeps a
+// fast fling from kicking off a full-resolution canvas render for every page it
+// flies past — that thrashes the main thread and spikes WebView memory
+// (readest#4795), the same pressure the PDF range-read throttle guards against
+// (readest#3470).
+export const planScrollModePages = ({
+    pages, currentIndex, maxLoaded, maxConcurrent, loadingCount,
+}) => {
+    const dist = page => Math.abs(page.index - currentIndex)
+
+    const budget = Math.max(0, maxConcurrent - loadingCount)
+    const load = budget === 0 ? [] : pages
+        .filter(page => page.visible && page.state === 'idle')
+        .sort((a, b) => dist(a) - dist(b))
+        .slice(0, budget)
+        .map(page => page.index)
+
+    const loaded = pages.filter(page => page.state === 'loaded')
+    const evict = loaded.length <= maxLoaded ? [] : loaded
+        .filter(page => !page.visible)
+        .sort((a, b) => dist(b) - dist(a))
+        .slice(0, loaded.length - maxLoaded)
+        .map(page => page.index)
+
+    return { load, evict }
+}
+
 // Scroll offsets to apply to the host (`overflow:auto`) after rendering a
 // paginated page. Horizontal is always re-centered so the page sits in the
 // middle of the viewport. Vertical is reset to the top only on a page turn:
@@ -133,7 +166,15 @@ export class FixedLayout extends HTMLElement {
     #scrollObserver = null
     #scrollContainer = null
     #scrollLoadGen = new Map()
-    #scrollMaxLoaded = 8
+    // Live rendered-canvas cap. Each PDF page canvas is sized to the on-screen
+    // page box × devicePixelRatio (~7 MB at dpr 3), so this is the dominant
+    // memory ceiling — keep it just above the visible window plus preload lead.
+    #scrollMaxLoaded = 12
+    // Cap on concurrent page loads. A fast fling crosses many pages; without a
+    // bound it would start a full-resolution render for every one, thrashing the
+    // main thread and spiking memory. Nearest-to-viewport pages load first.
+    #scrollMaxConcurrent = 3
+    #scrollLoadingCount = 0
     #scrollIdleTimer = null
     #scrollCurrentIndex = -1
     #getScrollModePageMetrics() {
@@ -528,7 +569,7 @@ export class FixedLayout extends HTMLElement {
             el.className = 'scroll-page'
             el.dataset.index = i
             this.#scrollContainer.append(el)
-            return { el, index: i, section, state: 'idle', frame: null, vpWidth: vw, vpHeight: vh }
+            return { el, index: i, section, state: 'idle', visible: false, frame: null, vpWidth: vw, vpHeight: vh }
         })
 
         this.#renderScrollMode()
@@ -543,22 +584,38 @@ export class FixedLayout extends HTMLElement {
         this.addEventListener('scroll', this.#handleScrollEvent)
 
         // Set up IntersectionObserver after scroll position is established.
-        // rootMargin '50%' loads ~1 page buffer above/below the viewport.
+        // rootMargin '200%' marks pages within ~2 viewport heights above/below as
+        // visible, giving the ~400 ms-per-page render enough lead time to finish
+        // before the page scrolls into view. The observer only flags visibility;
+        // #scheduleScrollPages decides what to actually load (nearest first,
+        // bounded concurrency) and evict.
         this.#scrollObserver = new IntersectionObserver(entries => {
             for (const entry of entries) {
-                if (!entry.isIntersecting) continue
                 const index = parseInt(entry.target.dataset.index)
                 const pageData = this.#scrollPages[index]
-                if (pageData && pageData.state === 'idle') {
-                    this.#loadScrollPage(pageData)
-                }
+                if (pageData) pageData.visible = entry.isIntersecting
             }
-            this.#evictScrollPages()
-        }, { root: this, rootMargin: '50% 0px' })
+            this.#scheduleScrollPages()
+        }, { root: this, rootMargin: '200% 0px' })
 
         for (const page of this.#scrollPages) {
             this.#scrollObserver.observe(page.el)
         }
+    }
+    // Load the nearest visible idle pages and evict the farthest off-screen ones,
+    // honouring the concurrency and in-memory caps. Re-run whenever visibility or
+    // load state changes so a finished load immediately pulls in the next page.
+    #scheduleScrollPages() {
+        const currentIndex = this.#getScrollIndex()
+        const { load, evict } = planScrollModePages({
+            pages: this.#scrollPages,
+            currentIndex,
+            maxLoaded: this.#scrollMaxLoaded,
+            maxConcurrent: this.#scrollMaxConcurrent,
+            loadingCount: this.#scrollLoadingCount,
+        })
+        for (const index of evict) this.#teardownScrollPage(this.#scrollPages[index])
+        for (const index of load) this.#loadScrollPage(this.#scrollPages[index])
     }
     #handleScrollEvent = () => {
         // Disable iframe interaction during scroll for native smooth scrolling
@@ -600,6 +657,7 @@ export class FixedLayout extends HTMLElement {
         }
         this.#scrollPages = []
         this.#scrollLoadGen.clear()
+        this.#scrollLoadingCount = 0
         this.#scrollCurrentIndex = -1
         if (this.#scrollContainer) {
             this.#scrollContainer.remove()
@@ -674,6 +732,7 @@ export class FixedLayout extends HTMLElement {
     async #loadScrollPage(pageData) {
         if (pageData.state !== 'idle') return
         pageData.state = 'loading'
+        this.#scrollLoadingCount++
 
         // Generation counter to detect stale loads
         const gen = (this.#scrollLoadGen.get(pageData.index) || 0) + 1
@@ -686,7 +745,10 @@ export class FixedLayout extends HTMLElement {
                 pageData.state = 'idle'
                 return
             }
-            if (!src) { pageData.state = 'idle'; return }
+            // No content for this page: mark terminal so the post-completion
+            // reschedule does not re-pick it forever (a visible idle page is
+            // always a load candidate).
+            if (!src) { pageData.state = 'error'; return }
 
             const frame = await this.#createScrollFrame(pageData, src)
             // Bail if cancelled during frame creation
@@ -736,7 +798,14 @@ export class FixedLayout extends HTMLElement {
             }
         } catch (e) {
             console.warn('Failed to load scroll page', pageData.index, e)
-            pageData.state = 'idle'
+            // Terminal state: leaving it 'idle' would let the post-completion
+            // reschedule retry a persistently failing page in a tight async loop.
+            pageData.state = 'error'
+        } finally {
+            this.#scrollLoadingCount = Math.max(0, this.#scrollLoadingCount - 1)
+            // A concurrency slot freed up: pull in the next nearest page (and
+            // apply any pending eviction now that this page's state has settled).
+            if (this.#scrollMode) this.#scheduleScrollPages()
         }
     }
     // Remove a loaded scroll page's frame and overlayer
@@ -752,17 +821,6 @@ export class FixedLayout extends HTMLElement {
         }
         pageData.frame = null
         pageData.state = 'idle'
-    }
-    // Evict the farthest loaded pages when over limit
-    #evictScrollPages() {
-        const loaded = this.#scrollPages.filter(p => p.state === 'loaded')
-        if (loaded.length <= this.#scrollMaxLoaded) return
-        const currentIndex = this.#getScrollIndex()
-        loaded.sort((a, b) =>
-            Math.abs(a.index - currentIndex) - Math.abs(b.index - currentIndex))
-        for (const page of loaded.slice(this.#scrollMaxLoaded)) {
-            this.#teardownScrollPage(page)
-        }
     }
     #renderScrollMode() {
         const { width: hostWidth } = this.getBoundingClientRect()
@@ -1340,6 +1398,7 @@ export class FixedLayout extends HTMLElement {
             }
             this.#scrollPages = []
             this.#scrollLoadGen.clear()
+            this.#scrollLoadingCount = 0
             if (this.#scrollContainer) {
                 this.#scrollContainer.remove()
                 this.#scrollContainer = null
