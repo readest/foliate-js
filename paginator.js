@@ -997,6 +997,11 @@ export class Paginator extends HTMLElement {
     #lastVisibleRange
     #scrollLocked = false
     #isAnimating = false
+    // Snapshot of the invariant inputs #replaceBackground needs (theme/texture
+    // style, background+container geometry, per-view size+colour). Set once when
+    // a scroll animation starts so the per-frame repaint reuses it instead of
+    // forcing a fresh style+layout read every frame; null when not animating.
+    #bgAnimContext = null
     #filling = false // true while #fillVisibleArea is running
     #fillPromise = null // tracks in-progress #fillVisibleArea for awaiting
     #stabilizing = false // true while #display is stabilizing layout
@@ -1177,8 +1182,14 @@ export class Paginator extends HTMLElement {
             // snap animation #isAnimating is set and the destination background
             // is already in place, so the rebuild is skipped.
             if (!this.scrolled && !this.#isAnimating) this.#replaceBackground()
-            // Preload forward when fewer than minPages ahead
-            if (!this.noPreload && !this.noContinuousScroll && !this.#filling && !this.#stabilizing) {
+            // Preload forward when fewer than minPages ahead. Skip while a finger
+            // drag is in progress: loading a section runs columnize/expand on the
+            // main thread, which drops frames mid-swipe (readest#4785). The buffer
+            // is still 4+ pages deep during a one-page drag, and the scroll that
+            // settles the gesture re-fires this with the finger already up, so the
+            // top-up just moves off the active drag instead of being skipped.
+            if (!this.noPreload && !this.noContinuousScroll && !this.#filling
+                && !this.#stabilizing && !this.#touchScrolled) {
                 const minPages = 5
                 const pagesAhead = this.size > 0
                     ? Math.floor((this.#renderedViewSize - this.#renderedEnd) / this.size)
@@ -1441,13 +1452,11 @@ export class Paginator extends HTMLElement {
         if (!this.#directionCache.has(index)) return true
         return this.#directionCache.get(index) === this.#vertical
     }
-    // Update the #background grid so each column shows the correct section's
-    // background. Pass atPosition to pre-compute for a destination scroll
-    // position (e.g. before an animation starts).
-    #replaceBackground(atPosition) {
-        const doc = this.#primaryView?.document
-        if (!doc?.documentElement) return
-        if (this.noBackground) return
+    // Read the theme/texture style off the primary section's <html> and return a
+    // resolver that maps a view's raw background onto the active theme. This is a
+    // forced style read (getComputedStyle), so callers in the animation hot path
+    // do it once via #computePaginatedBgContext rather than every frame.
+    #readBackgroundStyle(doc) {
         const htmlStyle = doc.defaultView.getComputedStyle(doc.documentElement)
         const themeBgColor = htmlStyle.getPropertyValue('--theme-bg-color')
         const overrideColor = htmlStyle.getPropertyValue('--override-color') === 'true'
@@ -1467,50 +1476,58 @@ export class Paginator extends HTMLElement {
             }
             return background
         }
-
+        return { fallbackBg, hasTexture, resolveBackground }
+    }
+    // Snapshot every input #paintPaginatedBackground needs that stays constant for
+    // the duration of a scroll animation: the theme/texture style, the
+    // background+container geometry, and each rendered view's size and resolved
+    // background. Returns null when there is nothing to paint (no primary doc,
+    // backgrounds disabled, or scrolled mode). Built once per animation so the
+    // per-frame repaint never re-runs getComputedStyle or one
+    // getBoundingClientRect per view — those forced reads, multiplied by the views
+    // preloaded at a chapter boundary, are what dropped frames mid-swipe
+    // (readest#4785).
+    #computePaginatedBgContext() {
+        const doc = this.#primaryView?.document
+        if (!doc?.documentElement) return null
+        if (this.noBackground) return null
+        if (this.scrolled) return null
+        const { fallbackBg, hasTexture, resolveBackground } = this.#readBackgroundStyle(doc)
+        const bgRect = this.#background.getBoundingClientRect()
+        const containerRect = this.#container.getBoundingClientRect()
+        const startEdge = this.#vertical ? 'top' : 'left'
+        const bgSize = bgRect[this.sideProp]
+        const inset = containerRect[startEdge] - bgRect[startEdge]
+        const containerSize = containerRect[this.sideProp]
+        const views = this.#sortedViews.map(([, view]) => ({
+            size: view.element.getBoundingClientRect()[this.sideProp],
+            bg: textureAwareBackground(resolveBackground(view.docBackground), hasTexture),
+        }))
+        return { fallbackBg, hasTexture, bgSize, inset, containerSize, views }
+    }
+    // Paint one full-bleed background segment per rendered view from a previously
+    // computed context, positioned so each tracks its content on screen at the
+    // given scroll position. Rebuilding on every scroll keeps the backgrounds
+    // glued to the content during a swipe drag — so when two sections with
+    // different backgrounds are both visible, each half shows its own colour
+    // instead of one flat colour flashing across the viewport. Only writes layout
+    // (no reads), so it is safe to run every animation frame.
+    #paintPaginatedBackground(ctx, atPosition) {
         // Reset any inline backgrounds left over from a previous mode so the
         // host's texture isn't occluded after toggling.
         this.#background.style.background = ''
         for (const [, view] of this.#sortedViews) {
             view.element.style.background = ''
         }
-
-        if (this.scrolled) {
-            // In scrolled mode, set background directly on each view element
-            // so it scrolls with the content. The static #background provides
-            // the fallback color for margins and gaps between views.
-            this.#background.innerHTML = ''
-            this.#background.style.display = ''
-            this.#background.style.background = hasTexture ? '' : fallbackBg
-            for (const [, view] of this.#sortedViews) {
-                const resolved = resolveBackground(view.docBackground)
-                view.element.style.background = textureAwareBackground(resolved, hasTexture)
-            }
-            return
-        }
-
-        // Paint one full-bleed background segment per rendered view, positioned
-        // so each tracks its content on screen. Rebuilding on every scroll keeps
-        // the backgrounds glued to the content during a swipe drag — so when two
-        // sections with different backgrounds are both visible, each half shows
-        // its own colour instead of one flat colour flashing across the viewport.
-        const bgRect = this.#background.getBoundingClientRect()
-        const containerRect = this.#container.getBoundingClientRect()
-        const startEdge = this.#vertical ? 'top' : 'left'
-        const bgSize = bgRect[this.sideProp]
-        const inset = containerRect[startEdge] - bgRect[startEdge]
         const scrollPos = Math.abs(atPosition ?? this.#renderedStart)
-        const views = this.#sortedViews.map(([, view]) => ({
-            size: view.element.getBoundingClientRect()[this.sideProp],
-            bg: textureAwareBackground(resolveBackground(view.docBackground), hasTexture),
-        }))
-        const segments = computeBackgroundSegments(views, scrollPos, bgSize, inset, this.size)
+        const segments = computeBackgroundSegments(
+            ctx.views, scrollPos, ctx.bgSize, ctx.inset, ctx.containerSize)
 
         this.#background.innerHTML = ''
         this.#background.style.display = ''
         // Under a texture, leave the container transparent so the host texture
         // shows through the gaps a transparent page no longer fills (readest#4399).
-        this.#background.style.background = hasTexture ? '' : fallbackBg
+        this.#background.style.background = ctx.hasTexture ? '' : ctx.fallbackBg
 
         const posProp = this.#vertical ? 'top' : 'left'
         const sizeProp = this.#vertical ? 'height' : 'width'
@@ -1527,6 +1544,36 @@ export class Paginator extends HTMLElement {
             seg.style.backgroundAttachment = 'initial'
             this.#background.appendChild(seg)
         }
+    }
+    // Update the #background grid so each column shows the correct section's
+    // background. Pass atPosition to pre-compute for a destination scroll
+    // position (e.g. before an animation starts). During a scroll animation the
+    // invariant context is snapshotted in #bgAnimContext and reused here so the
+    // per-frame repaint stays read-free.
+    #replaceBackground(atPosition) {
+        const doc = this.#primaryView?.document
+        if (!doc?.documentElement) return
+        if (this.noBackground) return
+
+        if (this.scrolled) {
+            // In scrolled mode, set background directly on each view element
+            // so it scrolls with the content. The static #background provides
+            // the fallback color for margins and gaps between views.
+            const { fallbackBg, hasTexture, resolveBackground } = this.#readBackgroundStyle(doc)
+            this.#background.style.background = ''
+            this.#background.innerHTML = ''
+            this.#background.style.display = ''
+            this.#background.style.background = hasTexture ? '' : fallbackBg
+            for (const [, view] of this.#sortedViews) {
+                const resolved = resolveBackground(view.docBackground)
+                view.element.style.background = textureAwareBackground(resolved, hasTexture)
+            }
+            return
+        }
+
+        const ctx = this.#bgAnimContext ?? this.#computePaginatedBgContext()
+        if (!ctx) return
+        this.#paintPaginatedBackground(ctx, atPosition)
     }
     #beforeRender({ vertical, rtl }) {
         // If writing-mode is about to change, destroy all non-primary
@@ -1816,6 +1863,13 @@ export class Paginator extends HTMLElement {
         if (pv?.element) {
             pv.element.style.willChange = 'transform'
         }
+        // Snapshot the invariant background paint inputs for the whole drag. The
+        // layout is settled at the start of a gesture and only the scroll offset
+        // changes while the finger moves, so every per-move #replaceBackground()
+        // reuses this instead of forcing a fresh style+layout read each frame
+        // (readest#4785). Cleared in #onTouchEnd; the snap that follows rebuilds
+        // its own.
+        this.#bgAnimContext = this.scrolled ? null : this.#computePaginatedBgContext()
     }
     #onTouchMove(e) {
         const state = this.#touchState
@@ -1863,6 +1917,10 @@ export class Paginator extends HTMLElement {
         // if (this.#view?.element) {
         //     this.#view.element.style.willChange = 'auto'
         // }
+
+        // The drag is over: drop the drag-time paint snapshot so the snap
+        // animation (or any other repaint) rebuilds a fresh context.
+        this.#bgAnimContext = null
 
         if (!this.#touchScrolled) return
         this.#touchScrolled = false
@@ -1939,6 +1997,10 @@ export class Paginator extends HTMLElement {
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
             const startPosition = this.containerPosition
             this.#isAnimating = true
+            // Snapshot the invariant paint inputs once; every per-frame
+            // #replaceBackground below reuses this instead of forcing a fresh
+            // style+layout read each frame (readest#4785).
+            this.#bgAnimContext = this.scrolled ? null : this.#computePaginatedBgContext()
             // For a large section the CSS-transform animation blocks the UI while
             // Blink composites the oversized layer; animate the native scroll
             // offset instead (incremental/tiled, like a swipe), keeping the
@@ -1953,6 +2015,7 @@ export class Paginator extends HTMLElement {
                     if (!this.scrolled) this.#replaceBackground()
                 }).then(() => {
                     this.#isAnimating = false
+                    this.#bgAnimContext = null
                     this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
                     this.#afterScroll(reason)
                 })
@@ -1986,6 +2049,7 @@ export class Paginator extends HTMLElement {
                 300,
             ).then(() => {
                 this.#isAnimating = false
+                this.#bgAnimContext = null
                 this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
                 this.#afterScroll(reason)
             })
