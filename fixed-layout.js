@@ -123,6 +123,24 @@ export const computePaginatedScroll = ({ elementWidth, containerWidth, scrollTop
     scrollTop: pageTurn ? 0 : scrollTop,
 })
 
+// Visual shift (CSS px) to apply to the right page of a two-page spread to hide
+// the one-pixel white spine seam (#4857). The two page iframes are independent
+// compositor layers, each scaled by a (usually non-integer) factor. At a
+// fractional devicePixelRatio the spine between them lands on a fractional
+// device pixel, so each layer's edge there is anti-aliased against transparency
+// and the reader background bleeds through as a thin white seam. Pulling the
+// top-most (right) page onto the left by exactly one device pixel makes each
+// soft edge sit over the neighbour's opaque content instead of the background.
+// Returns 0 for layouts with no touching spine (single/centred/portrait page, a
+// blank-padded slot, or a sub-100% zoom where pages shrink inside their boxes).
+export const computeSpreadSpineOverlap = ({
+    center = false, portrait = false, leftBlank = false, rightBlank = false,
+    zoomedOut = false, devicePixelRatio = 1,
+} = {}) => {
+    if (center || portrait || leftBlank || rightBlank || zoomedOut) return 0
+    return -1 / (devicePixelRatio || 1)
+}
+
 // Align the SVG overlayer's coord system with the iframe's unscaled content.
 // When the iframe is visually scaled via CSS transform (non-PDF path),
 // getClientRects() inside the iframe returns positions in the iframe's native
@@ -526,8 +544,22 @@ export class FixedLayout extends HTMLElement {
             this.#isOverflowX = width > containerWidth
             this.#isOverflowY = height > containerHeight
         } else {
+            // Hide the 1px white spine seam on a two-page spread by overlapping
+            // the right page onto the left by one device pixel (#4857). Always
+            // set `transform` (to 'none' when not overlapping) so a stale shift
+            // from a previous render is cleared when the layout changes.
+            const overlapX = computeSpreadSpineOverlap({
+                portrait,
+                leftBlank: Boolean(left.blank),
+                rightBlank: Boolean(right.blank),
+                zoomedOut: this.#scaleFactor < 1.0,
+                devicePixelRatio: window.devicePixelRatio || 1,
+            })
             const leftDimensions = transform({frame: left, styles: { marginInlineStart: 'auto' }})
-            const rightDimensions = transform({frame: right, styles: { marginInlineEnd: 'auto' }})
+            const rightDimensions = transform({frame: right, styles: {
+                marginInlineEnd: 'auto',
+                transform: overlapX ? `translateX(${overlapX}px)` : 'none',
+            }})
             if (!leftDimensions || !rightDimensions) return renderPromises
             const {width: leftWidth, height: leftHeight, containerWidth, containerHeight} = leftDimensions
             const {width: rightWidth, height: rightHeight} = rightDimensions
