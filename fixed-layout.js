@@ -131,13 +131,14 @@ export const computePaginatedScroll = ({ elementWidth, containerWidth, scrollTop
 // and the reader background bleeds through as a thin white seam. Pulling the
 // top-most (right) page onto the left by exactly one device pixel makes each
 // soft edge sit over the neighbour's opaque content instead of the background.
-// Returns 0 for layouts with no touching spine (single/centred/portrait page, a
-// blank-padded slot, or a sub-100% zoom where pages shrink inside their boxes).
+// Returns 0 for layouts with no touching spine (single/centred/portrait page or
+// a blank-padded slot). The pages stay adjacent at every zoom, so the overlap
+// applies at sub-100% zoom too.
 export const computeSpreadSpineOverlap = ({
     center = false, portrait = false, leftBlank = false, rightBlank = false,
-    zoomedOut = false, devicePixelRatio = 1,
+    devicePixelRatio = 1,
 } = {}) => {
-    if (center || portrait || leftBlank || rightBlank || zoomedOut) return 0
+    if (center || portrait || leftBlank || rightBlank) return 0
     return -1 / (devicePixelRatio || 1)
 }
 
@@ -474,6 +475,13 @@ export class FixedLayout extends HTMLElement {
             }
             const iframeScale = onZoom ? scale : 1
             const zoomedOut = this.#scaleFactor < 1.0
+            // Centering a zoomed-out page inside its box only works for the PDF
+            // path, whose iframe is natively sized to the (scaled) box. Non-PDF
+            // fixed layout keeps the iframe at its native size and shrinks it
+            // with `transform: scale`, so flex-centering the un-scaled iframe
+            // pushes it out of view and blanks the page (#4857). Keep those in
+            // normal block flow at every zoom.
+            const centerInBox = zoomedOut && onZoom
             Object.assign(iframe.style, {
                 width: `${width * iframeScale}px`,
                 height: `${height * iframeScale}px`,
@@ -485,10 +493,10 @@ export class FixedLayout extends HTMLElement {
                 width: `${(width ?? blankWidth) * scale}px`,
                 height: `${(height ?? blankHeight) * scale}px`,
                 flexShrink: '0',
-                display: zoomedOut ? 'flex' : 'block',
-                marginBlock: zoomedOut ? undefined : 'auto',
-                alignItems: zoomedOut ? 'center' : undefined,
-                justifyContent: zoomedOut ? 'center' : undefined,
+                display: centerInBox ? 'flex' : 'block',
+                marginBlock: centerInBox ? undefined : 'auto',
+                alignItems: centerInBox ? 'center' : undefined,
+                justifyContent: centerInBox ? 'center' : undefined,
                 ...styles,
             })
             if (portrait && frame !== target) {
@@ -552,7 +560,6 @@ export class FixedLayout extends HTMLElement {
                 portrait,
                 leftBlank: Boolean(left.blank),
                 rightBlank: Boolean(right.blank),
-                zoomedOut: this.#scaleFactor < 1.0,
                 devicePixelRatio: window.devicePixelRatio || 1,
             })
             const leftDimensions = transform({frame: left, styles: { marginInlineStart: 'auto' }})
