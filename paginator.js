@@ -80,6 +80,58 @@ const cssAnimateScroll = (element, scrollProp, startValue, endValue, duration, e
     setTimeout(cleanup, duration + 50)
 })
 
+// Two-phase page-turn slide for vertical (vertical-rl/lr) paginated books.
+// Their pages read horizontally but CSS fragmentation stacks them along the
+// vertical scroll axis, so the outgoing and incoming page can never be on
+// screen side by side (readest#624). Instead the outgoing page exits
+// horizontally along the page progression, the scroll offset jumps while the
+// viewport shows only the page background, and the incoming page follows in
+// from the opposite edge. `startX` continues from a finger drag already in
+// progress; `isStale` lets a newer turn supersede this one: when it reports
+// true, this animation stops touching the DOM.
+const slideTurnAnimation = (element, scrollProp, endValue, exitSign, width, duration, isStale, onSwap, startX = 0) => new Promise(resolve => {
+    const children = [...element.children]
+    if (document.hidden || !children.length) {
+        element[scrollProp] = endValue
+        return resolve()
+    }
+    const half = duration / 2
+    const exitTarget = exitSign * width
+    // Scale the exit by the distance the drag already covered so a released
+    // drag continues at the same pace instead of restarting from rest.
+    const exitDuration = Math.max(16, half * Math.min(1, Math.abs(exitTarget - startX) / width))
+    const setAll = (transition, transform) => {
+        for (const el of children) {
+            el.style.transition = transition
+            el.style.transform = transform
+        }
+    }
+    for (const el of children) el.style.willChange = 'transform'
+    // Phase 1: the outgoing page accelerates off-screen.
+    setAll('none', `translateX(${startX}px)`)
+    element.getBoundingClientRect()
+    setAll(`transform ${exitDuration}ms cubic-bezier(0.55, 0, 1, 0.45)`, `translateX(${exitTarget}px)`)
+    setTimeout(() => {
+        if (isStale()) return resolve()
+        // Midpoint: swap pages while everything is off-screen.
+        element[scrollProp] = endValue
+        onSwap?.()
+        setAll('none', `translateX(${-exitSign * width}px)`)
+        element.getBoundingClientRect()
+        // Phase 2: the incoming page decelerates into place.
+        setAll(`transform ${half}ms cubic-bezier(0, 0.55, 0.45, 1)`, 'translateX(0px)')
+        setTimeout(() => {
+            if (isStale()) return resolve()
+            for (const el of children) {
+                el.style.willChange = ''
+                el.style.transition = ''
+                el.style.transform = ''
+            }
+            resolve()
+        }, half + 20)
+    }, exitDuration + 10)
+})
+
 const lerp = (min, max, x) => x * (max - min) + min
 const easeOutQuad = x => 1 - (1 - x) * (1 - x)
 // rAF animation of a scalar (used for the native scroll offset). Unlike the
@@ -290,7 +342,12 @@ export const getDirection = doc => {
     }
     const vertical = writingMode === 'vertical-rl'
         || writingMode === 'vertical-lr'
-    const rtl = doc.body.dir === 'rtl'
+    // `vertical-rl` (Japanese/Chinese vertical) advances columns right-to-left
+    // even though its computed `direction` stays `ltr`, so the writing mode
+    // itself marks it RTL and page turns follow the horizontal-rtl convention
+    // (readest#624). Mirrors getDirection in the app's libs/document.ts.
+    const rtl = writingMode === 'vertical-rl'
+        || doc.body.dir === 'rtl'
         || direction === 'rtl'
         || doc.documentElement.dir === 'rtl'
     return { vertical, rtl }
@@ -997,6 +1054,13 @@ export class Paginator extends HTMLElement {
     #lastVisibleRange
     #scrollLocked = false
     #isAnimating = false
+    // Generation counter for slideTurnAnimation: a newer vertical page turn
+    // bumps it so an in-flight two-phase slide stops touching the DOM.
+    #slideTurnId = 0
+    // Horizontal drag offset (px) applied to the views while a finger tracks
+    // a page turn on a vertical book; consumed as the slide's start position
+    // when the turn commits, or settled back to 0 when it doesn't.
+    #dragTranslateX = 0
     // Snapshot of the invariant inputs #replaceBackground needs (theme/texture
     // style, background+container geometry, per-view size+colour). Set once when
     // a scroll animation starts so the per-frame repaint reuses it instead of
@@ -1664,7 +1728,10 @@ export class Paginator extends HTMLElement {
         const columnWidth = vertical
             ? (size / divisor - marginTop * 1.5 - marginBottom * 1.5)
             : (size / divisor - gap - marginRight / 2 - marginLeft / 2)
-        this.setAttribute('dir', rtl ? 'rtl' : 'ltr')
+        // `dir` mirrors the horizontal scroll coordinates (negative scrollLeft
+        // for RTL). Vertical books page along scrollTop, which never flips, so
+        // an RTL writing mode must not reverse the host grid there.
+        this.setAttribute('dir', rtl && !vertical ? 'rtl' : 'ltr')
 
         // set background to `doc` background
         // this is needed because the iframe does not fill the whole element
@@ -1801,7 +1868,10 @@ export class Paginator extends HTMLElement {
         if (!this.#scrollBounds) return
         const delta = this.#vertical ? dy : dx
         const [offset, a, b] = this.#scrollBounds
-        const rtl = this.#rtl
+        // RTL flips the forward/backward allowances only on the horizontal
+        // scroll axis (negative scrollLeft); vertical books page along
+        // scrollTop where forward is always positive.
+        const rtl = this.#rtl && !this.#vertical
         const min = rtl ? offset - b : offset - a
         const max = rtl ? offset + a : offset + b
         this.containerPosition = Math.max(min, Math.min(max,
@@ -1817,22 +1887,62 @@ export class Paginator extends HTMLElement {
         // on the destructuring. Skip the snap; the next settled scroll
         // populates the bounds and subsequent swipes work normally.
         if (!this.#scrollBounds) return
-        const velocity = this.#vertical ? vy : vx
-        const avgVelocity = this.#vertical ? dy / dt : dx / dt
+        // Page-turn swipes are horizontal in every writing mode: vertical-rl
+        // books turn pages right-to-left like printed Japanese books
+        // (readest#624), vertical-lr left-to-right. A predominantly vertical
+        // swipe on a vertical book still pages along the block axis so the
+        // legacy gesture keeps working.
         const horizontal = Math.abs(vx) * 2 > Math.abs(vy)
-        const orthogonal = this.#vertical ? !horizontal : horizontal
-        const [offset, a, b] = this.#scrollBounds
-        const size = this.size
-        const start = this.#renderedStart
-        const end = this.#renderedEnd
+        const useHorizontal = horizontal || !this.#vertical
         const pages = this.#renderedPages
-        const min = Math.abs(offset) - a
-        const max = Math.abs(offset) + b
-        const snapping = this.hasAttribute('animated') && !this.hasAttribute('eink')
-        const v =  snapping ? velocity : avgVelocity
-        const d = v * (this.#rtl ? -size : size) * (orthogonal ? 1 : 0)
-        const snapOffset = (isNaN(d) ? 0 : snapping ? d * 2 : d * 10)
-        const page = Math.floor(Math.max(min, Math.min(max, (start + end) / 2 + snapOffset)) / size)
+        let page
+        if (this.#vertical && useHorizontal
+            && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
+            // Drag-follow gestures on vertical books (readest#624): the views
+            // tracked the finger, so judge the turn like a paged carousel by
+            // where the drag ended plus the release flick, instead of the
+            // displacement heuristic below (which over-commits once content
+            // visibly follows the finger).
+            const width = this.#container.getBoundingClientRect().width
+            const forwardSign = this.#rtl ? 1 : -1
+            const dragged = this.#dragTranslateX
+            // Flick direction in translate space: a rightward finger (vx < 0)
+            // drags the views right.
+            const flick = Math.abs(vx) > 0.3 ? -Math.sign(vx) : 0
+            let turn
+            if (Math.abs(dragged) > width / 2) {
+                // Past halfway: commit unless flicked back the other way.
+                turn = flick === -Math.sign(dragged) ? 0 : Math.sign(dragged)
+            } else if (flick && (!dragged || flick === Math.sign(dragged))) {
+                turn = flick
+            } else {
+                turn = 0
+            }
+            page = this.#renderedPage + turn * forwardSign
+        } else {
+            const velocity = useHorizontal ? vx : vy
+            const avgVelocity = useHorizontal ? dx / dt : dy / dt
+            const aligned = useHorizontal ? horizontal : true
+            // Horizontal swipes advance against the page progression (RTL:
+            // next page is to the left); block-axis swipes always advance
+            // with the scroll axis.
+            const sign = useHorizontal && this.#rtl ? -1 : 1
+            const [offset, a, b] = this.#scrollBounds
+            const size = this.size
+            const start = this.#renderedStart
+            const end = this.#renderedEnd
+            const min = Math.abs(offset) - a
+            const max = Math.abs(offset) + b
+            // Without drag-follow (eink, animation off, block-axis swipes)
+            // the scroll position never moves with the finger; judge the
+            // whole gesture by displacement (avgVelocity) like the eink path.
+            const snapping = this.hasAttribute('animated') && !this.hasAttribute('eink')
+                && !this.#vertical
+            const v =  snapping ? velocity : avgVelocity
+            const d = v * sign * size * (aligned ? 1 : 0)
+            const snapOffset = (isNaN(d) ? 0 : snapping ? d * 2 : d * 10)
+            page = Math.floor(Math.max(min, Math.min(max, (start + end) / 2 + snapOffset)) / size)
+        }
         const dir = page < 0 ? -1 : page >= pages ? 1 : null
         const doGoTo = () => {
             if (!dir) return
@@ -1846,7 +1956,18 @@ export class Paginator extends HTMLElement {
             })
         }
         // Out of range — skip animation, go straight to adjacent section
-        if (dir) return doGoTo()
+        if (dir) {
+            if (this.#vertical) {
+                const sorted = this.#sortedViews
+                const edgeIndex = dir < 0
+                    ? sorted[0]?.[0] ?? this.#primaryIndex
+                    : sorted[sorted.length - 1]?.[0] ?? this.#primaryIndex
+                // Book boundary: nowhere to go, settle the drag back.
+                if (this.#adjacentIndex(dir, edgeIndex) == null) return this.#settleDrag()
+                this.#settleDrag(true)
+            }
+            return doGoTo()
+        }
         this.#scrollToPage(page, 'snap')
     }
     #onTouchStart(e) {
@@ -1862,6 +1983,23 @@ export class Paginator extends HTMLElement {
         const pv = this.#primaryView
         if (pv?.element) {
             pv.element.style.willChange = 'transform'
+        }
+        // A touch on a vertical book takes over any in-flight page-turn slide
+        // or settle: freeze the views where they are and let the drag continue
+        // from that offset. Also re-syncs the drag offset to the rendered
+        // transform so a stale value can never leak into the next gesture.
+        if (this.#vertical && !this.scrolled) {
+            this.#slideTurnId++
+            this.#isAnimating = false
+            const children = [...this.#container.children]
+            const transform = children[0] && getComputedStyle(children[0]).transform
+            const m41 = transform && transform !== 'none' ? new DOMMatrix(transform).m41 : 0
+            this.#dragTranslateX = m41
+            for (const el of children) {
+                if (!m41 && !el.style.transform && !el.style.transition) continue
+                el.style.transition = 'none'
+                el.style.transform = m41 ? `translateX(${m41}px)` : ''
+            }
         }
         // Snapshot the invariant background paint inputs for the whole drag. The
         // layout is settled at the start of a gesture and only the scroll offset
@@ -1908,11 +2046,55 @@ export class Paginator extends HTMLElement {
         if (!this.hasAttribute('animated') || this.hasAttribute('eink')) return
         if (!this.#vertical && Math.abs(state.dx) >= Math.abs(state.dy) && !this.hasAttribute('eink') && (!isStylus || Math.abs(dx) > 1)) {
             this.scrollBy(dx, 0)
-        } else if (this.#vertical && Math.abs(state.dx) < Math.abs(state.dy) && !this.hasAttribute('eink') && (!isStylus || Math.abs(dy) > 1)) {
-            this.scrollBy(0, dy)
+        } else if (this.#vertical && Math.abs(state.dx) >= Math.abs(state.dy) && (!isStylus || Math.abs(dx) > 1)) {
+            // Vertical books track a horizontal finger by translating the
+            // views sideways: their pages stack along the vertical scroll
+            // axis, so the scroll offset itself cannot follow the finger
+            // (readest#624). The turn commits or settles on release in snap().
+            this.#dragBy(dx)
         }
     }
-    #onTouchEnd() {
+    #dragBy(dx) {
+        if (!this.#scrollBounds) return
+        const [, a, b] = this.#scrollBounds
+        const width = this.#container.getBoundingClientRect().width
+        // Exit direction of a forward turn: vertical-rl pages exit right.
+        const forwardSign = this.#rtl ? 1 : -1
+        const max = (forwardSign > 0 ? b : a) > 0 ? width : 0
+        const min = (forwardSign > 0 ? a : b) > 0 ? -width : 0
+        this.#dragTranslateX = Math.max(min, Math.min(max, this.#dragTranslateX - dx))
+        for (const el of this.#container.children) {
+            el.style.transition = 'none'
+            el.style.transform = `translateX(${this.#dragTranslateX}px)`
+        }
+    }
+    // Animate a released drag back to rest when the page did not turn, and
+    // drop the inline drag styles once the views are back in place. Pass
+    // instant=true to drop them without the settle animation.
+    #settleDrag(instant) {
+        const startX = this.#dragTranslateX
+        this.#dragTranslateX = 0
+        const children = [...this.#container.children]
+        if (!children.some(el => el.style.transform)) return
+        const cleanup = () => {
+            for (const el of children) {
+                el.style.willChange = ''
+                el.style.transition = ''
+                el.style.transform = ''
+            }
+        }
+        if (!startX || instant) return cleanup()
+        const id = ++this.#slideTurnId
+        for (const el of children) {
+            el.style.transition = 'transform 150ms ease-out'
+            el.style.transform = 'translateX(0px)'
+        }
+        setTimeout(() => {
+            if (id !== this.#slideTurnId) return
+            cleanup()
+        }, 170)
+    }
+    #onTouchEnd(e) {
         // Remove will-change hint to free GPU resources
         // if (this.#view?.element) {
         //     this.#view.element.style.willChange = 'auto'
@@ -1922,10 +2104,23 @@ export class Paginator extends HTMLElement {
         // animation (or any other repaint) rebuilds a fresh context.
         this.#bgAnimContext = null
 
-        if (!this.#touchScrolled) return
+        if (!this.#touchScrolled) {
+            // A tap that never dragged may still have taken over a mid-flight
+            // transform in #onTouchStart; put the views back to rest.
+            if (this.#vertical && !this.scrolled && this.#dragTranslateX) this.#settleDrag()
+            return
+        }
         this.#touchScrolled = false
         if (this.scrolled) return
         if (this.hasAttribute('no-swipe')) return
+
+        // A finger that rested before lifting has no flick momentum; the
+        // last touchmove velocity is stale by the rest duration.
+        const state = this.#touchState
+        if (state && e && e.timeStamp - state.t > 80) {
+            state.vx = 0
+            state.vy = 0
+        }
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
         // at this point I'm basically throwing `requestAnimationFrame` at
@@ -1963,11 +2158,15 @@ export class Paginator extends HTMLElement {
         const viewSize = targetView
             ? targetView.element.getBoundingClientRect()[this.sideProp]
             : this.#renderedViewSize
-        return this.#rtl
-            ? ({ left, right }) =>
-                ({ left: viewSize - right, right: viewSize - left })
-            : this.#vertical
-                ? ({ top, bottom }) => ({ left: top, right: bottom })
+        // Vertical books map the block axis (top/bottom) onto the scroll
+        // axis regardless of page progression: vertical-rl is RTL but its
+        // scrollTop still grows forward, so the RTL mirror below only
+        // applies to horizontal writing.
+        return this.#vertical
+            ? ({ top, bottom }) => ({ left: top, right: bottom })
+            : this.#rtl
+                ? ({ left, right }) =>
+                    ({ left: viewSize - right, right: viewSize - left })
                 : f => f
     }
     async #scrollToRect(rect, reason) {
@@ -1989,6 +2188,8 @@ export class Paginator extends HTMLElement {
         const { size } = this
         if (this.containerPosition === offset) {
             this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+            // A released drag that stays on the same page settles back to rest.
+            if (this.#vertical && !this.scrolled) this.#settleDrag()
             this.#afterScroll(reason)
             return
         }
@@ -1997,6 +2198,47 @@ export class Paginator extends HTMLElement {
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
             const startPosition = this.containerPosition
             this.#isAnimating = true
+            // Vertical paginated books page along scrollTop but read
+            // horizontally, so a scroll-axis slide would move perpendicular to
+            // the page turn. Run the two-phase horizontal slide instead:
+            // vertical-rl turns forward exit to the right (page progression),
+            // vertical-lr to the left (readest#624).
+            if (!this.scrolled && this.#vertical) {
+                this.#bgAnimContext = null
+                // Oversized sections would composite as one giant layer to
+                // animate the transform (the freeze rafAnimateScroll exists to
+                // avoid), and a native scroll animation cannot move
+                // horizontally here, so swap instantly.
+                if (!this.hasAttribute('gpu-composite')
+                    && this.#renderedViewSize > RAF_ANIMATE_SCROLL_THRESHOLD) {
+                    this.#isAnimating = false
+                    this.#settleDrag(true)
+                    this.containerPosition = offset
+                    this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+                    this.#afterScroll(reason)
+                    return
+                }
+                const id = ++this.#slideTurnId
+                const forward = offset > startPosition
+                const exitSign = (this.#rtl ? 1 : -1) * (forward ? 1 : -1)
+                const width = this.#container.getBoundingClientRect().width
+                // Continue from a finger drag already in progress.
+                const dragStartX = this.#dragTranslateX
+                this.#dragTranslateX = 0
+                return slideTurnAnimation(
+                    this.#container, this.scrollProp, offset, exitSign, width, 300,
+                    () => id !== this.#slideTurnId,
+                    // Reposition the background segments for the new scroll
+                    // offset while both pages are off-screen.
+                    () => this.#replaceBackground(),
+                    dragStartX,
+                ).then(() => {
+                    if (id !== this.#slideTurnId) return
+                    this.#isAnimating = false
+                    this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+                    this.#afterScroll(reason)
+                })
+            }
             // Snapshot the invariant paint inputs once; every per-frame
             // #replaceBackground below reuses this instead of forcing a fresh
             // style+layout read each frame (readest#4785).
@@ -2054,13 +2296,16 @@ export class Paginator extends HTMLElement {
                 this.#afterScroll(reason)
             })
         } else {
+            if (this.#vertical && !this.scrolled) this.#settleDrag(true)
             this.containerPosition = offset
             this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
             this.#afterScroll(reason)
         }
     }
     async #scrollToPage(page, reason, smooth) {
-        const offset = this.size * (this.#rtl ? -page : page)
+        // Negative offsets are an artifact of RTL horizontal scroll
+        // coordinates; vertical books page along scrollTop, always positive.
+        const offset = this.size * (this.#rtl && !this.#vertical ? -page : page)
         return this.#scrollTo(offset, reason, smooth)
     }
     async scrollToAnchor(anchor, select, smooth) {
