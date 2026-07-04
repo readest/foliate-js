@@ -263,6 +263,21 @@ function* getBlocks(doc, nodeFilter) {
     }
 }
 
+// Enumerate every TTS segment of the document in order without touching any
+// TTS instance state. blockIndex/markName match what a TTS instance produces
+// for the same granularity, so callers (e.g. a playback timeline) can
+// correlate the enumeration with live marks and use each range with from().
+export function* getSentences(doc, textWalker, nodeFilter, granularity = 'sentence') {
+    let blockIndex = 0
+    for (const range of getBlocks(doc, nodeFilter)) {
+        const lang = getLang(range.commonAncestorContainer)
+        const segmenter = getSegmenter(lang, granularity)
+        for (const [name, segRange] of textWalker(range, segmenter, nodeFilter))
+            yield { blockIndex, markName: name, range: segRange }
+        blockIndex++
+    }
+}
+
 class ListIterator {
     #arr = []
     #iter
