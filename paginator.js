@@ -132,6 +132,118 @@ const slideTurnAnimation = (element, scrollProp, endValue, exitSign, width, dura
     }, exitDuration + 10)
 })
 
+// Layered page-turn styles (readest#555). The `slide` and `curl` turn styles
+// need the outgoing and incoming page on screen at once as separate layers,
+// which the rigid column strip inside one iframe cannot provide. The View
+// Transitions API can: the browser rasterizes the outgoing page (overlays and
+// annotations included) as a snapshot that animates over the live, stationary
+// incoming page — an Apple Books style slide or curl. The choreography lives
+// in a document-level stylesheet because the ::view-transition pseudo tree
+// attaches to the document root, not to the paginator's shadow root.
+const VIEW_TRANSITION_CLASSES = [
+    'foliate-vt', 'foliate-vt-slide', 'foliate-vt-curl',
+    'foliate-vt-forward', 'foliate-vt-backward',
+    'foliate-vt-left', 'foliate-vt-right',
+    'foliate-vt-eat-left', 'foliate-vt-eat-right',
+]
+
+const injectViewTransitionStyles = () => {
+    const id = 'foliate-view-transition-styles'
+    if (document.getElementById(id)) return
+    const style = document.createElement('style')
+    style.id = id
+    style.textContent = `
+    .foliate-vt::view-transition {
+        pointer-events: none;
+    }
+    /* Only the page turn animates; keep the root snapshot inert. */
+    .foliate-vt::view-transition-old(root),
+    .foliate-vt::view-transition-new(root) {
+        animation: none;
+    }
+    /* The turn layers must OCCLUDE, not blend: the UA pairs old/new with
+       mix-blend-mode: plus-lighter for its default cross-fade, which turns
+       the still page ghostly under a moving page. Also back both layers
+       with the page colour, since snapshots of textured themes or books
+       without a background are transparent. */
+    .foliate-vt::view-transition-old(foliate-turn),
+    .foliate-vt::view-transition-new(foliate-turn) {
+        animation: none;
+        background: var(--foliate-vt-bg, Canvas);
+        mix-blend-mode: normal;
+    }
+    /* Slide: the moving page travels over the still page with a soft edge
+       shadow, like the Apple Books slide. Forward moves the outgoing
+       snapshot out on top; backward brings the incoming snapshot in on
+       top of the still outgoing page. */
+    .foliate-vt-slide.foliate-vt-forward::view-transition-old(foliate-turn) {
+        z-index: 1;
+        animation: foliate-turn-slide-out-left 300ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+        box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+    }
+    .foliate-vt-slide.foliate-vt-forward.foliate-vt-right::view-transition-old(foliate-turn) {
+        animation-name: foliate-turn-slide-out-right;
+    }
+    .foliate-vt-slide.foliate-vt-backward::view-transition-new(foliate-turn) {
+        animation: foliate-turn-slide-in-left 300ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+        box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+    }
+    .foliate-vt-slide.foliate-vt-backward.foliate-vt-right::view-transition-new(foliate-turn) {
+        animation-name: foliate-turn-slide-in-right;
+    }
+    @keyframes foliate-turn-slide-out-left { to { transform: translateX(-100%); } }
+    @keyframes foliate-turn-slide-out-right { to { transform: translateX(100%); } }
+    @keyframes foliate-turn-slide-in-left { from { transform: translateX(-100%); } }
+    @keyframes foliate-turn-slide-in-right { from { transform: translateX(100%); } }
+    /* Curl: a fold line travels across the page, peeling it off the still
+       page underneath like the Apple Books / Kindle curl. The fold is an
+       oversized gradient mask slid across the OLD snapshot (mask-position is
+       animatable; gradients themselves are not), so the page dissolves over
+       a soft band at the traveling edge — the lifted-page falloff. Chrome
+       paints masks on the static old snapshot but not on the live new layer,
+       so backward turns also choreograph the old page: it recedes from the
+       spine side, which reads the same as the incoming page unfolding.
+       Filters and shadows are applied before masking and would be cut off
+       with the page, hence the soft edge. A flat snapshot cannot mesh-bend
+       like a native curl; this is the closest two-layer approximation. */
+    /* The curl consumes the old page along a CURVED fold: a transparent
+       disc grows out of the page's outer-bottom corner (the corner a reader
+       lifts), so the fold edge is an arc sweeping across the page toward
+       the spine — the bent-page line of a corner curl. Backward turns grow
+       the arc from the spine-side corner instead, receding the old page so
+       the previous page appears to unfold (eat side precomputed on the
+       root). The fold edge is an animated gradient STOP (registered custom
+       property) re-rasterized each frame against the element box:
+       mask-position/mask-size animations paint unreliably on
+       view-transition pseudos. The 6% band is the lifted-page falloff. */
+    @property --foliate-fold {
+        syntax: '<percentage>';
+        inherits: false;
+        initial-value: 0%;
+    }
+    .foliate-vt-curl.foliate-vt-eat-right::view-transition-old(foliate-turn) {
+        z-index: 1;
+        -webkit-mask-image: radial-gradient(circle at 108% 108%, transparent calc(var(--foliate-fold) - 6%), black var(--foliate-fold));
+        mask-image: radial-gradient(circle at 108% 108%, transparent calc(var(--foliate-fold) - 6%), black var(--foliate-fold));
+        animation: foliate-turn-curl-fold 450ms cubic-bezier(0.3, 0.1, 0.4, 1) both;
+    }
+    .foliate-vt-curl.foliate-vt-eat-left::view-transition-old(foliate-turn) {
+        z-index: 1;
+        -webkit-mask-image: radial-gradient(circle at -8% 108%, transparent calc(var(--foliate-fold) - 6%), black var(--foliate-fold));
+        mask-image: radial-gradient(circle at -8% 108%, transparent calc(var(--foliate-fold) - 6%), black var(--foliate-fold));
+        animation: foliate-turn-curl-fold 450ms cubic-bezier(0.3, 0.1, 0.4, 1) both;
+    }
+    .foliate-vt-curl::view-transition-new(foliate-turn) {
+        animation: none;
+    }
+    @keyframes foliate-turn-curl-fold {
+        from { --foliate-fold: 0%; }
+        to { --foliate-fold: 118%; }
+    }
+    `
+    document.head.append(style)
+}
+
 const lerp = (min, max, x) => x * (max - min) + min
 const easeOutQuad = x => 1 - (1 - x) * (1 - x)
 // rAF animation of a scalar (used for the native scroll offset). Unlike the
@@ -1061,6 +1173,9 @@ export class Paginator extends HTMLElement {
     // a page turn on a vertical book; consumed as the slide's start position
     // when the turn commits, or settled back to 0 when it doesn't.
     #dragTranslateX = 0
+    // Active finger-tracked layered turn (readest#555): a paused view
+    // transition whose animations are scrubbed by the drag.
+    #vtDrag = null
     // Snapshot of the invariant inputs #replaceBackground needs (theme/texture
     // style, background+container geometry, per-view size+colour). Set once when
     // a scroll animation starts so the per-frame repaint reuses it instead of
@@ -1790,6 +1905,16 @@ export class Paginator extends HTMLElement {
     get noContinuousScroll() {
         return this.scrolled && this.hasAttribute('no-continuous-scroll')
     }
+    // The layered turn styles (slide/curl, readest#555) rasterize the outgoing
+    // page with the View Transitions API; when the engine lacks it the caller
+    // falls through to the push/two-phase animations, so old WebViews keep
+    // working page turns.
+    get #layeredTurn() {
+        const style = this.getAttribute('turn-style')
+        return (style === 'slide' || style === 'curl')
+            && typeof document.startViewTransition === 'function'
+            ? style : null
+    }
     get scrollProp() {
         const { scrolled } = this
         return this.#vertical ? (scrolled ? 'scrollLeft' : 'scrollTop')
@@ -1896,7 +2021,7 @@ export class Paginator extends HTMLElement {
         const useHorizontal = horizontal || !this.#vertical
         const pages = this.#renderedPages
         let page
-        if (this.#vertical && useHorizontal
+        if (this.#vertical && useHorizontal && !this.#layeredTurn
             && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
             // Drag-follow gestures on vertical books (readest#624): the views
             // tracked the finger, so judge the turn like a paged carousel by
@@ -1933,11 +2058,12 @@ export class Paginator extends HTMLElement {
             const end = this.#renderedEnd
             const min = Math.abs(offset) - a
             const max = Math.abs(offset) + b
-            // Without drag-follow (eink, animation off, block-axis swipes)
-            // the scroll position never moves with the finger; judge the
-            // whole gesture by displacement (avgVelocity) like the eink path.
+            // Without drag-follow (eink, animation off, block-axis swipes,
+            // layered turn styles) the scroll position never moves with the
+            // finger; judge the whole gesture by displacement (avgVelocity)
+            // like the eink path.
             const snapping = this.hasAttribute('animated') && !this.hasAttribute('eink')
-                && !this.#vertical
+                && !this.#vertical && !this.#layeredTurn
             const v =  snapping ? velocity : avgVelocity
             const d = v * sign * size * (aligned ? 1 : 0)
             const snapOffset = (isNaN(d) ? 0 : snapping ? d * 2 : d * 10)
@@ -2044,6 +2170,22 @@ export class Paginator extends HTMLElement {
         state.dt += dt
         this.#touchScrolled = true
         if (!this.hasAttribute('animated') || this.hasAttribute('eink')) return
+        // Layered turn styles track the finger by scrubbing a paused view
+        // transition: the outgoing snapshot follows the drag over the still
+        // incoming page, then commits or reverses on release.
+        if (this.#layeredTurn) {
+            if (!this.#vtDrag) this.#layeredDragStart(state)
+            const drag = this.#vtDrag
+            if (drag) {
+                // Net finger travel along the forward direction (rtl books
+                // advance with a rightward finger).
+                const along = this.#rtl ? -state.dx : state.dx
+                drag.progress = Math.max(0, Math.min(1,
+                    (drag.forward ? along : -along) / drag.width))
+                this.#vtDragScrub()
+            }
+            return
+        }
         if (!this.#vertical && Math.abs(state.dx) >= Math.abs(state.dy) && !this.hasAttribute('eink') && (!isStylus || Math.abs(dx) > 1)) {
             this.scrollBy(dx, 0)
         } else if (this.#vertical && Math.abs(state.dx) >= Math.abs(state.dy) && (!isStylus || Math.abs(dx) > 1)) {
@@ -2052,6 +2194,150 @@ export class Paginator extends HTMLElement {
             // axis, so the scroll offset itself cannot follow the finger
             // (readest#624). The turn commits or settles on release in snap().
             this.#dragBy(dx)
+        }
+    }
+    // Prepare the document for a layered page turn: choreography classes on
+    // the root and the view-transition-name on the turn boundary. The host
+    // app can mark a wider boundary with [data-view-transition-root] (e.g.
+    // a wrapper that also contains its page header and footer, so the
+    // furniture turns with the page in both layers); otherwise the outermost
+    // shadow host in the document tree is named, since shadow-internal names
+    // are tree-scoped away from the document-level pseudo selectors.
+    #vtSetup(style, forward) {
+        injectViewTransitionStyles()
+        const html = document.documentElement
+        const side = this.#rtl ? 'right' : 'left'
+        // Which side the curl fold consumes the old page from: the outer
+        // edge going forward, the spine going backward.
+        const eatSide = (forward !== this.#rtl) ? 'right' : 'left'
+        const classes = ['foliate-vt', `foliate-vt-${style}`,
+            forward ? 'foliate-vt-forward' : 'foliate-vt-backward',
+            `foliate-vt-${side}`, `foliate-vt-eat-${eatSide}`]
+        let namedHost = this
+        while (namedHost.getRootNode() instanceof ShadowRoot) {
+            namedHost = namedHost.getRootNode().host
+        }
+        namedHost = namedHost.closest('[data-view-transition-root]') ?? namedHost
+        namedHost.style.viewTransitionName = 'foliate-turn'
+        // Back the turn layers with the page colour: snapshots of books or
+        // themes without an opaque background (e.g. textured themes) would
+        // otherwise blend the two pages instead of occluding.
+        const doc = this.#primaryView?.document
+        const themeBg = doc?.documentElement
+            ? doc.defaultView.getComputedStyle(doc.documentElement)
+                .getPropertyValue('--theme-bg-color').trim()
+            : ''
+        html.style.setProperty('--foliate-vt-bg', themeBg || 'Canvas')
+        html.classList.remove(...VIEW_TRANSITION_CLASSES)
+        html.classList.add(...classes)
+    }
+    #vtCleanup() {
+        const html = document.documentElement
+        html.classList.remove(...VIEW_TRANSITION_CLASSES)
+        html.style.removeProperty('--foliate-vt-bg')
+    }
+    // Begin a finger-tracked layered turn (readest#555): once the gesture is
+    // horizontal and past a small threshold, snapshot the outgoing page with
+    // a view transition toward the adjacent page, pause its animations, and
+    // let the finger drive their progress. Section boundaries fall through to
+    // snap() on release like before.
+    #layeredDragStart(state) {
+        if (this.#vtDrag || !this.#scrollBounds) return
+        const style = this.#layeredTurn
+        if (!style) return
+        if (Math.abs(state.dx) < Math.abs(state.dy) || Math.abs(state.dx) < 12) return
+        // Finger travel along the forward direction decides which neighbor
+        // page gets snapshotted.
+        const along = this.#rtl ? -state.dx : state.dx
+        const forward = along > 0
+        const pages = this.#renderedPages
+        const target = this.#renderedPage + (forward ? 1 : -1)
+        if (target < 0 || target >= pages) return
+        const offset = this.size * (this.#rtl && !this.#vertical ? -target : target)
+        ++this.#slideTurnId
+        this.#isAnimating = true
+        this.#vtSetup(style, forward)
+        const startPosition = this.containerPosition
+        const transition = document.startViewTransition(() => {
+            this.containerPosition = offset
+            if (!this.scrolled) {
+                this.#bgAnimContext = null
+                this.#replaceBackground()
+            }
+        })
+        const drag = {
+            transition, offset, startPosition, forward,
+            progress: 0, anims: null,
+            width: this.#container.getBoundingClientRect().width,
+        }
+        this.#vtDrag = drag
+        transition.ready.then(() => {
+            if (this.#vtDrag !== drag) return
+            const anims = document.getAnimations().filter(a =>
+                a.effect?.pseudoElement?.includes('(foliate-turn)'))
+            for (const a of anims) {
+                // Scrubbing maps finger distance to animation time, so the
+                // page must move linearly with the finger.
+                try { a.effect.updateTiming({ easing: 'linear' }) } catch { /* UA animation */ }
+                a.pause()
+            }
+            drag.anims = anims
+            this.#vtDragScrub()
+        }, () => {
+            // Capture failed or was skipped; release falls back to snap().
+            if (this.#vtDrag === drag) drag.failed = true
+        })
+    }
+    #vtDragScrub() {
+        const drag = this.#vtDrag
+        if (!drag?.anims) return
+        for (const a of drag.anims) {
+            const duration = a.effect.getTiming().duration
+            a.currentTime = drag.progress * 0.999
+                * (typeof duration === 'number' ? duration : 300)
+        }
+    }
+    // Resolve a finger-tracked layered turn: play the paused animations to
+    // the end to commit, or reverse them and put the live content back to
+    // cancel. The scroll offset already sits on the target page during the
+    // drag (the snapshot hides it), so cancel restores it under the overlay
+    // before the transition is skipped.
+    async #finishLayeredDrag(drag, commit) {
+        const { transition, anims, offset, startPosition } = drag
+        const { size } = this
+        const id = ++this.#slideTurnId
+        this.#isAnimating = true
+        if (commit) {
+            if (anims) for (const a of anims) a.play()
+            try {
+                await transition.finished
+            } catch { /* skipped */ }
+            if (id !== this.#slideTurnId) return
+            this.#vtCleanup()
+            this.#isAnimating = false
+            this.containerPosition = offset
+            this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+            this.#afterScroll('snap')
+        } else {
+            if (anims) {
+                for (const a of anims) a.reverse()
+                try {
+                    await Promise.all(anims.map(a => a.finished))
+                } catch { /* superseded */ }
+            }
+            if (id !== this.#slideTurnId) return
+            // Restore the pre-turn page under the overlay, then drop it.
+            this.containerPosition = startPosition
+            try { transition.skipTransition() } catch { /* already done */ }
+            try {
+                await transition.finished
+            } catch { /* skipped */ }
+            if (id !== this.#slideTurnId) return
+            this.#vtCleanup()
+            this.#isAnimating = false
+            this.containerPosition = startPosition
+            this.#scrollBounds = [startPosition, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+            this.#afterScroll('snap')
         }
     }
     #dragBy(dx) {
@@ -2120,6 +2406,20 @@ export class Paginator extends HTMLElement {
         if (state && e && e.timeStamp - state.t > 80) {
             state.vx = 0
             state.vy = 0
+        }
+
+        // A finger-tracked layered turn resolves here: commit past halfway or
+        // on a flick along the drag, reverse otherwise (same carousel rule as
+        // the vertical drag decision in snap()).
+        const drag = this.#vtDrag
+        if (drag) {
+            this.#vtDrag = null
+            const alongV = this.#rtl ? -(state?.vx ?? 0) : (state?.vx ?? 0)
+            const flick = Math.abs(alongV) > 0.3
+                ? Math.sign(alongV) * (drag.forward ? 1 : -1) : 0
+            const commit = flick > 0 ? true : flick < 0 ? false : drag.progress > 0.5
+            this.#finishLayeredDrag(drag, commit)
+            return
         }
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
@@ -2196,6 +2496,11 @@ export class Paginator extends HTMLElement {
         // FIXME: vertical-rl only, not -lr
         if (this.scrolled && this.#vertical) offset = -offset
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
+            // Layered turn styles: snapshot the outgoing page and animate it
+            // over the live, stationary incoming page (readest#555). Works
+            // for every writing mode since the snapshot is axis-agnostic.
+            const layered = !this.scrolled && this.#layeredTurn
+            if (layered) return this.#viewTransitionTurn(offset, reason, layered)
             const startPosition = this.containerPosition
             this.#isAnimating = true
             // Vertical paginated books page along scrollTop but read
@@ -2301,6 +2606,45 @@ export class Paginator extends HTMLElement {
             this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
             this.#afterScroll(reason)
         }
+    }
+    // Turn the page with a View Transitions snapshot (readest#555): the live
+    // content jumps to the destination inside the transition callback, then
+    // the rasterized outgoing page slides away or curls open ON TOP of it, so
+    // the incoming page stays perfectly still underneath (Apple Books style).
+    // Forward turns move the old snapshot out; backward turns bring the new
+    // snapshot in over the still page. The choreography is selected with
+    // classes on the document root, where the ::view-transition pseudo tree
+    // lives.
+    async #viewTransitionTurn(offset, reason, style) {
+        const { size } = this
+        const startPosition = this.containerPosition
+        // RTL horizontal scroll coordinates are negative; compare magnitudes.
+        const forward = Math.abs(offset) > Math.abs(startPosition)
+        const id = ++this.#slideTurnId
+        this.#isAnimating = true
+        this.#settleDrag(true)
+        this.#vtSetup(style, forward)
+        const transition = document.startViewTransition(() => {
+            this.containerPosition = offset
+            if (!this.scrolled) {
+                this.#bgAnimContext = null
+                this.#replaceBackground()
+            }
+        })
+        try {
+            await transition.finished
+        } catch {
+            // Interrupted or skipped; the newer turn owns the cleanup.
+        }
+        if (id !== this.#slideTurnId) return
+        this.#vtCleanup()
+        this.#isAnimating = false
+        // A neighbor view finishing its load mid-transition re-anchors the
+        // container to the stale pre-turn anchor; re-assert the destination
+        // like the push animation does at its end.
+        this.containerPosition = offset
+        this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+        this.#afterScroll(reason)
     }
     async #scrollToPage(page, reason, smooth) {
         // Negative offsets are an artifact of RTL horizontal scroll
