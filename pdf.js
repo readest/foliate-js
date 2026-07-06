@@ -6,6 +6,27 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.min.mjs')
 
 const fetchText = async url => await (await fetch(url)).text()
 
+// The OS accessibility "font size" setting scales every piece of WebView-rendered
+// text (including this transparent selection/highlight text layer) but leaves the
+// page's canvas bitmap untouched. Only the glyph *size* (a font-size) is scaled;
+// the text layer's positions are percentages of the `--total-scale-factor`-sized
+// container and are not. Left uncorrected the glyphs render `fontScale`x larger
+// than the ones baked into the canvas, so selection and highlight rectangles
+// overshoot the text into the blank margins and sit too low (readest #4480).
+// Measure the scale here so render() can divide it back out of the glyph-size
+// lever only. offsetHeight of a 100px/line-height-1 box reflects the OS font
+// scaling but not devicePixelRatio or CSS transforms, so it isolates it.
+const getFontScale = doc => {
+    const probe = doc.createElement('div')
+    probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;'
+        + 'font-size:100px;line-height:1;text-size-adjust:none;-webkit-text-size-adjust:none'
+    probe.textContent = 'x'
+    doc.body.append(probe)
+    const fontScale = probe.offsetHeight / 100
+    probe.remove()
+    return fontScale > 0 ? fontScale : 1
+}
+
 let textLayerBuilderCSS = null
 let annotationLayerBuilderCSS = null
 
@@ -218,6 +239,14 @@ const render = async (page, doc, zoom, pageColors) => {
 
     // Bail out if superseded after async text layer render
     if (renderGenerations.get(doc) !== generation) return
+
+    // Counteract the OS font-size accessibility scaling on the text layer's glyph
+    // size only (see getFontScale). `--text-scale-factor` feeds `font-size` and
+    // nothing else, so dividing it leaves positions (which scale with
+    // `--total-scale-factor`) aligned with the canvas at any font-size setting.
+    const fontScale = getFontScale(doc)
+    if (fontScale !== 1) container.style.setProperty('--text-scale-factor',
+        `calc(var(--total-scale-factor) * var(--min-font-size) / ${fontScale})`)
 
     // hide "offscreen" canvases appended to document when rendering text layer
     // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/pdf_viewer.css#L51-L58
