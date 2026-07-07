@@ -142,6 +142,26 @@ export const computeSpreadSpineOverlap = ({
     return -1 / (devicePixelRatio || 1)
 }
 
+// Inline margins for the two pages of a spread. In landscape both pages are
+// shown and pushed together at the spine: the left page hugs the right edge
+// (`margin-inline-start: auto`) and the right page hugs the left edge
+// (`margin-inline-end: auto`), so the pair sits centred. In portrait only one
+// page of the spread is shown; a one-sided auto margin would strand that lone
+// page in one half of the viewport whenever it is narrower than the viewport
+// (readest#4984), so both margins are auto to centre it. Both inline margins are
+// always set explicitly (the opposite side cleared to '') so a re-render after
+// an orientation change fully overwrites the previous layout's margins — frames
+// are re-styled in place, not recreated, on rotation.
+export const computeSpreadInlineMargins = (portrait) => portrait
+    ? {
+        left: { marginInlineStart: 'auto', marginInlineEnd: 'auto' },
+        right: { marginInlineStart: 'auto', marginInlineEnd: 'auto' },
+    }
+    : {
+        left: { marginInlineStart: 'auto', marginInlineEnd: '' },
+        right: { marginInlineStart: '', marginInlineEnd: 'auto' },
+    }
+
 // Align the SVG overlayer's coord system with the iframe's unscaled content.
 // When the iframe is visually scaled via CSS transform (non-PDF path),
 // getClientRects() inside the iframe returns positions in the iframe's native
@@ -562,9 +582,13 @@ export class FixedLayout extends HTMLElement {
                 rightBlank: Boolean(right.blank),
                 devicePixelRatio: window.devicePixelRatio || 1,
             })
-            const leftDimensions = transform({frame: left, styles: { marginInlineStart: 'auto' }})
+            // In portrait only the target page is shown; centre it instead of
+            // hugging the spine, which would strand it in one half of the
+            // viewport (#4984).
+            const margins = computeSpreadInlineMargins(portrait)
+            const leftDimensions = transform({frame: left, styles: margins.left})
             const rightDimensions = transform({frame: right, styles: {
-                marginInlineEnd: 'auto',
+                ...margins.right,
                 transform: overlapX ? `translateX(${overlapX}px)` : 'none',
             }})
             if (!leftDimensions || !rightDimensions) return renderPromises
