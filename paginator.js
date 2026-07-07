@@ -1979,6 +1979,9 @@ export class Paginator extends HTMLElement {
     set containerPosition(newVal) {
         this.#container[this.scrollProp] = newVal
     }
+    get scrollLocked() {
+        return this.#scrollLocked
+    }
     set scrollLocked(value) {
         this.#scrollLocked = value
     }
