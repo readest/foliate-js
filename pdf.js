@@ -275,6 +275,10 @@ const render = async (page, doc, zoom, pageColors) => {
     const linkService = {
         goToDestination: () => {},
         getDestinationHash: dest => JSON.stringify(dest),
+        // pdf.js AnnotationLayer calls getAnchorUrl for named-action / GoTo link
+        // annotations; without it the render rejects with "getAnchorUrl is not a
+        // function" (READEST-2M). Match pdf.js SimpleLinkService, which returns ''.
+        getAnchorUrl: () => '',
         addLinkAttributes: (link, url) => link.href = url,
     }
     await new pdfjsLib.AnnotationLayer({ page, viewport, div, linkService }).render({

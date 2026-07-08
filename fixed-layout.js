@@ -1593,7 +1593,17 @@ export class FixedLayout extends HTMLElement {
         return this.#spreads?.length ?? 0
     }
     get containerPosition() {
-        return 0
+        // In scroll mode the element itself scrolls (see atEnd/start/viewSize,
+        // which all read scrollTop). Paginated fixed layout pages via spreads and
+        // has no meaningful scroll offset, so keep returning 0 there.
+        return this.#scrollMode ? this.scrollTop : 0
+    }
+    set containerPosition(newVal) {
+        // Mirror the paginator's read/write containerPosition contract so relative
+        // scroll consumers (auto scroll, middle-click autoscroll) work on scrolled
+        // fixed-layout books (PDF / CBZ / fixed EPUB) instead of throwing on a
+        // getter-only property (READEST-11). No-op when paginated.
+        if (this.#scrollMode) this.scrollTop = newVal
     }
     get sideProp() {
         return this.#scrollMode ? 'height' : 'width'
