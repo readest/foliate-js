@@ -440,6 +440,11 @@ export const isViewVisibleInContainer = (viewRect, containerRect) =>
 
 export const getDirection = doc => {
     const { defaultView } = doc
+    // A view's iframe document can be blank/detached while a section loads or
+    // the view is torn down, leaving body null; getComputedStyle(null) then
+    // throws "parameter 1 is not of type 'Element'" (READEST-2X). Fall back to
+    // horizontal-ltr until real content is present.
+    if (!defaultView || !doc.body) return { vertical: false, rtl: false }
     let { writingMode, direction } = defaultView.getComputedStyle(doc.body)
     // Some EPUBs set writing-mode on the first child of body instead of body itself
     if (!writingMode || writingMode === 'horizontal-tb') {
@@ -466,6 +471,8 @@ export const getDirection = doc => {
 }
 
 const getBackground = doc => {
+    // Same blank/detached-document guard as getDirection (READEST-2X).
+    if (!doc.defaultView || !doc.body) return ''
     const bodyStyle = doc.defaultView.getComputedStyle(doc.body)
     return bodyStyle.backgroundColor === 'rgba(0, 0, 0, 0)'
         && bodyStyle.backgroundImage === 'none'
@@ -537,11 +544,15 @@ const makeMarginals = (length, part) => Array.from({ length }, () => {
 })
 
 const setStyles = (el, styles) => {
+    // el is doc.documentElement, which is null while a view's document is blank
+    // or detached mid-render/teardown (READEST-1H). Nothing to style then.
+    if (!el) return
     const { style } = el
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v)
 }
 
 const setStylesImportant = (el, styles) => {
+    if (!el) return
     const { style } = el
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v, 'important')
 }
