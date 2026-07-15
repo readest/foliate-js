@@ -189,37 +189,40 @@ const render = async (page, doc, zoom, pageColors) => {
         activeRenderTasks.delete(doc)
     }
 
-    // Clamp the device pixel ratio the page is rasterised at so the canvas
-    // bitmap and its WebKit backing layer stay within the iOS content-process
-    // memory budget (readest #5118). The `1 / renderDpr` fit transform matches,
-    // so the displayed page box is unchanged — only the raster resolution drops.
+    // Rasterise the page bitmap over-sampled (clamped for the iOS content-process
+    // memory budget, see getRenderDpr / readest #5118) but lay the whole DOM out
+    // at the true display size. The <canvas> element natively downscales its
+    // bitmap to its CSS box, so the raster stays crisp WITHOUT scaling the
+    // document. Scaling the document with `transform` promotes the whole page to
+    // one over-sized GPU IOSurface that OOM-kills the iOS WebContent process on
+    // zoom; scaling it with `zoom` throws off getBoundingClientRect, misplacing
+    // text selection and the annotation toolbar. Neither is used: the text and
+    // annotation layers live in real display coordinates.
     const renderDpr = getRenderDpr(page, zoom)
-    const scale = zoom * renderDpr
-    doc.documentElement.style.transform = `scale(${1 / renderDpr})`
-    doc.documentElement.style.transformOrigin = 'top left'
-    doc.documentElement.style.setProperty('--total-scale-factor', scale)
+    const renderScale = zoom * renderDpr
+    doc.documentElement.style.setProperty('--total-scale-factor', zoom)
     doc.documentElement.style.setProperty('--user-unit', '1')
     doc.documentElement.style.setProperty('--scale-round-x', '1px')
     doc.documentElement.style.setProperty('--scale-round-y', '1px')
-    const viewport = page.getViewport({ scale })
+    // The bitmap viewport is over-sampled; the display viewport drives the CSS
+    // box, the text layer and the annotation layer (all in display coordinates).
+    const renderViewport = page.getViewport({ scale: renderScale })
+    const displayViewport = page.getViewport({ scale: zoom })
 
     // the canvas must be in the `PDFDocument`'s `ownerDocument`
     // (`globalThis.document` by default); that's where the fonts are loaded
     const canvas = document.createElement('canvas')
-    canvas.height = viewport.height
-    canvas.width = viewport.width
-    // `canvas.width`/`canvas.height` are the bitmap size and must be integers,
-    // so the fractional `viewport.{width,height}` (= pageSizeCss * renderDpr) is
-    // truncated. The iframe content is displayed scaled by `1 / renderDpr` (see
-    // the `documentElement` transform above), so a truncated bitmap renders up to
-    // ~1 device pixel narrower than the page box,
-    // leaving a one-pixel white seam at the spine of a two-page spread (#4587).
-    // Pin an explicit CSS size to the un-truncated viewport dimensions so the
-    // bitmap scales to fill the page box exactly.
-    canvas.style.width = `${viewport.width}px`
-    canvas.style.height = `${viewport.height}px`
+    canvas.height = renderViewport.height
+    canvas.width = renderViewport.width
+    // The CSS box is the un-truncated display size, so the (integer-truncated)
+    // over-sampled bitmap is scaled by the browser to fill the page box exactly.
+    // Pinning the box to the display viewport (rather than letting the truncated
+    // bitmap drive layout) also keeps the left page flush to the spine of a
+    // two-page spread instead of exposing a one-pixel white seam (#4587).
+    canvas.style.width = `${displayViewport.width}px`
+    canvas.style.height = `${displayViewport.height}px`
     const canvasContext = canvas.getContext('2d')
-    const renderTask = page.render({ canvasContext, viewport, pageColors })
+    const renderTask = page.render({ canvasContext, viewport: renderViewport, pageColors })
     activeRenderTasks.set(doc, renderTask)
 
     try {
@@ -262,7 +265,7 @@ const render = async (page, doc, zoom, pageColors) => {
     container.replaceChildren()
     const textLayer = new pdfjsLib.TextLayer({
         textContentSource: await page.streamTextContent(),
-        container, viewport,
+        container, viewport: displayViewport,
     })
     await textLayer.render()
 
@@ -310,7 +313,7 @@ const render = async (page, doc, zoom, pageColors) => {
         getAnchorUrl: () => '',
         addLinkAttributes: (link, url) => link.href = url,
     }
-    await new pdfjsLib.AnnotationLayer({ page, viewport, div, linkService }).render({
+    await new pdfjsLib.AnnotationLayer({ page, viewport: displayViewport, div, linkService }).render({
         annotations: await page.getAnnotations(),
     })
 }
