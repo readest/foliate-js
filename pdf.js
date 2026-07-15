@@ -151,6 +151,30 @@ const setupPanningEvents = (doc) => {
     container.style.cursor = 'grab'
 }
 
+// iOS kills the WKWebView content process when it exceeds a per-process memory
+// high-water limit (~2 GB). A device crash log for readest #5118 shows the
+// foreground WebContent process reaching 2.1 GB while paging a PDF, right before
+// the reader "closed". Both a page's canvas bitmap and its WebKit backing layer
+// are allocated at the render scale, so their memory grows with the SQUARE of the
+// device pixel ratio. Phones report dpr 3, which is the tipping factor; desktop
+// WebKit has no such per-process ceiling, which is why the crash is iOS-only.
+// Rendering at 2x instead of 3x is still retina-sharp but uses ~2.25x less memory
+// per page (the crisp, selectable text layer is a separate DOM layer, unaffected).
+const MAX_RENDER_DPR = 2
+// Hard ceiling on a single page's bitmap area (~3.1 Mpx ≈ 12.6 MB) so a large
+// tablet page can't blow the budget even after the dpr clamp.
+const MAX_CANVAS_PIXELS = 2048 * 1536
+
+// The device pixel ratio to rasterise this page at: the real dpr clamped by both
+// MAX_RENDER_DPR and the per-canvas pixel budget, never below 1 (CSS resolution).
+const getRenderDpr = (page, zoom) => {
+    let dpr = Math.min(devicePixelRatio || 1, MAX_RENDER_DPR)
+    const { width, height } = page.getViewport({ scale: zoom || 1 })
+    const area = width * height * dpr * dpr
+    if (area > MAX_CANVAS_PIXELS) dpr *= Math.sqrt(MAX_CANVAS_PIXELS / area)
+    return Math.max(1, dpr)
+}
+
 const render = async (page, doc, zoom, pageColors) => {
     if (!doc) return
 
@@ -165,8 +189,13 @@ const render = async (page, doc, zoom, pageColors) => {
         activeRenderTasks.delete(doc)
     }
 
-    const scale = zoom * devicePixelRatio
-    doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
+    // Clamp the device pixel ratio the page is rasterised at so the canvas
+    // bitmap and its WebKit backing layer stay within the iOS content-process
+    // memory budget (readest #5118). The `1 / renderDpr` fit transform matches,
+    // so the displayed page box is unchanged — only the raster resolution drops.
+    const renderDpr = getRenderDpr(page, zoom)
+    const scale = zoom * renderDpr
+    doc.documentElement.style.transform = `scale(${1 / renderDpr})`
     doc.documentElement.style.transformOrigin = 'top left'
     doc.documentElement.style.setProperty('--total-scale-factor', scale)
     doc.documentElement.style.setProperty('--user-unit', '1')
@@ -180,10 +209,10 @@ const render = async (page, doc, zoom, pageColors) => {
     canvas.height = viewport.height
     canvas.width = viewport.width
     // `canvas.width`/`canvas.height` are the bitmap size and must be integers,
-    // so the fractional `viewport.{width,height}` (= pageSizeCss *
-    // devicePixelRatio) is truncated. The iframe content is displayed scaled by
-    // `1 / devicePixelRatio` (see the `documentElement` transform above), so a
-    // truncated bitmap renders up to ~1 device pixel narrower than the page box,
+    // so the fractional `viewport.{width,height}` (= pageSizeCss * renderDpr) is
+    // truncated. The iframe content is displayed scaled by `1 / renderDpr` (see
+    // the `documentElement` transform above), so a truncated bitmap renders up to
+    // ~1 device pixel narrower than the page box,
     // leaving a one-pixel white seam at the spine of a two-page spread (#4587).
     // Pin an explicit CSS size to the un-truncated viewport dimensions so the
     // bitmap scales to fill the page box exactly.
