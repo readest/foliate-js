@@ -1187,6 +1187,11 @@ export class Paginator extends HTMLElement {
     // Active finger-tracked layered turn (readest#555): a paused view
     // transition whose animations are scrubbed by the drag.
     #vtDrag = null
+    // A released layered turn still owns the global View Transition until its
+    // commit/cancel cleanup and terminal lifecycle event complete.
+    #vtFinishing = null
+    #vtProgrammatic = null
+    #vtNamedHost = null
     // Snapshot of the invariant inputs #replaceBackground needs (theme/texture
     // style, background+container geometry, per-view size+colour). Set once when
     // a scroll animation starts so the per-frame repaint reuses it instead of
@@ -1434,10 +1439,12 @@ export class Paginator extends HTMLElement {
         this.addEventListener('touchstart', this.#onTouchStart.bind(this), opts)
         this.addEventListener('touchmove', this.#onTouchMove.bind(this), opts)
         this.addEventListener('touchend', this.#onTouchEnd.bind(this))
+        this.addEventListener('touchcancel', this.#onTouchCancel.bind(this))
         this.addEventListener('load', ({ detail: { doc } }) => {
             doc.addEventListener('touchstart', this.#onTouchStart.bind(this), opts)
             doc.addEventListener('touchmove', this.#onTouchMove.bind(this), opts)
             doc.addEventListener('touchend', this.#onTouchEnd.bind(this))
+            doc.addEventListener('touchcancel', this.#onTouchCancel.bind(this))
         })
 
         this.addEventListener('relocate', ({ detail }) => {
@@ -2127,6 +2134,7 @@ export class Paginator extends HTMLElement {
             vx: 0, xy: 0,
             dx: 0, dy: 0,
             dt: 0,
+            blocked: Boolean(this.#vtFinishing || this.#vtProgrammatic),
         }
         // Hint to browser that scrolling will occur for better GPU layer management
         const pv = this.#primaryView
@@ -2137,7 +2145,7 @@ export class Paginator extends HTMLElement {
         // or settle: freeze the views where they are and let the drag continue
         // from that offset. Also re-syncs the drag offset to the rendered
         // transform so a stale value can never leak into the next gesture.
-        if (this.#vertical && !this.scrolled) {
+        if (this.#vertical && !this.scrolled && !this.#layeredTurn) {
             this.#slideTurnId++
             this.#isAnimating = false
             const children = [...this.#container.children]
@@ -2160,6 +2168,7 @@ export class Paginator extends HTMLElement {
     }
     #onTouchMove(e) {
         const state = this.#touchState
+        if (state.blocked) return
         if (state.pinched) return
         state.pinched = globalThis.visualViewport.scale > 1
         if (this.scrolled || state.pinched) return
@@ -2242,6 +2251,7 @@ export class Paginator extends HTMLElement {
         }
         namedHost = namedHost.closest('[data-view-transition-root]') ?? namedHost
         namedHost.style.viewTransitionName = 'foliate-turn'
+        this.#vtNamedHost = namedHost
         // Back the turn layers with the page colour: snapshots of books or
         // themes without an opaque background (e.g. textured themes) would
         // otherwise blend the two pages instead of occluding.
@@ -2258,6 +2268,8 @@ export class Paginator extends HTMLElement {
         const html = document.documentElement
         html.classList.remove(...VIEW_TRANSITION_CLASSES)
         html.style.removeProperty('--foliate-vt-bg')
+        this.#vtNamedHost?.style.removeProperty('view-transition-name')
+        this.#vtNamedHost = null
     }
     // Begin a finger-tracked layered turn (readest#555): once the gesture is
     // horizontal and past a small threshold, snapshot the outgoing page with
@@ -2265,7 +2277,7 @@ export class Paginator extends HTMLElement {
     // let the finger drive their progress. Section boundaries fall through to
     // snap() on release like before.
     #layeredDragStart(state) {
-        if (this.#vtDrag || !this.#scrollBounds) return
+        if (this.#vtDrag || this.#vtFinishing || this.#vtProgrammatic || !this.#scrollBounds) return
         const style = this.#layeredTurn
         if (!style) return
         // Clearly horizontal intent only: a finger landing with a sideways
@@ -2287,6 +2299,9 @@ export class Paginator extends HTMLElement {
         const offset = this.size * (this.#rtl && !this.#vertical ? -target : target)
         ++this.#slideTurnId
         this.#isAnimating = true
+        this.dispatchEvent(new CustomEvent('layered-turn-state', {
+            detail: { phase: 'before-capture', style, forward },
+        }))
         this.#vtSetup(style, forward)
         const startPosition = this.containerPosition
         const transition = document.startViewTransition(() => {
@@ -2295,15 +2310,21 @@ export class Paginator extends HTMLElement {
                 this.#bgAnimContext = null
                 this.#replaceBackground()
             }
+            // The old snapshot now owns the visible toolbar. Let the host hide
+            // the live copy synchronously before the new snapshot is captured,
+            // so its regular opacity transition cannot run beside the page.
+            this.dispatchEvent(new CustomEvent('layered-turn-state', {
+                detail: { phase: 'covered', style, forward },
+            }))
         })
         const drag = {
             transition, offset, startPosition, forward,
-            progress: 0, anims: null,
+            style, progress: 0, anims: null,
             width: this.#container.getBoundingClientRect().width,
         }
         this.#vtDrag = drag
         transition.ready.then(() => {
-            if (this.#vtDrag !== drag) return
+            if (this.#vtDrag !== drag && this.#vtFinishing !== drag) return
             const anims = document.getAnimations().filter(a =>
                 a.effect?.pseudoElement?.includes('(foliate-turn)'))
             for (const a of anims) {
@@ -2313,14 +2334,16 @@ export class Paginator extends HTMLElement {
                 a.pause()
             }
             drag.anims = anims
-            this.#vtDragScrub()
+            this.#vtDragScrub(drag)
+            this.dispatchEvent(new CustomEvent('layered-turn-state', {
+                detail: { phase: 'ready', style, forward },
+            }))
         }, () => {
             // Capture failed or was skipped; release falls back to snap().
-            if (this.#vtDrag === drag) drag.failed = true
+            if (this.#vtDrag === drag || this.#vtFinishing === drag) drag.failed = true
         })
     }
-    #vtDragScrub() {
-        const drag = this.#vtDrag
+    #vtDragScrub(drag = this.#vtDrag) {
         if (!drag?.anims) return
         for (const a of drag.anims) {
             const duration = a.effect.getTiming().duration
@@ -2334,41 +2357,65 @@ export class Paginator extends HTMLElement {
     // drag (the snapshot hides it), so cancel restores it under the overlay
     // before the transition is skipped.
     async #finishLayeredDrag(drag, commit) {
-        const { transition, anims, offset, startPosition } = drag
+        if (this.#vtFinishing === drag) return
+        this.#vtFinishing = drag
+        const { transition, offset, startPosition, style, forward } = drag
         const { size } = this
         const id = ++this.#slideTurnId
         this.#isAnimating = true
-        if (commit) {
-            if (anims) for (const a of anims) a.play()
-            try {
-                await transition.finished
-            } catch { /* skipped */ }
+        try {
+            // The update callback owns the old/new snapshot boundary. Await it
+            // before any terminal event so `covered` can never arrive after a
+            // very fast release has already announced cancellation.
+            try { await transition.updateCallbackDone } catch { /* skipped */ }
+            try { await transition.ready } catch { /* capture failed */ }
             if (id !== this.#slideTurnId) return
-            this.#vtCleanup()
-            this.#isAnimating = false
-            this.containerPosition = offset
-            this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
-            this.#afterScroll('snap')
-        } else {
-            if (anims) {
-                for (const a of anims) a.reverse()
+
+            const anims = drag.anims
+            if (commit) {
+                if (anims) for (const a of anims) a.play()
                 try {
-                    await Promise.all(anims.map(a => a.finished))
-                } catch { /* superseded */ }
+                    await transition.finished
+                } catch { /* skipped */ }
+            } else {
+                if (anims) {
+                    for (const a of anims) a.reverse()
+                    try {
+                        await Promise.all(anims.map(a => a.finished))
+                    } catch { /* superseded */ }
+                }
+                if (id !== this.#slideTurnId) return
+                // Restore the pre-turn page under the overlay, then drop it.
+                this.containerPosition = startPosition
+                this.dispatchEvent(new CustomEvent('layered-turn-state', {
+                    detail: { phase: 'cancelled', style, forward, committed: false },
+                }))
+                // Give the host two rendering opportunities to paint restored
+                // chrome underneath the now-flat snapshot before it is removed.
+                await new Promise(resolve => requestAnimationFrame(() =>
+                    requestAnimationFrame(resolve)))
+                if (id !== this.#slideTurnId) return
+                try { transition.skipTransition() } catch { /* already done */ }
+                try {
+                    await transition.finished
+                } catch { /* skipped */ }
             }
             if (id !== this.#slideTurnId) return
-            // Restore the pre-turn page under the overlay, then drop it.
-            this.containerPosition = startPosition
-            try { transition.skipTransition() } catch { /* already done */ }
-            try {
-                await transition.finished
-            } catch { /* skipped */ }
-            if (id !== this.#slideTurnId) return
             this.#vtCleanup()
             this.#isAnimating = false
-            this.containerPosition = startPosition
-            this.#scrollBounds = [startPosition, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+            const finalPosition = commit ? offset : startPosition
+            this.containerPosition = finalPosition
+            this.#scrollBounds = [
+                finalPosition,
+                this.atStart ? 0 : size,
+                this.atEnd ? 0 : size,
+            ]
             this.#afterScroll('snap')
+            this.dispatchEvent(new CustomEvent('layered-turn-state', {
+                detail: { phase: 'finished', style, forward, committed: commit },
+            }))
+        } finally {
+            if (this.#vtFinishing === drag) this.#vtFinishing = null
         }
     }
     #dragBy(dx) {
@@ -2420,6 +2467,11 @@ export class Paginator extends HTMLElement {
         // The drag is over: drop the drag-time paint snapshot so the snap
         // animation (or any other repaint) rebuilds a fresh context.
         this.#bgAnimContext = null
+        const state = this.#touchState
+        if (state?.blocked) {
+            this.#touchScrolled = false
+            return
+        }
 
         if (!this.#touchScrolled) {
             // A tap that never dragged may still have taken over a mid-flight
@@ -2433,7 +2485,6 @@ export class Paginator extends HTMLElement {
 
         // A finger that rested before lifting has no flick momentum; the
         // last touchmove velocity is stale by the rest duration.
-        const state = this.#touchState
         if (state && e && e.timeStamp - state.t > 80) {
             state.vx = 0
             state.vy = 0
@@ -2470,6 +2521,31 @@ export class Paginator extends HTMLElement {
                 this.snap(vx, vy, dx, dy, dt)
             }
         })
+    }
+    #onTouchCancel() {
+        this.#bgAnimContext = null
+        const state = this.#touchState
+        if (state?.blocked) {
+            this.#touchScrolled = false
+            return
+        }
+
+        const drag = this.#vtDrag
+        if (drag) {
+            this.#vtDrag = null
+            this.#touchScrolled = false
+            this.#finishLayeredDrag(drag, false)
+            return
+        }
+
+        const wasScrolled = this.#touchScrolled
+        this.#touchScrolled = false
+        if (this.scrolled || this.hasAttribute('no-swipe')) return
+        if (this.#vertical) {
+            this.#settleDrag()
+        } else if (wasScrolled && this.#scrollBounds) {
+            this.#scrollTo(this.#scrollBounds[0], 'snap')
+        }
     }
     // allows one to process rects as if they were LTR and horizontal
     #getRectMapper(view) {
@@ -2664,6 +2740,11 @@ export class Paginator extends HTMLElement {
     // classes on the document root, where the ::view-transition pseudo tree
     // lives.
     async #viewTransitionTurn(offset, reason, style) {
+        // A layered transition has exclusive ownership of the document-level
+        // pseudo tree. Ignore overlapping navigation until its lifecycle has
+        // reached cleanup; otherwise the newer generation strands the older
+        // turn before it can dispatch `finished`.
+        if (this.#vtDrag || this.#vtFinishing || this.#vtProgrammatic) return
         const { size } = this
         const startPosition = this.containerPosition
         // RTL horizontal scroll coordinates are negative; compare magnitudes.
@@ -2679,20 +2760,26 @@ export class Paginator extends HTMLElement {
                 this.#replaceBackground()
             }
         })
+        const active = { transition, id }
+        this.#vtProgrammatic = active
         try {
-            await transition.finished
-        } catch {
-            // Interrupted or skipped; the newer turn owns the cleanup.
+            try {
+                await transition.finished
+            } catch {
+                // Interrupted or skipped; the newer turn owns the cleanup.
+            }
+            if (id !== this.#slideTurnId) return
+            this.#vtCleanup()
+            this.#isAnimating = false
+            // A neighbor view finishing its load mid-transition re-anchors the
+            // container to the stale pre-turn anchor; re-assert the destination
+            // like the push animation does at its end.
+            this.containerPosition = offset
+            this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+            this.#afterScroll(reason)
+        } finally {
+            if (this.#vtProgrammatic === active) this.#vtProgrammatic = null
         }
-        if (id !== this.#slideTurnId) return
-        this.#vtCleanup()
-        this.#isAnimating = false
-        // A neighbor view finishing its load mid-transition re-anchors the
-        // container to the stale pre-turn anchor; re-assert the destination
-        // like the push animation does at its end.
-        this.containerPosition = offset
-        this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
-        this.#afterScroll(reason)
     }
     async #scrollToPage(page, reason, smooth) {
         // Negative offsets are an artifact of RTL horizontal scroll
@@ -3375,6 +3462,19 @@ export class Paginator extends HTMLElement {
         this.#primaryView?.destroyLoupe()
     }
     destroy() {
+        const transition = (this.#vtDrag ?? this.#vtFinishing)?.transition
+            ?? this.#vtProgrammatic?.transition
+        this.#vtDrag = null
+        this.#vtFinishing = null
+        this.#vtProgrammatic = null
+        this.#slideTurnId++
+        if (transition || this.#vtNamedHost) {
+            transition?.ready?.catch(() => {})
+            transition?.updateCallbackDone?.catch(() => {})
+            try { transition?.skipTransition() } catch { /* already done */ }
+            this.#vtCleanup()
+            this.#isAnimating = false
+        }
         this.#observer.unobserve(this)
         this.#destroyAllViews()
         this.#mediaQuery.removeEventListener('change', this.#mediaQueryListener)
