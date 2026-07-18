@@ -2061,7 +2061,22 @@ export class Paginator extends HTMLElement {
         } else {
             const velocity = useHorizontal ? vx : vy
             const avgVelocity = useHorizontal ? dx / dt : dy / dt
-            const aligned = useHorizontal ? horizontal : true
+            // Without drag-follow (eink, animation off, block-axis swipes,
+            // layered turn styles) the scroll position never moves with the
+            // finger; judge the whole gesture by displacement (avgVelocity)
+            // like the eink path.
+            const snapping = this.hasAttribute('animated') && !this.hasAttribute('eink')
+                && !this.#vertical && !this.#layeredTurn
+            // Drag-follow releases are judged by the release flick, so their
+            // alignment uses the flick (last-sample) velocities. Displacement-
+            // judged releases weigh the WHOLE gesture and their alignment must
+            // too: the last-sample ratio is lift-off jitter — a vertical swipe
+            // whose finger hooks sideways in its final milliseconds read as
+            // horizontal, and the displacement heuristic amplified the tiny
+            // net x-drift into a random page turn (layered slide on Android).
+            const aligned = useHorizontal
+                ? (snapping ? horizontal : Math.abs(dx) > Math.abs(dy))
+                : true
             // Horizontal swipes advance against the page progression (RTL:
             // next page is to the left); block-axis swipes always advance
             // with the scroll axis.
@@ -2072,12 +2087,6 @@ export class Paginator extends HTMLElement {
             const end = this.#renderedEnd
             const min = Math.abs(offset) - a
             const max = Math.abs(offset) + b
-            // Without drag-follow (eink, animation off, block-axis swipes,
-            // layered turn styles) the scroll position never moves with the
-            // finger; judge the whole gesture by displacement (avgVelocity)
-            // like the eink path.
-            const snapping = this.hasAttribute('animated') && !this.hasAttribute('eink')
-                && !this.#vertical && !this.#layeredTurn
             const v =  snapping ? velocity : avgVelocity
             const d = v * sign * size * (aligned ? 1 : 0)
             const snapOffset = (isNaN(d) ? 0 : snapping ? d * 2 : d * 10)
@@ -2259,7 +2268,15 @@ export class Paginator extends HTMLElement {
         if (this.#vtDrag || !this.#scrollBounds) return
         const style = this.#layeredTurn
         if (!style) return
-        if (Math.abs(state.dx) < Math.abs(state.dy) || Math.abs(state.dx) < 12) return
+        // Clearly horizontal intent only: a finger landing with a sideways
+        // wobble puts |dx| ahead of |dy| for a moment on a vertical swipe,
+        // and engaging then flashes a snapshot that the release cancel can
+        // only take back after it was seen. A wobble stays under ~20px, so
+        // demand more horizontal travel than that plus a dominance margin —
+        // once the vertical run accumulates, the ratio blocks for good. The
+        // release additionally cancels any drag whose whole gesture ends up
+        // predominantly vertical.
+        if (Math.abs(state.dx) < Math.abs(state.dy) * 1.5 || Math.abs(state.dx) < 24) return
         // Finger travel along the forward direction decides which neighbor
         // page gets snapshotted.
         const along = this.#rtl ? -state.dx : state.dx
@@ -2424,14 +2441,22 @@ export class Paginator extends HTMLElement {
 
         // A finger-tracked layered turn resolves here: commit past halfway or
         // on a flick along the drag, reverse otherwise (same carousel rule as
-        // the vertical drag decision in snap()).
+        // the vertical drag decision in snap()). A page-turn commit also
+        // requires the WHOLE gesture to be predominantly horizontal: a finger
+        // landing with a sideways wobble can start the drag before any
+        // vertical distance accumulates, and the lift-off flick velocity is
+        // jitter — judged alone they turned the page randomly on vertical
+        // toolbar-toggle swipes (Android WebView report).
         const drag = this.#vtDrag
         if (drag) {
             this.#vtDrag = null
+            const gestureAligned = state
+                ? Math.abs(state.dx) > Math.abs(state.dy) : true
             const alongV = this.#rtl ? -(state?.vx ?? 0) : (state?.vx ?? 0)
             const flick = Math.abs(alongV) > 0.3
                 ? Math.sign(alongV) * (drag.forward ? 1 : -1) : 0
-            const commit = flick > 0 ? true : flick < 0 ? false : drag.progress > 0.5
+            const commit = gestureAligned
+                && (flick > 0 ? true : flick < 0 ? false : drag.progress > 0.5)
             this.#finishLayeredDrag(drag, commit)
             return
         }
@@ -2500,7 +2525,13 @@ export class Paginator extends HTMLElement {
     }
     async #scrollTo(offset, reason, smooth) {
         const { size } = this
-        if (this.containerPosition === offset) {
+        // Near-equality, not exact: on fractional device-pixel-ratio screens
+        // (e.g. 2.75) the container scroll rests a sub-pixel off the page
+        // offset, and an exact check made every same-page settle miss this
+        // short-circuit and run a full animation — with the layered turn
+        // styles, a visible full-page view-transition flash on every
+        // vertical toolbar-toggle swipe.
+        if (Math.abs(this.containerPosition - offset) < 1) {
             this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
             // A released drag that stays on the same page settles back to rest.
             if (this.#vertical && !this.scrolled) this.#settleDrag()
@@ -2512,8 +2543,11 @@ export class Paginator extends HTMLElement {
         if ((reason === 'snap' || smooth) && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
             // Layered turn styles: snapshot the outgoing page and animate it
             // over the live, stationary incoming page (readest#555). Works
-            // for every writing mode since the snapshot is axis-agnostic.
-            const layered = !this.scrolled && this.#layeredTurn
+            // for every writing mode since the snapshot is axis-agnostic —
+            // but only for actual page changes: a sub-page settle must not
+            // snapshot and re-slide the page it is already resting on.
+            const turning = Math.abs(offset - this.containerPosition) > size / 2
+            const layered = !this.scrolled && turning ? this.#layeredTurn : null
             if (layered) return this.#viewTransitionTurn(offset, reason, layered)
             const startPosition = this.containerPosition
             this.#isAnimating = true
