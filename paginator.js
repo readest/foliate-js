@@ -142,6 +142,7 @@ const slideTurnAnimation = (element, scrollProp, endValue, exitSign, width, dura
 // attaches to the document root, not to the paginator's shadow root.
 const VIEW_TRANSITION_CLASSES = [
     'foliate-vt', 'foliate-vt-slide', 'foliate-vt-curl',
+    'foliate-vt-scrub',
     'foliate-vt-forward', 'foliate-vt-backward',
     'foliate-vt-left', 'foliate-vt-right',
     'foliate-vt-eat-left', 'foliate-vt-eat-right',
@@ -190,6 +191,13 @@ const injectViewTransitionStyles = () => {
     }
     .foliate-vt-slide.foliate-vt-backward.foliate-vt-right::view-transition-new(foliate-turn) {
         animation-name: foliate-turn-slide-in-right;
+    }
+    /* Finger-tracked turns map distance directly to animation time. Declare
+       linear timing at the CSS source because some Android WebViews expose
+       UA pseudo animations but reject KeyframeEffect.updateTiming(). */
+    .foliate-vt-scrub::view-transition-old(foliate-turn),
+    .foliate-vt-scrub::view-transition-new(foliate-turn) {
+        animation-timing-function: linear !important;
     }
     @keyframes foliate-turn-slide-out-left { to { transform: translateX(-100%); } }
     @keyframes foliate-turn-slide-out-right { to { transform: translateX(100%); } }
@@ -2235,7 +2243,7 @@ export class Paginator extends HTMLElement {
     // furniture turns with the page in both layers); otherwise the outermost
     // shadow host in the document tree is named, since shadow-internal names
     // are tree-scoped away from the document-level pseudo selectors.
-    #vtSetup(style, forward) {
+    #vtSetup(style, forward, scrubbing = false) {
         injectViewTransitionStyles()
         const html = document.documentElement
         const side = this.#rtl ? 'right' : 'left'
@@ -2245,6 +2253,7 @@ export class Paginator extends HTMLElement {
         const classes = ['foliate-vt', `foliate-vt-${style}`,
             forward ? 'foliate-vt-forward' : 'foliate-vt-backward',
             `foliate-vt-${side}`, `foliate-vt-eat-${eatSide}`]
+        if (scrubbing) classes.push('foliate-vt-scrub')
         let namedHost = this
         while (namedHost.getRootNode() instanceof ShadowRoot) {
             namedHost = namedHost.getRootNode().host
@@ -2263,6 +2272,7 @@ export class Paginator extends HTMLElement {
         html.style.setProperty('--foliate-vt-bg', themeBg || 'Canvas')
         html.classList.remove(...VIEW_TRANSITION_CLASSES)
         html.classList.add(...classes)
+        return namedHost
     }
     #vtCleanup() {
         const html = document.documentElement
@@ -2302,7 +2312,7 @@ export class Paginator extends HTMLElement {
         this.dispatchEvent(new CustomEvent('layered-turn-state', {
             detail: { phase: 'before-capture', style, forward },
         }))
-        this.#vtSetup(style, forward)
+        const turnRoot = this.#vtSetup(style, forward, true)
         const startPosition = this.containerPosition
         const transition = document.startViewTransition(() => {
             this.containerPosition = offset
@@ -2320,7 +2330,11 @@ export class Paginator extends HTMLElement {
         const drag = {
             transition, offset, startPosition, forward,
             style, progress: 0, anims: null,
-            width: this.#container.getBoundingClientRect().width,
+            // Progress must use the width of the actual named snapshot. The
+            // inner content container can be narrower because of page margins;
+            // using it makes the sheet gradually outrun the finger.
+            width: turnRoot.getBoundingClientRect().width
+                || this.#container.getBoundingClientRect().width,
         }
         this.#vtDrag = drag
         transition.ready.then(() => {
@@ -2328,8 +2342,9 @@ export class Paginator extends HTMLElement {
             const anims = document.getAnimations().filter(a =>
                 a.effect?.pseudoElement?.includes('(foliate-turn)'))
             for (const a of anims) {
-                // Scrubbing maps finger distance to animation time, so the
-                // page must move linearly with the finger.
+                // CSS is authoritative for linear scrubbing. Keep this as a
+                // best-effort fallback for engines that expose mutable pseudo
+                // animation effects.
                 try { a.effect.updateTiming({ easing: 'linear' }) } catch { /* UA animation */ }
                 a.pause()
             }
