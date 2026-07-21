@@ -620,6 +620,7 @@ class View {
         return new Promise(resolve => {
             this.#iframe.addEventListener('load', async () => {
                 const doc = this.document
+                if (!doc?.documentElement || !doc.body) return resolve()
                 afterLoad?.(doc)
 
                 this.#iframe.setAttribute('aria-label', doc.title)
@@ -3038,6 +3039,14 @@ export class Paginator extends HTMLElement {
             }
             const beforeRender = this.#beforeRender.bind(this)
             await view.load(src, data, afterLoad, beforeRender)
+            if (!view.document?.documentElement || !view.document.body) {
+                this.#destroyView(index)
+                this.#primaryIndex = this.#sortedViews[0]?.[0] ?? -1
+                this.#container.style.opacity = '1'
+                this.#stabilizing = false
+                this.dispatchEvent(new Event('stabilized'))
+                return
+            }
             // Cache direction for future preload boundary checks
             if (view.document) {
                 const dir = getDirection(view.document)
@@ -3123,6 +3132,10 @@ export class Paginator extends HTMLElement {
             const cachedLayout = this.#lastLayout
             const beforeRender = () => cachedLayout
             await view.load(src, data, afterLoad, beforeRender)
+            if (!view.document?.documentElement || !view.document.body) {
+                this.#destroyView(index)
+                return
+            }
             // Cache direction for future preload boundary checks
             if (view.document) {
                 const dir = getDirection(view.document)
@@ -3231,6 +3244,8 @@ export class Paginator extends HTMLElement {
         return index >= 0 && index <= this.sections.length - 1
     }
     async #goTo({ index, anchor, select }) {
+        const section = this.sections[index]
+        if (!section) return
         // Check if the target section has a different writing-mode.
         // If direction changes, we must destroy all views and do a full
         // rebuild via #display — mixed-direction views cannot coexist.
@@ -3323,9 +3338,9 @@ export class Paginator extends HTMLElement {
                 this.setStyles(this.#styles)
                 this.dispatchEvent(new CustomEvent('load', { detail }))
             }
-            await this.#display(Promise.resolve(this.sections[index].load())
+            await this.#display(Promise.resolve(section.load())
                 .then(async src => {
-                    const data = await this.sections[index].loadContent?.()
+                    const data = await section.loadContent?.()
                     return { index, src, data, anchor, onLoad, select }
                 }).catch(e => {
                     console.warn(e)
