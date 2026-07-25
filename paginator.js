@@ -148,6 +148,70 @@ const VIEW_TRANSITION_CLASSES = [
     'foliate-vt-eat-left', 'foliate-vt-eat-right',
 ]
 
+const RELEASE_VELOCITY_WINDOW_MS = 90
+const RELEASE_PAUSE_THRESHOLD_MS = 80
+const SLIDE_RELEASE_PROJECTION_MS = 240
+const LAYERED_EDGE_REGION = 0.18
+const LAYERED_EARLY_CLAIM_PX = 6
+const LAYERED_EARLY_SAMPLE_INTERVAL_MS = 80
+const LAYERED_VERTICAL_REJECT_PX = 8
+const LAYERED_FALLBACK_CLAIM_PX = 24
+const LAYERED_FALLBACK_DOMINANCE = 1.5
+
+const updateReleaseSample = (state, distance, time) => {
+    const previous = state.releaseSamples.at(-1)
+    if (!previous || distance !== previous.distance) state.lastMovementTime = time
+    if (previous?.time === time) previous.distance = distance
+    else state.releaseSamples.push({ distance, time })
+
+    const cutoff = time - RELEASE_VELOCITY_WINDOW_MS
+    while (state.releaseSamples.length > 2
+        && state.releaseSamples[1].time < cutoff) state.releaseSamples.shift()
+}
+
+const getReleaseVelocity = state => {
+    const latest = state.releaseSamples.at(-1)
+    if (!latest || latest.time - state.lastMovementTime > RELEASE_PAUSE_THRESHOLD_MS) return 0
+
+    const cutoff = latest.time - RELEASE_VELOCITY_WINDOW_MS
+    const before = state.releaseSamples[0]
+    const after = state.releaseSamples.find(sample => sample.time >= cutoff)
+    if (!before || !after) return 0
+
+    const startTime = Math.max(cutoff, before.time)
+    if (latest.time <= startTime) return 0
+    const interval = after.time - before.time
+    const startDistance = interval > 0 && startTime > before.time
+        ? before.distance
+            + (after.distance - before.distance) * (startTime - before.time) / interval
+        : after.distance
+    return (latest.distance - startDistance) / (latest.time - startTime)
+}
+
+// Release speed controls the remaining settle rate for both layered styles.
+// Slide can carry more momentum than the heavier curl.
+const LAYERED_SETTLE_CONFIG = {
+    slide: { minSpeed: 0.2, maxSpeed: 1, maxRate: 2 },
+    curl: { minSpeed: 0.3, maxSpeed: 1.5, maxRate: 1.5 },
+}
+
+const layeredSettlePlaybackRate = (style, speed) => {
+    const config = LAYERED_SETTLE_CONFIG[style]
+    if (!config || !(speed > config.minSpeed)) return 1
+    const { minSpeed, maxSpeed, maxRate } = config
+    const amount = Math.min(1, (speed - minSpeed) / (maxSpeed - minSpeed))
+    return 1 + amount * (maxRate - 1)
+}
+
+const updatePlaybackRate = (animation, rate) => {
+    if (rate === 1) return
+    try {
+        animation.updatePlaybackRate(rate)
+        return
+    } catch { /* unsupported for this UA animation */ }
+    try { animation.playbackRate = rate } catch { /* unsupported */ }
+}
+
 const injectViewTransitionStyles = () => {
     const id = 'foliate-view-transition-styles'
     if (document.getElementById(id)) return
@@ -2136,15 +2200,47 @@ export class Paginator extends HTMLElement {
         this.#scrollToPage(page, 'snap')
     }
     #onTouchStart(e) {
+        const previousState = this.#touchState
+        const replacementTouch = Boolean(previousState?.active)
+        if (replacementTouch) this.#rejectLayeredGesture(previousState)
+        const multiTouch = e.touches.length > 1
         const touch = e.changedTouches[0]
+        const currentTarget = e.currentTarget
+        const isInnerDocument = currentTarget?.nodeType === 9
+        const bounds = isInnerDocument
+            ? { left: 0, width: currentTarget.documentElement?.clientWidth ?? 0 }
+            : this.getBoundingClientRect()
+        const localX = (touch?.clientX ?? 0) - bounds.left
+        // Hosts can reserve a left-side control strip (for example, a vertical
+        // brightness gesture) without disabling horizontal pagination there.
+        // Only the low-slop fast paths are withheld; the normal fallback stays.
+        const reservedLeftRatio = Math.max(0, Math.min(0.5,
+            Number(this.getAttribute('turn-gesture-left-inset')) || 0))
+        const earlyClaimBlocked = bounds.width > 0
+            && localX <= bounds.width * reservedLeftRatio
+        const edgeDirection = bounds.width > 0
+            ? !earlyClaimBlocked && localX <= bounds.width * LAYERED_EDGE_REGION ? -1
+                : localX >= bounds.width * (1 - LAYERED_EDGE_REGION) ? 1 : 0
+            : 0
+        const blocked = Boolean(multiTouch || this.#vtFinishing || this.#vtProgrammatic)
         this.#touchState = {
             x: touch?.screenX, y: touch?.screenY,
             t: e.timeStamp,
             vx: 0, xy: 0,
             dx: 0, dy: 0,
             dt: 0,
-            blocked: Boolean(this.#vtFinishing || this.#vtProgrammatic),
+            releaseSamples: [{ distance: 0, time: e.timeStamp }],
+            lastMovementTime: e.timeStamp,
+            active: true,
+            blocked,
+            layeredGesture: blocked ? 'rejected' : 'pending',
+            layeredEarlyClaimBlocked: earlyClaimBlocked,
+            layeredEdgeDirection: edgeDirection,
+            layeredHorizontalDirection: 0,
+            layeredHorizontalSamples: 0,
+            layeredHorizontalSampleTime: null,
         }
+        if (replacementTouch || multiTouch) this.#touchScrolled = false
         // Hint to browser that scrolling will occur for better GPU layer management
         const pv = this.#primaryView
         if (pv?.element) {
@@ -2177,27 +2273,42 @@ export class Paginator extends HTMLElement {
     }
     #onTouchMove(e) {
         const state = this.#touchState
-        if (state.blocked) return
-        if (state.pinched) return
+        if (!state?.active || state.blocked) return
+        if (e.touches.length > 1) {
+            if (this.#touchScrolled) e.preventDefault()
+            this.#rejectLayeredGesture(state)
+            return
+        }
+        if (state.pinched) {
+            this.#rejectLayeredGesture(state)
+            return
+        }
         state.pinched = globalThis.visualViewport.scale > 1
-        if (this.scrolled || state.pinched) return
+        if (state.pinched) {
+            this.#rejectLayeredGesture(state)
+            return
+        }
+        if (this.scrolled) return
         // When the host opts out of swipe-to-paginate, let touch events reach
         // native behavior (text selection, etc.) without us tracking or
         // pre-empting them.
-        if (this.hasAttribute('no-swipe')) return
-        if (e.touches.length > 1) {
-            if (this.#touchScrolled) e.preventDefault()
+        if (this.hasAttribute('no-swipe')) {
+            this.#rejectLayeredGesture(state)
             return
         }
         const doc = this.#primaryView?.document
         const selection = doc?.getSelection()
         if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+            this.#rejectLayeredGesture(state)
             return
         }
         const touch = e.changedTouches[0]
         const isStylus = touch.touchType === 'stylus'
         if (!isStylus) e.preventDefault()
-        if (this.#scrollLocked) return
+        if (this.#scrollLocked) {
+            this.#rejectLayeredGesture(state)
+            return
+        }
         const x = touch.screenX, y = touch.screenY
         const dx = state.x - x, dy = state.y - y
         const dt = e.timeStamp - state.t
@@ -2209,20 +2320,30 @@ export class Paginator extends HTMLElement {
         state.dx += dx
         state.dy += dy
         state.dt += dt
+        updateReleaseSample(state, state.dx, e.timeStamp)
         this.#touchScrolled = true
         if (!this.hasAttribute('animated') || this.hasAttribute('eink')) return
         // Layered turn styles track the finger by scrubbing a paused view
         // transition: the outgoing snapshot follows the drag over the still
         // incoming page, then commits or reverses on release.
         if (this.#layeredTurn) {
-            if (!this.#vtDrag) this.#layeredDragStart(state)
+            if (!this.#vtDrag) this.#layeredDragStart(state, dx, dy)
             const drag = this.#vtDrag
             if (drag) {
                 // Net finger travel along the forward direction (rtl books
                 // advance with a rightward finger).
                 const along = this.#rtl ? -state.dx : state.dx
+                const totalDistance = drag.forward ? along : -along
+                // Slide begins visually flat at the point where the gesture
+                // arena awards ownership. The consumed recognition distance
+                // still contributes to release intent below, but no longer
+                // appears as a first-frame jump. Curl preserves its existing
+                // touchstart-relative fold.
+                const visualDistance = drag.style === 'slide'
+                    ? totalDistance - drag.visualOriginDistance
+                    : totalDistance
                 drag.progress = Math.max(0, Math.min(1,
-                    (drag.forward ? along : -along) / drag.width))
+                    visualDistance / drag.width))
                 this.#vtDragScrub()
             }
             return
@@ -2282,28 +2403,92 @@ export class Paginator extends HTMLElement {
         this.#vtNamedHost?.style.removeProperty('view-transition-name')
         this.#vtNamedHost = null
     }
-    // Begin a finger-tracked layered turn (readest#555): once the gesture is
-    // horizontal and past a small threshold, snapshot the outgoing page with
-    // a view transition toward the adjacent page, pause its animations, and
-    // let the finger drive their progress. Section boundaries fall through to
-    // snap() on release like before.
-    #layeredDragStart(state) {
+    // Permanently yield this touch sequence to another gesture owner. If the
+    // layered snapshot already exists, cancel it through the normal lifecycle
+    // instead of letting later samples (or a replacement finger) scrub it.
+    #rejectLayeredGesture(state = this.#touchState) {
+        if (state) {
+            state.layeredGesture = 'rejected'
+            state.layeredHorizontalDirection = 0
+            state.layeredHorizontalSamples = 0
+            state.layeredHorizontalSampleTime = null
+        }
+        const drag = this.#vtDrag
+        if (!drag) return
+        this.#vtDrag = null
+        this.#finishLayeredDrag(drag, false)
+    }
+    // Begin a finger-tracked layered turn (readest#555). Edge-originated
+    // gestures can claim on their first clear inward move. In the middle, two
+    // consecutive horizontal samples can claim after 6px; a vertical gesture
+    // locks out the turn before a landing wobble can become a page animation.
+    // Ambiguous trajectories retain the established 24px + 1.5x fallback.
+    // Once claimed, the existing `before-capture` lifecycle event explicitly
+    // transfers ownership to the layered turn.
+    #layeredDragStart(state, dx, dy) {
         if (this.#vtDrag || this.#vtFinishing || this.#vtProgrammatic || !this.#scrollBounds) return
         const style = this.#layeredTurn
         if (!style) return
-        // Clearly horizontal intent only: a finger landing with a sideways
-        // wobble puts |dx| ahead of |dy| for a moment on a vertical swipe,
-        // and engaging then flashes a snapshot that the release cancel can
-        // only take back after it was seen. A wobble stays under ~20px, so
-        // demand more horizontal travel than that plus a dominance margin —
-        // once the vertical run accumulates, the ratio blocks for good. The
-        // release additionally cancels any drag whose whole gesture ends up
-        // predominantly vertical.
-        if (Math.abs(state.dx) < Math.abs(state.dy) * 1.5 || Math.abs(state.dx) < 24) return
+        if (state.layeredGesture !== 'pending') return
+
+        const absDx = Math.abs(state.dx)
+        const absDy = Math.abs(state.dy)
+        if (absDy >= LAYERED_VERTICAL_REJECT_PX && absDy > absDx) {
+            state.layeredGesture = 'rejected'
+            return
+        }
+
+        const direction = Math.sign(dx)
+        const locallyHorizontal = direction !== 0 && Math.abs(dx) > Math.abs(dy)
+        const clearlyHorizontal = locallyHorizontal
+            && Math.abs(dx) >= Math.abs(dy) * LAYERED_FALLBACK_DOMINANCE
+        const cumulativelyHorizontal = absDx
+            >= absDy * LAYERED_FALLBACK_DOMINANCE
+        if (locallyHorizontal && cumulativelyHorizontal) {
+            const recentSample = state.layeredHorizontalSampleTime != null
+                && state.t - state.layeredHorizontalSampleTime
+                    <= LAYERED_EARLY_SAMPLE_INTERVAL_MS
+            if (state.layeredHorizontalDirection === direction && recentSample) {
+                state.layeredHorizontalSamples++
+            } else {
+                state.layeredHorizontalDirection = direction
+                state.layeredHorizontalSamples = 1
+            }
+            state.layeredHorizontalSampleTime = state.t
+        } else {
+            state.layeredHorizontalDirection = 0
+            state.layeredHorizontalSamples = 0
+            state.layeredHorizontalSampleTime = null
+        }
+
+        const edgeClaim = state.layeredEdgeDirection !== 0
+            && !state.layeredEarlyClaimBlocked
+            && direction === state.layeredEdgeDirection
+            && Math.sign(state.dx) === state.layeredEdgeDirection
+            && clearlyHorizontal
+            && cumulativelyHorizontal
+        const earlyCenterClaim = state.layeredEdgeDirection === 0
+            && !state.layeredEarlyClaimBlocked
+            && state.layeredHorizontalSamples >= 2
+            && absDx >= LAYERED_EARLY_CLAIM_PX
+            && Math.sign(state.dx) === state.layeredHorizontalDirection
+        const fallbackClaim = absDx >= LAYERED_FALLBACK_CLAIM_PX
+            && absDx >= absDy * LAYERED_FALLBACK_DOMINANCE
+        if (!edgeClaim && !earlyCenterClaim && !fallbackClaim) return
+
         // Finger travel along the forward direction decides which neighbor
         // page gets snapshotted.
         const along = this.#rtl ? -state.dx : state.dx
         const forward = along > 0
+        state.layeredGesture = 'claimed'
+        // Gesture ownership is independent of whether an adjacent page exists.
+        // At a book boundary the turn cannot start, but the host must still
+        // suppress the browser's synthesized click for this horizontal drag.
+        // Keep this separate from layered-turn-state so the established
+        // snapshot lifecycle remains unchanged.
+        this.dispatchEvent(new CustomEvent('layered-turn-gesture-claimed', {
+            detail: { style, forward },
+        }))
         const pages = this.#renderedPages
         const target = this.#renderedPage + (forward ? 1 : -1)
         if (target < 0 || target >= pages) return
@@ -2313,24 +2498,43 @@ export class Paginator extends HTMLElement {
         this.dispatchEvent(new CustomEvent('layered-turn-state', {
             detail: { phase: 'before-capture', style, forward },
         }))
-        const turnRoot = this.#vtSetup(style, forward, true)
         const startPosition = this.containerPosition
-        const transition = document.startViewTransition(() => {
-            this.containerPosition = offset
-            if (!this.scrolled) {
-                this.#bgAnimContext = null
-                this.#replaceBackground()
-            }
-            // The old snapshot now owns the visible toolbar. Let the host hide
-            // the live copy synchronously before the new snapshot is captured,
-            // so its regular opacity transition cannot run beside the page.
+        let turnRoot
+        let transition
+        try {
+            turnRoot = this.#vtSetup(style, forward, true)
+            transition = document.startViewTransition(() => {
+                this.containerPosition = offset
+                if (!this.scrolled) {
+                    this.#bgAnimContext = null
+                    this.#replaceBackground()
+                }
+                // The old snapshot now owns the visible toolbar. Let the host hide
+                // the live copy synchronously before the new snapshot is captured,
+                // so its regular opacity transition cannot run beside the page.
+                this.dispatchEvent(new CustomEvent('layered-turn-state', {
+                    detail: { phase: 'covered', style, forward },
+                }))
+            })
+        } catch {
+            // A synchronous setup/capture failure must release both the global
+            // View Transition styling and the host's before-capture ownership.
+            // Reject the rest of this touch so touchend cannot reinterpret it
+            // as a legacy snap after the layered lifecycle has already ended.
+            state.layeredGesture = 'rejected'
+            this.containerPosition = startPosition
+            this.#vtCleanup()
+            this.#isAnimating = false
             this.dispatchEvent(new CustomEvent('layered-turn-state', {
-                detail: { phase: 'covered', style, forward },
+                detail: { phase: 'finished', style, forward, committed: false },
             }))
-        })
+            return
+        }
         const drag = {
             transition, offset, startPosition, forward,
             style, progress: 0, anims: null,
+            visualOriginDistance: style === 'slide'
+                ? Math.max(0, forward ? along : -along) : 0,
             // Progress must use the width of the actual named snapshot. The
             // inner content container can be narrower because of page margins;
             // using it makes the sheet gradually outrun the finger.
@@ -2372,7 +2576,7 @@ export class Paginator extends HTMLElement {
     // cancel. The scroll offset already sits on the target page during the
     // drag (the snapshot hides it), so cancel restores it under the overlay
     // before the transition is skipped.
-    async #finishLayeredDrag(drag, commit) {
+    async #finishLayeredDrag(drag, commit, playbackRate = 1) {
         if (this.#vtFinishing === drag) return
         this.#vtFinishing = drag
         const { transition, offset, startPosition, style, forward } = drag
@@ -2388,6 +2592,7 @@ export class Paginator extends HTMLElement {
             if (id !== this.#slideTurnId) return
 
             const anims = drag.anims
+            if (anims) for (const a of anims) updatePlaybackRate(a, playbackRate)
             if (commit) {
                 if (anims) for (const a of anims) a.play()
                 try {
@@ -2484,6 +2689,7 @@ export class Paginator extends HTMLElement {
         // animation (or any other repaint) rebuilds a fresh context.
         this.#bgAnimContext = null
         const state = this.#touchState
+        if (state) state.active = false
         if (state?.blocked) {
             this.#touchScrolled = false
             return
@@ -2498,18 +2704,36 @@ export class Paginator extends HTMLElement {
         this.#touchScrolled = false
         if (this.scrolled) return
         if (this.hasAttribute('no-swipe')) return
+        const layeredRejected = this.#layeredTurn
+            && state?.layeredGesture === 'rejected'
+        // Horizontal books have no block-axis page gesture to preserve.
+        if (layeredRejected && !this.#vertical) return
 
         // A finger that rested before lifting has no flick momentum; the
         // last touchmove velocity is stale by the rest duration.
-        if (state && e && e.timeStamp - state.t > 80) {
+        if (state && e && e.timeStamp - state.t > RELEASE_PAUSE_THRESHOLD_MS) {
             state.vx = 0
             state.vy = 0
         }
+        const releaseTouch = e?.changedTouches?.[0]
+        let releaseDx = state?.dx ?? 0
+        let releaseDy = state?.dy ?? 0
+        if (state && releaseTouch) {
+            // A quick lift can carry the final sample only in changedTouches.
+            // Use that point consistently for Slide's velocity, progress, and
+            // whole-gesture horizontal-intent guard.
+            releaseDx += state.x - releaseTouch.screenX
+            releaseDy += state.y - releaseTouch.screenY
+        }
+        // Also stamp an unchanged final position. Besides making a deliberate
+        // pause velocity-free, this is defensive against non-standard UAs
+        // that omit touchend.changedTouches.
+        if (state) updateReleaseSample(state, releaseDx, e.timeStamp)
 
-        // A finger-tracked layered turn resolves here: commit past halfway or
-        // on a flick along the drag, reverse otherwise (same carousel rule as
-        // the vertical drag decision in snap()). A page-turn commit also
-        // requires the WHOLE gesture to be predominantly horizontal: a finger
+        // A finger-tracked layered turn resolves here. Slide projects recent
+        // release velocity onto its current progress; Curl keeps the existing
+        // last-move flick-or-halfway rule. A page-turn commit also requires
+        // the WHOLE gesture to be predominantly horizontal: a finger
         // landing with a sideways wobble can start the drag before any
         // vertical distance accumulates, and the lift-off flick velocity is
         // jitter — judged alone they turned the page randomly on vertical
@@ -2517,30 +2741,67 @@ export class Paginator extends HTMLElement {
         const drag = this.#vtDrag
         if (drag) {
             this.#vtDrag = null
+            // Keep Curl's established whole-gesture guard exactly as-is;
+            // Slide uses the actual lift-off point required by its projection.
+            const gestureDx = drag.style === 'slide' ? releaseDx : (state?.dx ?? 0)
+            const gestureDy = drag.style === 'slide' ? releaseDy : (state?.dy ?? 0)
             const gestureAligned = state
-                ? Math.abs(state.dx) > Math.abs(state.dy) : true
+                ? Math.abs(gestureDx) > Math.abs(gestureDy) : true
             const alongV = this.#rtl ? -(state?.vx ?? 0) : (state?.vx ?? 0)
-            const flick = Math.abs(alongV) > 0.3
+            const recentVx = state ? getReleaseVelocity(state) : 0
+            const recentAlongV = this.#rtl ? -recentVx : recentVx
+            const progressVelocity = recentAlongV * (drag.forward ? 1 : -1)
+            const releaseAlong = this.#rtl ? -releaseDx : releaseDx
+            const releaseDistance = drag.forward ? releaseAlong : -releaseAlong
+            const releaseProgress = Math.max(0, Math.min(1,
+                releaseDistance / drag.width))
+            const releaseVisualProgress = Math.max(0, Math.min(1,
+                (releaseDistance - drag.visualOriginDistance) / drag.width))
+            const projectedProgress = releaseProgress
+                + progressVelocity * SLIDE_RELEASE_PROJECTION_MS / drag.width
+            const curlFlick = Math.abs(alongV) > 0.3
                 ? Math.sign(alongV) * (drag.forward ? 1 : -1) : 0
-            const commit = gestureAligned
-                && (flick > 0 ? true : flick < 0 ? false : drag.progress > 0.5)
-            this.#finishLayeredDrag(drag, commit)
+            const commit = gestureAligned && (drag.style === 'slide'
+                ? projectedProgress > 0.5
+                : curlFlick > 0 ? true : curlFlick < 0 ? false : drag.progress > 0.5)
+            // Do not scrub a gesture that ended vertically: flashing its final
+            // horizontal component here would defeat the intent guard. A valid
+            // Slide release settles from the actual lift-off position; Curl's
+            // existing progress and commit mapping remain unchanged.
+            if (gestureAligned && drag.style === 'slide') {
+                drag.progress = releaseVisualProgress
+                this.#vtDragScrub(drag)
+            }
+            const targetDirection = (drag.forward ? 1 : -1) * (commit ? 1 : -1)
+            // Settle pacing uses a short release window; the decision above
+            // uses it for the lighter Slide gesture while Curl keeps its
+            // original last-sample commit rule.
+            const releaseSpeed = recentAlongV * targetDirection
+            const playbackRate = layeredSettlePlaybackRate(drag.style, releaseSpeed)
+            this.#finishLayeredDrag(drag, commit, playbackRate)
             return
         }
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
         // at this point I'm basically throwing `requestAnimationFrame` at
         // anything that doesn't work
+        const snapState = state
         requestAnimationFrame(() => {
-            if (globalThis.visualViewport.scale === 1) {
-                const { vx, vy, dx, dy, dt } = this.#touchState
-                this.snap(vx, vy, dx, dy, dt)
+            if (globalThis.visualViewport.scale === 1 && snapState
+                && this.#touchState === snapState) {
+                const { vx, vy, dx, dy, dt } = snapState
+                // Direction ownership is final for this touch sequence. Once
+                // vertical wins the layered arena, discard later horizontal
+                // hooks while preserving block-axis paging in vertical books.
+                this.snap(layeredRejected ? 0 : vx, vy,
+                    layeredRejected ? 0 : dx, dy, dt)
             }
         })
     }
     #onTouchCancel() {
         this.#bgAnimContext = null
         const state = this.#touchState
+        if (state) state.active = false
         if (state?.blocked) {
             this.#touchScrolled = false
             return
@@ -2557,6 +2818,8 @@ export class Paginator extends HTMLElement {
         const wasScrolled = this.#touchScrolled
         this.#touchScrolled = false
         if (this.scrolled || this.hasAttribute('no-swipe')) return
+        if (this.#layeredTurn && state?.layeredGesture === 'rejected'
+            && !this.#vertical) return
         if (this.#vertical) {
             this.#settleDrag()
         } else if (wasScrolled && this.#scrollBounds) {
@@ -2761,6 +3024,11 @@ export class Paginator extends HTMLElement {
         // reached cleanup; otherwise the newer generation strands the older
         // turn before it can dispatch `finished`.
         if (this.#vtDrag || this.#vtFinishing || this.#vtProgrammatic) return
+        // An accepted keyboard/tap turn owns navigation for the remainder of
+        // any finger that is still down. Permanently reject a pending arena
+        // candidate so its later move cannot reuse the pre-turn start point
+        // and launch a second layered turn after this transition finishes.
+        if (this.#touchState?.active) this.#rejectLayeredGesture(this.#touchState)
         const { size } = this
         const startPosition = this.containerPosition
         // RTL horizontal scroll coordinates are negative; compare magnitudes.
