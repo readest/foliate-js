@@ -156,8 +156,7 @@ const setupPanningEvents = (doc) => {
 // foreground WebContent process reaching 2.1 GB while paging a PDF, right before
 // the reader "closed". Both a page's canvas bitmap and its WebKit backing layer
 // are allocated at the render scale, so their memory grows with the SQUARE of the
-// device pixel ratio. Phones report dpr 3, which is the tipping factor; desktop
-// WebKit has no such per-process ceiling, which is why the crash is iOS-only.
+// device pixel ratio. Phones report dpr 3, which is the tipping factor.
 // Rendering at 2x instead of 3x is still retina-sharp but uses ~2.25x less memory
 // per page (the crisp, selectable text layer is a separate DOM layer, unaffected).
 const MAX_RENDER_DPR = 2
@@ -165,13 +164,29 @@ const MAX_RENDER_DPR = 2
 // tablet page can't blow the budget even after the dpr clamp.
 const MAX_CANVAS_PIXELS = 2048 * 1536
 
-// The device pixel ratio to rasterise this page at: the real dpr clamped by both
-// MAX_RENDER_DPR and the per-canvas pixel budget, never below 1 (CSS resolution).
+// Only mobile WebViews get that budget. Desktop browsers have no per-process
+// memory ceiling, and a page fitted to a desktop window is several times the
+// budget on its own, so clamping there bought nothing and cost sharpness: the
+// raster ended up coarser than the screen, the browser upscaled it into the CSS
+// box, and PDF text looked blurry (readest #5251). iPadOS reports a desktop
+// ("Macintosh") user agent, so touch points are what give a tablet away.
+const isMobileWebView = () => {
+    const ua = navigator.userAgent
+    return /Android|iPhone|iPad|iPod/i.test(ua)
+        || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1)
+}
+
+// The device pixel ratio to rasterise this page at: the real dpr on desktop, or
+// on mobile the dpr clamped by both MAX_RENDER_DPR and the per-canvas pixel
+// budget. Never below 1 (CSS resolution).
 const getRenderDpr = (page, zoom) => {
-    let dpr = Math.min(devicePixelRatio || 1, MAX_RENDER_DPR)
-    const { width, height } = page.getViewport({ scale: zoom || 1 })
-    const area = width * height * dpr * dpr
-    if (area > MAX_CANVAS_PIXELS) dpr *= Math.sqrt(MAX_CANVAS_PIXELS / area)
+    let dpr = devicePixelRatio || 1
+    if (isMobileWebView()) {
+        dpr = Math.min(dpr, MAX_RENDER_DPR)
+        const { width, height } = page.getViewport({ scale: zoom || 1 })
+        const area = width * height * dpr * dpr
+        if (area > MAX_CANVAS_PIXELS) dpr *= Math.sqrt(MAX_CANVAS_PIXELS / area)
+    }
     return Math.max(1, dpr)
 }
 
