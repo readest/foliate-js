@@ -477,6 +477,7 @@ const getImageMediaType = (path) => {
         'png': 'image/png',
         'gif': 'image/gif',
         'webp': 'image/webp',
+        'svg': 'image/svg+xml',
     }
     return mediaTypeMap[extension] || 'image/jpeg'
 }
@@ -490,6 +491,19 @@ const getFontMediaType = (path) => {
         'otf': 'font/otf',
     }
     return mediaTypeMap[extension] || 'font/ttf'
+}
+
+// Container entry whose file name ends in `cover`/`couv` (the French
+// spelling) plus an image extension, e.g. `cover.jpg`, `Images/Cover.PNG`,
+// `couv.jpeg`. Same shape `gnome-epub-thumbnailer` falls back to.
+const UNDECLARED_COVER_RE = /(?:cover|couv)\.(?:jpe?g|png|gif|webp|svg)$/i
+
+// Last-ditch cover lookup for EPUBs where the manifest resolves to nothing:
+// scan the container's own file names. `names` is iterated in central
+// directory order, so the first match wins.
+const findUndeclaredCover = names => {
+    for (const name of names) if (UNDECLARED_COVER_RE.test(name)) return name
+    return null
 }
 
 class MediaOverlay extends EventTarget {
@@ -1275,9 +1289,17 @@ ${doc.querySelector('parsererror').innerText}`)
     }
     async getCover() {
         const cover = this.resources?.cover
-        return cover?.href
-            ? new Blob([await this.loadBlob(cover.href)], { type: cover.mediaType })
-            : null
+        if (cover?.href) return new Blob([await this.loadBlob(cover.href)],
+            { type: cover.mediaType })
+        // Fall back to a cover-named container entry. Some EPUBs ship the
+        // cover image without ever declaring it (no `cover-image` property,
+        // no `<meta name="cover">` target, no manifest item), which leaves
+        // every manifest-driven lookup above empty even though the image is
+        // sitting right there in the zip.
+        const href = findUndeclaredCover(this.entries.keys())
+        if (!href) return null
+        const blob = await this.loadBlob(href)
+        return blob ? new Blob([blob], { type: getImageMediaType(href) }) : null
     }
     async getCalibreBookmarks() {
         const txt = await this.loadText('META-INF/calibre_bookmarks.txt')
