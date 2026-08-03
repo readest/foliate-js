@@ -938,10 +938,10 @@ class View {
                     width: '100%',
                     height: '100%',
                     margin: '0',
-                    // stretch edge-to-edge, ignoring aspect ratio, so the cover
-                    // fills the whole page like Duokan's native full-page render
-                    // (overrides the 'contain' set for all images above)
-                    'object-fit': 'fill',
+                    // fit the whole page while keeping the aspect ratio
+                    // ('contain' set for all images above); black bars fill
+                    // the leftover space like Duokan's native full-page render
+                    'background-color': '#000',
                 })
                 let ancestor = el.parentElement
                 while (ancestor && ancestor !== doc.body) {
@@ -950,11 +950,13 @@ class View {
                         height: '100%',
                         margin: '0',
                         padding: '0',
+                        // a positioned wrapper (e.g. from duokan-bleed handling)
+                        // would become the containing block for the pinned image,
+                        // whose height:100% then resolves against the wrapper's
+                        // zero height and the cover vanishes (#5263)
+                        position: 'static',
                     })
                     ancestor = ancestor.parentElement
-                }
-                if (el.localName === 'svg') {
-                    el.setAttribute('preserveAspectRatio', 'none')
                 }
             } else if (pageFullscreen) {
                 // Scrolled mode for a fullscreen-cover doc: undo any absolute
@@ -964,12 +966,12 @@ class View {
                 // the stale position:absolute/height:100% and the cover stays
                 // collapsed.
                 doc.documentElement.style.removeProperty('position')
-                for (const prop of ['position', 'inset', 'width', 'height', 'margin']) {
+                for (const prop of ['position', 'inset', 'width', 'height', 'margin', 'background-color']) {
                     el.style.removeProperty(prop)
                 }
                 let ancestor = el.parentElement
                 while (ancestor && ancestor !== doc.body) {
-                    for (const prop of ['width', 'height', 'margin', 'padding']) {
+                    for (const prop of ['width', 'height', 'margin', 'padding', 'position']) {
                         ancestor.style.removeProperty(prop)
                     }
                     ancestor = ancestor.parentElement
