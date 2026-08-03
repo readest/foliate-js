@@ -3085,7 +3085,15 @@ export class Paginator extends HTMLElement {
             // previous column, there is an extra zero width rect in that column
             const rect = Array.from(rects)
                 .find(r => r.width > 0 && r.height > 0 && r.x >= 0 && r.y >= 0) || rects[0]
-            if (!rect) return
+            // An anchor can have no client rects at all: a range over content
+            // that is entirely absolutely positioned (e.g. a Duokan fullscreen
+            // cover pins its only image) has no in-flow boxes. Bailing without
+            // scrolling would leave #scrollBounds unseeded, and scrollBy/snap
+            // then silently drop every swipe on the page (#5263). Settle on
+            // the primary section's start instead.
+            if (!rect) return this.scrolled
+                ? this.#scrollTo(this.#getViewOffset(this.#primaryIndex), reason)
+                : this.#scrollToPage(this.#getPagesBeforeView(this.#primaryIndex), reason)
             await this.#scrollToRect(rect, reason)
             // focus the element when navigating with keyboard or screen reader
             if (reason === 'navigation') {
@@ -3119,7 +3127,9 @@ export class Paginator extends HTMLElement {
         if (!primaryView) return
         const pagesBeforePrimary = this.#getPagesBeforeView(this.#primaryIndex)
         const textPages = primaryView.contentPages
-        if (!textPages) return
+        // Same as the rect-less bail above: a section that measured zero
+        // content pages must still settle so #scrollBounds gets seeded.
+        if (!textPages) return this.#scrollToPage(pagesBeforePrimary, reason)
         // textPages is in column units; convert to spread page for scrolling
         const newColumn = Math.round(anchor * (textPages - 1))
         const newSpreadPage = Math.floor(newColumn / this.columnCount)
