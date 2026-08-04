@@ -821,9 +821,11 @@ export class FixedLayout extends HTMLElement {
         }
 
         this.addEventListener('scroll', this.#handleScrollEvent)
-        // passive: false because a translated tick must preventDefault so the
-        // (no-op) native vertical scroll cannot also fire elastic overscroll.
-        this.addEventListener('wheel', this.#handleScrollWheel, { passive: false })
+        if (this.#scrollHorizontal) {
+            // passive: false because a translated tick must preventDefault so the
+            // (no-op) native vertical scroll cannot also fire elastic overscroll.
+            this.addEventListener('wheel', this.#handleScrollWheel, { passive: false })
+        }
 
         // Set up IntersectionObserver after scroll position is established.
         // rootMargin '200%' marks pages within ~2 viewport heights above/below as
