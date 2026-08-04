@@ -1062,16 +1062,29 @@ export class FixedLayout extends HTMLElement {
                 }))
                 // During the brief idle window after scrolling settles the
                 // iframe is interactive (pointer-events: auto), so the first
-                // wheel tick of a new gesture lands on it. The browser already
-                // chains that tick to the host scroller natively (a single
-                // smooth scroll, matching the page margins) — so we must NOT
-                // scroll the host ourselves here, or the manual scroll stacks
-                // on top of the native one and the page jumps twice as far in
-                // an instant lurch (readest#4727). Just drop pointer-events so
-                // the iframe stops intercepting and the rest of the gesture
-                // scrolls the host natively too.
-                doc.addEventListener('wheel', () => {
+                // wheel tick of a new gesture lands on it (readest#4727).
+                // Vertical mode: the browser already chains that tick to the
+                // host scroller natively (a single smooth scroll, matching the
+                // page margins) — so JS must NOT scroll the host itself, or the
+                // manual scroll stacks on top of the native one and the page
+                // jumps twice as far in an instant lurch. Horizontal mode: the
+                // host only overflows horizontally, so native chaining cannot
+                // consume a vertical tick at all — without translating it here,
+                // the first tick of every gesture over a page is simply lost.
+                // computeScrollWheelDelta returns null whenever `horizontal` is
+                // false, so this never scrolls in the vertical case, and its
+                // other guards (pinch, vertical overflow, horizontal-dominant
+                // pans) keep this a no-op wherever native handling still
+                // applies — so the translated scroll can never stack on a
+                // native one either.
+                doc.addEventListener('wheel', e => {
                     this.#setScrollIframeInteraction(false)
+                    const delta = computeScrollWheelDelta({
+                        deltaX: e.deltaX, deltaY: e.deltaY, ctrlKey: e.ctrlKey,
+                        horizontal: this.#scrollHorizontal, rtl: this.rtl,
+                        verticalOverflow: this.scrollHeight > this.clientHeight + 1,
+                    })
+                    if (delta) this.scrollBy({ left: delta.left, behavior: 'auto' })
                 }, { passive: true })
             }
         } catch (e) {
