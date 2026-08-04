@@ -123,6 +123,22 @@ export const computePaginatedScroll = ({ elementWidth, containerWidth, scrollTop
     scrollTop: pageTurn ? 0 : scrollTop,
 })
 
+// Translate a vertical wheel tick into a horizontal scroll delta for
+// horizontal scroll mode (pdf.js behavior, readest#4995). Returns null when
+// the tick belongs to native scrolling instead: vertical mode, pinch zoom
+// (ctrl+wheel), horizontal-dominant trackpad pans, or a strip with vertical
+// overflow to consume (a zoomed page pans vertically first). Translating is
+// safe with respect to the readest#4727 double-scroll: with no vertical
+// overflow the browser cannot natively consume a vertical delta, so the
+// translated scroll cannot stack on a native one.
+export const computeScrollWheelDelta = ({
+    deltaX, deltaY, ctrlKey, horizontal, rtl, verticalOverflow,
+}) => {
+    if (!horizontal || ctrlKey || verticalOverflow) return null
+    if (Math.abs(deltaY) <= Math.abs(deltaX)) return null
+    return { left: rtl ? -deltaY : deltaY }
+}
+
 // Visual shift (CSS px) to apply to the right page of a two-page spread to hide
 // the one-pixel white spine seam (#4857). The two page iframes are independent
 // compositor layers, each scaled by a (usually non-integer) factor. At a
@@ -290,11 +306,20 @@ export class FixedLayout extends HTMLElement {
     #restoreScrollModeAnchor(anchor) {
         if (!anchor || !this.#scrollPages.length) return
         const maxScrollPos = Math.max(0, this.#scrollTotalLength() - this.#scrollViewLength())
-        this.#setScrollContentPos(restoreScrollModeAnchor(
+        const restoredPos = restoreScrollModeAnchor(
             this.#getScrollModePageMetrics(),
             anchor,
             maxScrollPos,
-        ))
+        )
+        // Only write when the position actually moves. Assigning scrollLeft/Top
+        // unconditionally aborts any in-progress `behavior: 'smooth'` scroll
+        // (e.g. a next()/prev() page turn) even when the value lands on the
+        // exact spot the animation is already at — and #render()'s mandatory
+        // initial ResizeObserver callback can land in the same tick as a page
+        // turn requested right after open(), silently freezing it.
+        if (Math.abs(restoredPos - this.#scrollContentPos()) > 0.5) {
+            this.#setScrollContentPos(restoredPos)
+        }
         this.#scrollCurrentIndex = anchor.index
     }
     // Length of the viewport along the scroll axis.
@@ -796,6 +821,9 @@ export class FixedLayout extends HTMLElement {
         }
 
         this.addEventListener('scroll', this.#handleScrollEvent)
+        // passive: false because a translated tick must preventDefault so the
+        // (no-op) native vertical scroll cannot also fire elastic overscroll.
+        this.addEventListener('wheel', this.#handleScrollWheel, { passive: false })
 
         // Set up IntersectionObserver after scroll position is established.
         // rootMargin '200%' marks pages within ~2 viewport heights above/below as
@@ -853,6 +881,16 @@ export class FixedLayout extends HTMLElement {
             this.#reportScrollLocation()
         }, 150)
     }
+    #handleScrollWheel = e => {
+        const delta = computeScrollWheelDelta({
+            deltaX: e.deltaX, deltaY: e.deltaY, ctrlKey: e.ctrlKey,
+            horizontal: this.#scrollHorizontal, rtl: this.rtl,
+            verticalOverflow: this.scrollHeight > this.clientHeight + 1,
+        })
+        if (!delta) return
+        e.preventDefault()
+        this.scrollBy({ left: delta.left, behavior: 'auto' })
+    }
     #setScrollIframeInteraction(enabled) {
         const value = enabled ? 'auto' : ''
         for (const page of this.#scrollPages) {
@@ -868,6 +906,7 @@ export class FixedLayout extends HTMLElement {
         const currentIndex = this.#scrollCurrentIndex >= 0
             ? this.#scrollCurrentIndex : this.#getScrollIndex()
         this.removeEventListener('scroll', this.#handleScrollEvent)
+        this.removeEventListener('wheel', this.#handleScrollWheel)
         if (this.#scrollObserver) {
             this.#scrollObserver.disconnect()
             this.#scrollObserver = null
@@ -1286,11 +1325,13 @@ export class FixedLayout extends HTMLElement {
         return this.#isOverflowY
     }
     get atStart() {
-        if (this.#scrollMode) return this.scrollTop <= 0
+        if (this.#scrollMode) return this.#scrollProgression() <= 0
         return this.#index <= 0
     }
     get atEnd() {
-        if (this.#scrollMode) return this.scrollTop + this.clientHeight >= this.scrollHeight - 2
+        if (this.#scrollMode)
+            return this.#scrollProgression() + this.#scrollViewLength()
+                >= this.#scrollTotalLength() - 2
         return this.#index >= this.#spreads.length - 1
     }
     #reportLocation(reason) {
@@ -1513,7 +1554,8 @@ export class FixedLayout extends HTMLElement {
         if (this.#scrollMode) {
             const page = this.#scrollPages[resolved.index]
             if (page) {
-                page.el.scrollIntoView()
+                page.el.scrollIntoView(
+                    this.#scrollHorizontal ? { inline: 'start', block: 'nearest' } : undefined)
                 this.#scrollCurrentIndex = resolved.index
             }
             return
@@ -1526,7 +1568,12 @@ export class FixedLayout extends HTMLElement {
     }
     async next(distance) {
         if (this.#scrollMode) {
-            this.scrollBy({ top: distance || this.clientHeight, behavior: 'smooth' })
+            if (this.#scrollHorizontal) {
+                const d = distance || this.clientWidth
+                this.scrollBy({ left: this.rtl ? -d : d, behavior: 'smooth' })
+            } else {
+                this.scrollBy({ top: distance || this.clientHeight, behavior: 'smooth' })
+            }
             return
         }
         const s = this.rtl ? this.#goLeft() : this.#goRight()
@@ -1534,7 +1581,12 @@ export class FixedLayout extends HTMLElement {
     }
     async prev(distance) {
         if (this.#scrollMode) {
-            this.scrollBy({ top: -(distance || this.clientHeight), behavior: 'smooth' })
+            if (this.#scrollHorizontal) {
+                const d = distance || this.clientWidth
+                this.scrollBy({ left: this.rtl ? d : -d, behavior: 'smooth' })
+            } else {
+                this.scrollBy({ top: -(distance || this.clientHeight), behavior: 'smooth' })
+            }
             return
         }
         const s = this.rtl ? this.#goRight() : this.#goLeft()
@@ -1544,14 +1596,18 @@ export class FixedLayout extends HTMLElement {
         if (!this.#scrollMode) return
         const currentIndex = this.#getScrollIndex()
         const nextIndex = Math.min(currentIndex + 1, this.#scrollPages.length - 1)
-        this.#scrollPages[nextIndex]?.el.scrollIntoView({ behavior: 'smooth' })
+        this.#scrollPages[nextIndex]?.el.scrollIntoView(this.#scrollHorizontal
+            ? { behavior: 'smooth', inline: 'start', block: 'nearest' }
+            : { behavior: 'smooth' })
         this.#scrollCurrentIndex = nextIndex
     }
     prevSection() {
         if (!this.#scrollMode) return
         const currentIndex = this.#getScrollIndex()
         const prevIndex = Math.max(currentIndex - 1, 0)
-        this.#scrollPages[prevIndex]?.el.scrollIntoView({ behavior: 'smooth' })
+        this.#scrollPages[prevIndex]?.el.scrollIntoView(this.#scrollHorizontal
+            ? { behavior: 'smooth', inline: 'start', block: 'nearest' }
+            : { behavior: 'smooth' })
         this.#scrollCurrentIndex = prevIndex
     }
     async pan(dx, dy) {
@@ -1660,16 +1716,20 @@ export class FixedLayout extends HTMLElement {
         }
     }
     get size() {
-        return this.clientHeight
+        // The app turns pages by `size - scrollingOverlap`; in horizontal
+        // scroll mode a page step is one viewport width.
+        return this.#scrollMode && this.#scrollHorizontal ? this.clientWidth : this.clientHeight
     }
     get viewSize() {
-        return this.#scrollMode ? this.scrollHeight : this.clientHeight
+        return this.#scrollMode ? this.#scrollTotalLength() : this.clientHeight
     }
     get start() {
-        return this.#scrollMode ? this.scrollTop : 0
+        return this.#scrollMode ? this.#scrollProgression() : 0
     }
     get end() {
-        return this.#scrollMode ? this.scrollTop + this.clientHeight : this.clientHeight
+        return this.#scrollMode
+            ? this.#scrollProgression() + this.#scrollViewLength()
+            : this.clientHeight
     }
     get page() {
         if (this.#scrollMode) return this.#scrollCurrentIndex >= 0
@@ -1681,25 +1741,28 @@ export class FixedLayout extends HTMLElement {
         return this.#spreads?.length ?? 0
     }
     get containerPosition() {
-        // In scroll mode the element itself scrolls (see atEnd/start/viewSize,
-        // which all read scrollTop). Paginated fixed layout pages via spreads and
-        // has no meaningful scroll offset, so keep returning 0 there.
-        return this.#scrollMode ? this.scrollTop : 0
+        // Reading progression from the book start (see #scrollProgression), so
+        // relative scroll consumers (auto scroll, middle-click autoscroll) can
+        // `+= delta` to advance in reading order on every axis and direction.
+        // Paginated fixed layout pages via spreads; keep returning 0 there.
+        return this.#scrollMode ? this.#scrollProgression() : 0
     }
     set containerPosition(newVal) {
-        // Mirror the paginator's read/write containerPosition contract so relative
-        // scroll consumers (auto scroll, middle-click autoscroll) work on scrolled
-        // fixed-layout books (PDF / CBZ / fixed EPUB) instead of throwing on a
-        // getter-only property (READEST-11). No-op when paginated.
-        if (this.#scrollMode) this.scrollTop = newVal
+        // Mirror the paginator's read/write containerPosition contract (see
+        // READEST-11). No-op when paginated.
+        if (!this.#scrollMode) return
+        if (this.#scrollHorizontal) this.scrollLeft = this.rtl ? -newVal : newVal
+        else this.scrollTop = newVal
     }
     get sideProp() {
-        return this.#scrollMode ? 'height' : 'width'
+        if (this.#scrollMode) return this.#scrollHorizontal ? 'width' : 'height'
+        return 'width'
     }
     destroy() {
         this.#observer.unobserve(this)
         if (this.#scrollMode) {
             this.removeEventListener('scroll', this.#handleScrollEvent)
+            this.removeEventListener('wheel', this.#handleScrollWheel)
             if (this.#scrollObserver) {
                 this.#scrollObserver.disconnect()
                 this.#scrollObserver = null
