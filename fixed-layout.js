@@ -761,12 +761,17 @@ export class FixedLayout extends HTMLElement {
 
         this.#scrollContainer = document.createElement('div')
         this.#scrollContainer.className = 'scroll-container'
-        // RTL books read right to left: direction rtl lays the flex row from
-        // the right edge and makes the leftward overflow reachable (overflow
-        // only grows toward the inline-end side). Page content stays LTR via
-        // the per-frame dir attribute.
-        this.#scrollContainer.style.direction = this.#scrollHorizontal && this.rtl ? 'rtl' : 'ltr'
         this.#root.append(this.#scrollContainer)
+
+        // RTL books read right to left: direction rtl on the host (the
+        // scrolling element itself) is what puts scrollLeft into the browser's
+        // negative-scrollLeft RTL convention — that convention is keyed off the
+        // scrolling box's own computed direction, not a descendant's. It also
+        // lays the flex row from the right edge and makes the leftward overflow
+        // reachable (overflow only grows toward the inline-end side). The
+        // container inherits this. Page content stays LTR via the per-frame
+        // dir attribute.
+        this.style.direction = this.#scrollHorizontal && this.rtl ? 'rtl' : ''
 
         const sections = this.book.sections
         const viewport = this.defaultViewport
@@ -887,6 +892,10 @@ export class FixedLayout extends HTMLElement {
         // Reset scroll position left over from scroll mode
         this.scrollTop = 0
         this.scrollLeft = 0
+        // Must run even when navigate is false (axis rebuild): otherwise a
+        // horizontal-RTL -> vertical switch would leave the host direction
+        // rtl and the vertical re-init would inherit it.
+        this.style.removeProperty('direction')
 
         if (navigate) {
             // Restore paginated content
