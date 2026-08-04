@@ -33,30 +33,30 @@ const getViewport = (doc, viewport) => {
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
-export const captureScrollModeAnchor = (pages, scrollTop, fallbackIndex = -1) => {
+export const captureScrollModeAnchor = (pages, scrollPos, fallbackIndex = -1) => {
     const fallbackPage = pages.find(page => page.index === fallbackIndex)
     const currentPage = pages.find(page =>
-        page.height > 0
-        && scrollTop >= page.top
-        && scrollTop < page.top + page.height)
+        page.size > 0
+        && scrollPos >= page.start
+        && scrollPos < page.start + page.size)
         ?? fallbackPage
-        ?? pages.find(page => page.height > 0)
+        ?? pages.find(page => page.size > 0)
 
     if (!currentPage) return null
     return {
         index: currentPage.index,
-        fraction: currentPage.height > 0
-            ? clamp((scrollTop - currentPage.top) / currentPage.height, 0, 1)
+        fraction: currentPage.size > 0
+            ? clamp((scrollPos - currentPage.start) / currentPage.size, 0, 1)
             : 0,
-        scrollTop,
+        scrollPos,
     }
 }
 
-export const restoreScrollModeAnchor = (pages, anchor, maxScrollTop) => {
+export const restoreScrollModeAnchor = (pages, anchor, maxScrollPos) => {
     if (!anchor) return 0
     const page = pages.find(candidate => candidate.index === anchor.index)
-    if (!page || page.height <= 0) return clamp(anchor.scrollTop, 0, maxScrollTop)
-    return clamp(page.top + page.height * anchor.fraction, 0, maxScrollTop)
+    if (!page || page.size <= 0) return clamp(anchor.scrollPos, 0, maxScrollPos)
+    return clamp(page.start + page.size * anchor.fraction, 0, maxScrollPos)
 }
 
 export const scrollGapToCss = (value) => {
@@ -267,8 +267,8 @@ export class FixedLayout extends HTMLElement {
     #getScrollModePageMetrics() {
         return this.#scrollPages.map(page => ({
             index: page.index,
-            top: page.el.offsetTop,
-            height: page.el.offsetHeight,
+            start: page.el.offsetTop,
+            size: page.el.offsetHeight,
         }))
     }
     #captureScrollModeAnchor() {
