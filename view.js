@@ -146,7 +146,15 @@ class CursorAutohider {
     cloneFor(el) {
         return new CursorAutohider(el, this.#check, this.#state)
     }
+    #hasSelection() {
+        const selection = this.#el.ownerDocument?.getSelection()
+        return selection ? !selection.isCollapsed : false
+    }
     hide() {
+        // The pointer is what the reader aims a selection with, so leave it
+        // alone while one stands: a paused drag, or a double-click word
+        // select (which fires no mousemove at all), would otherwise blank it.
+        if (this.#hasSelection()) return
         this.#el.style.cursor = 'none'
         this.#state.hidden = true
     }
