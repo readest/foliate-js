@@ -70,8 +70,16 @@ const fragmentToSSML = (fragment, nodeFilter, inherited) => {
 
     const convert = (node, parent, inheritedAlphabet) => {
         if (!node) return
-        if (node.nodeType === 3) return ssml.createTextNode(node.textContent)
-        if (node.nodeType === 4) return ssml.createCDATASection(node.textContent)
+        // Text nodes go through the filter too: the text walker that produces
+        // the marks already honours it, and content that is skipped there (a
+        // bare ruby base inside <ruby>, say) must not reach the speech either,
+        // or the two disagree about what is being read.
+        if (node.nodeType === 3 || node.nodeType === 4) {
+            if (nodeFilter && nodeFilter(node) === NodeFilter.FILTER_REJECT) return
+            return node.nodeType === 3
+                ? ssml.createTextNode(node.textContent)
+                : ssml.createCDATASection(node.textContent)
+        }
         if (node.nodeType !== 1 && node.nodeType !== 11) return
         if (nodeFilter && nodeFilter(node) === NodeFilter.FILTER_REJECT) return
 

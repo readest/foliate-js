@@ -87,6 +87,14 @@ export class Overlayer {
             NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
                 acceptNode: node => {
                     if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT
+                    // Ruby annotations sit on their own line above (or beside)
+                    // the base, so their rects would draw a second detached box
+                    // over the furigana. Never paint them — not the book's own
+                    // ruby, not injected glosses.
+                    const el = node.nodeType === Node.TEXT_NODE
+                        ? node.parentElement : node
+                    if (el?.closest?.('rt, rp, rtc, [cfi-inert]'))
+                        return NodeFilter.FILTER_REJECT
                     if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT
                     return node.matches?.('img, svg')
                         ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
