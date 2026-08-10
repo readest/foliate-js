@@ -1048,10 +1048,14 @@ class Loader {
                 el.setAttribute('style',
                     await this.replaceCSS(el.getAttribute('style'), href, parents))
             // TODO: replace inline scripts? probably not worth the trouble
-            const result = new XMLSerializer().serializeToString(doc)
+            const serialized = new XMLSerializer().serializeToString(doc)
+            // Restore BiDi control characters that XMLSerializer encodes as
+            // numeric character references, which breaks Persian/Arabic text shaping.
+            const result = serialized
+                .replaceAll('&#x200e;', '\u200E').replaceAll('&#8206;', '\u200E')
+                .replaceAll('&#x200f;', '\u200F').replaceAll('&#8207;', '\u200F')
             return this.createURL(href, result, item.mediaType, parent)
         }
-
         const result = mediaType === MIME.CSS
             ? await this.replaceCSS(str, href, parents)
             : await this.replaceString(str, href, parents)
