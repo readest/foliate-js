@@ -1261,7 +1261,16 @@ ${doc.querySelector('parsererror').innerText}`)
     }
     async loadDocument(item) {
         const str = await this.loadText(item.href)
-        return this.parser.parseFromString(str, item.mediaType)
+        const doc = this.parser.parseFromString(str, item.mediaType)
+        // Same fallback as the render path in `loadReplaced`: a file the
+        // manifest declares as XHTML but which isn't well-formed XML (an
+        // unclosed `<meta charset>` is the usual culprit) parses into a
+        // `parsererror` document whose `body` is null. Callers of
+        // `createDocument` walk that body, so retry as HTML instead.
+        if (item.mediaType === MIME.XHTML
+        && (doc.querySelector('parsererror') || !doc.documentElement?.namespaceURI))
+            return this.parser.parseFromString(str, MIME.HTML)
+        return doc
     }
     getMediaOverlay() {
         return new MediaOverlay(this, this.#loadXML.bind(this))
