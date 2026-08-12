@@ -1,5 +1,29 @@
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+// WebKit before Safari 17 (iOS <= 16) resolves the `document.fonts.ready`
+// promise synchronously while purging still-loading `@font-face`s during a
+// style resolver rebuild (CSSFontFaceSet::purge). Script execution is
+// disallowed in the middle of style resolution, so the resolution trips a
+// release assert and kills the WebContent process (DeferredPromise::callFunction
+// under CSSFontSelector::buildStarted in the .ips crash log).
+// The deferring guard only landed in WebKit 616 (Safari/iOS 17), the same
+// release that shipped URL.canParse. The JS promise is created lazily on
+// first access of `.ready`, so on affected engines never touch it and poll
+// `fonts.status` instead.
+export const fontsReady = doc => {
+    const fonts = doc?.fonts
+    const win = doc?.defaultView
+    if (!fonts || !win) return Promise.resolve()
+    const buggyWebKit = win.navigator?.userAgent?.includes('AppleWebKit/605')
+        && typeof win.URL?.canParse !== 'function'
+    if (!buggyWebKit) return fonts.ready
+    return new Promise(resolve => {
+        const poll = () => fonts.status === 'loaded'
+            ? resolve() : win.setTimeout(poll, 100)
+        poll()
+    })
+}
+
 const debounce = (f, wait, immediate) => {
     let timeout
     return (...args) => {
@@ -754,7 +778,7 @@ class View {
                 // the resize observer above doesn't work in Firefox
                 // (see https://bugzilla.mozilla.org/show_bug.cgi?id=1832939)
                 // until the bug is fixed we can at least account for font load
-                this.fontReady = doc.fonts.ready.then(() => this.expand())
+                this.fontReady = fontsReady(doc).then(() => this.expand())
 
                 resolve()
             }, { once: true })
@@ -3750,7 +3774,7 @@ export class Paginator extends HTMLElement {
             } else $style.textContent = styles
 
             // needed because the resize observer doesn't work in Firefox
-            view.document?.fonts?.ready?.then(() => view.expand())
+            fontsReady(view.document).then(() => view.expand())
         }
 
         // NOTE: needs `requestAnimationFrame` in Chromium
