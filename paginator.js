@@ -38,6 +38,11 @@ const debounce = (f, wait, immediate) => {
     }
 }
 
+// How long a continuous run of scrolled-mode scroll events may last before a
+// relocate is forced mid-scroll, so reading progress keeps updating while the
+// scrolling never pauses (readest#5635).
+const SCROLL_RELOCATE_MAX_WAIT = 1000
+
 // Transforms ALL children of the container so multi-view layouts
 // animate as a unified whole. Extra elements (e.g. background) are
 // also transformed so they slide in sync with the content.
@@ -1456,13 +1461,20 @@ export class Paginator extends HTMLElement {
         this.#footer = this.#root.getElementById('footer')
 
         this.#observer.observe(this.#container)
+        const scrolledScrollRelocate = () => {
+            // Skip entirely while stabilizing — preserve #justAnchored
+            // so the first post-stabilization fire still sees it.
+            if (this.#stabilizing) return
+            if (this.#justAnchored) this.#justAnchored = false
+            else this.#afterScroll('scroll')
+        }
+        // Start time of the current unbroken run of scroll events, for the
+        // periodic mid-scroll relocate below; null when no run is in progress.
+        let scrollBurstStart = null
         const debouncedScroll = debounce(() => {
+            scrollBurstStart = null
             if (this.scrolled && !this.#isAnimating) {
-                // Skip entirely while stabilizing — preserve #justAnchored
-                // so the first post-stabilization fire still sees it.
-                if (this.#stabilizing) return
-                if (this.#justAnchored) this.#justAnchored = false
-                else this.#afterScroll('scroll')
+                scrolledScrollRelocate()
                 // Backward preloading is handled eagerly in the (non-debounced)
                 // scroll listener below, mirroring the forward buffer.
             } else if (!this.scrolled) {
@@ -1529,6 +1541,23 @@ export class Paginator extends HTMLElement {
                                 })
                         }
                     }
+                }
+            }
+            // A scroll that never pauses — the Auto Scroll reading mode, a
+            // held scroll key — resets the trailing debounce forever, so the
+            // scrolled-mode relocate (and with it reading progress) would only
+            // fire once the scrolling stopped (readest#5635). Relocate at most
+            // once per SCROLL_RELOCATE_MAX_WAIT while the run of scroll events
+            // lasts; the debounced call still reports the final position and
+            // ends the run. Skipped during a finger drag for the same reason
+            // preloading is: the measurement drops frames mid-swipe, and the
+            // release settles through the debounce anyway (readest#4785).
+            if (this.scrolled && !this.#isAnimating && !this.#touchScrolled) {
+                const now = Date.now()
+                if (scrollBurstStart == null) scrollBurstStart = now
+                else if (now - scrollBurstStart >= SCROLL_RELOCATE_MAX_WAIT) {
+                    scrollBurstStart = now
+                    scrolledScrollRelocate()
                 }
             }
             debouncedScroll()
