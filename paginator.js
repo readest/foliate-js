@@ -87,6 +87,24 @@ const cssAnimateScroll = (element, scrollProp, startValue, endValue, duration, e
 
         // Apply final scroll position
         element[scrollProp] = endValue
+        // Translating the children shrank the container's scrollable overflow
+        // by the animated distance, and WebKit (iOS 18) still reports that
+        // shrunken extent when the transforms are cleared in this same task —
+        // so the assignment above is clamped. Mid-book the clamp lands far
+        // beyond the target and is invisible; on the last page of the book,
+        // where the target *is* the maximum scroll offset, it lands a full page
+        // short and the page visibly snaps back (readest#5663).
+        if (Math.abs(element[scrollProp] - endValue) > 0.5) {
+            // Forcing a layout here is not enough — the extent it reports is
+            // restored, but the scroll clamp still uses the stale one for the
+            // rest of the task. The next frame is past the compositor's
+            // animation teardown, so re-apply there.
+            requestAnimationFrame(() => {
+                element[scrollProp] = endValue
+                resolve()
+            })
+            return
+        }
         resolve()
     }
 
