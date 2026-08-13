@@ -1298,6 +1298,7 @@ export class Paginator extends HTMLElement {
     #touchScrolled
     #lastVisibleRange
     #scrollLocked = false
+    #subpixelOffset = 0
     #isAnimating = false
     // Generation counter for slideTurnAnimation: a newer vertical page turn
     // bumps it so an in-flight two-phase slide stops touching the DOM.
@@ -2142,6 +2143,31 @@ export class Paginator extends HTMLElement {
     }
     set containerPosition(newVal) {
         this.#container[this.scrollProp] = newVal
+    }
+    // Scroll offsets quantize to whole CSS pixels in both Blink and WebKit
+    // (`scrollTop = 100.5` reads back 100 or 101), so a slow continuous scroll
+    // such as Auto Scroll advances in visible one-pixel steps: at 5px/s that is
+    // one jump every 200ms. The whole pixels stay in the scroll position, which
+    // everything else reads; this carries only the sub-pixel remainder, as a
+    // composited transform on the scrollport itself.
+    //
+    // The transform goes on #container rather than its children on purpose: a
+    // transform on the children shifts their border boxes and shrinks the
+    // container's scrollable overflow, which desynchronizes the scroll math
+    // (readest#5663). Transforming the scrollport moves it as a whole and
+    // leaves its scrollable overflow untouched.
+    get subpixelOffset() {
+        return this.#subpixelOffset
+    }
+    set subpixelOffset(offset) {
+        const value = Number.isFinite(offset) ? offset : 0
+        if (value === this.#subpixelOffset) return
+        this.#subpixelOffset = value
+        // Scrolling forward by `value` moves the content back by the same
+        // amount. Vertical writing pages along the inline axis in scrolled mode.
+        const axis = this.scrollProp === 'scrollLeft' ? 'X' : 'Y'
+        this.#container.style.transform = value
+            ? `translate${axis}(${-value}px) translateZ(0)` : ''
     }
     get scrollLocked() {
         return this.#scrollLocked
