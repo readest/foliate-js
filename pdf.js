@@ -502,6 +502,12 @@ export const makePDF = async file => {
     const calibreSeries = parseCalibreSeriesFromXMP(metadata?.getRaw?.())
     if (calibreSeries) book.metadata.belongsTo = { series: calibreSeries }
 
+    // PDFs bound right-to-left (Japanese photo books, manga) declare it in the
+    // catalog's ViewerPreferences; surface it as book.dir so the fixed-layout
+    // renderer pairs and orders two-page spreads right-to-left.
+    const viewerPreferences = await pdf.getViewerPreferences().catch(() => null)
+    if (viewerPreferences?.Direction === 'R2L') book.dir = 'rtl'
+
     const outline = await pdf.getOutline()
     book.toc = outline ? await Promise.all(outline.map(item => makeTOCItem(item, pdf))) : null
 
