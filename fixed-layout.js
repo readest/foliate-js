@@ -1152,7 +1152,12 @@ export class FixedLayout extends HTMLElement {
             : (hostWidth / vw) * this.#scaleFactor
 
         if (frame.onZoom) {
-            frame.onZoom({ doc: frame.iframe.contentDocument, scale, pageColors: this.#pageColors })
+            const p = frame.onZoom({
+                doc: frame.iframe.contentDocument,
+                scale,
+                pageColors: this.#pageColors,
+            })
+            if (p?.then) p.then(() => this.#refreshOverlayerForFrame(frame))
             Object.assign(frame.iframe.style, {
                 width: `${vw * scale}px`,
                 height: `${vh * scale}px`,
