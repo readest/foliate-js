@@ -129,14 +129,14 @@ const toInnerString = parsed => parsed.parent
     ? [parsed.parent, parsed.start, parsed.end].map(toInnerString).join(',')
     : parsed.map(parts => parts.map(partToString).join('')).join('!')
 
-const toString = parsed => wrap(toInnerString(parsed))
+export const toString = parsed => wrap(toInnerString(parsed))
 
 export const collapse = (x, toEnd) => typeof x === 'string'
     ? toString(collapse(parse(x), toEnd))
     : x.parent ? concatArrays(x.parent, x[toEnd ? 'end' : 'start']) : x
 
 // create range CFI from two CFIs
-const buildRange = (from, to) => {
+export const buildRange = (from, to) => {
     if (typeof from === 'string') from = parse(from)
     if (typeof to === 'string') to = parse(to)
     from = collapse(from)
