@@ -92,10 +92,24 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
     }
 
     const exts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.jxl', '.avif']
+    // Compare paths segment by segment: sorting whole paths as strings puts
+    // "Chapter 0060 (2)/001.jpg" before "Chapter 0060/001.jpg" (a space sorts
+    // before a slash), showing part 2 of a split chapter first. Numeric
+    // collation also keeps "2.jpg" ahead of "10.jpg".
+    const collator = new Intl.Collator([], { numeric: true })
+    const comparePaths = (a, b) => {
+        const as = a.split('/'), bs = b.split('/')
+        const len = Math.min(as.length, bs.length)
+        for (let i = 0; i < len; i++) {
+            const cmp = collator.compare(as[i], bs[i])
+            if (cmp) return cmp
+        }
+        return as.length - bs.length
+    }
     const files = entries
         .map(entry => entry.filename)
         .filter(name => exts.some(ext => name.endsWith(ext)))
-        .sort()
+        .sort(comparePaths)
     if (!files.length) throw new Error('No supported image files in archive')
 
     const book = {}
