@@ -468,13 +468,14 @@ export const makePDF = async file => {
         queue.push([begin, end])
         pump()
     }
-    const pdf = await pdfjsLib.getDocument({
+    const loadingTask = pdfjsLib.getDocument({
         range: transport,
         wasmUrl: pdfjsPath(''),
         cMapUrl: pdfjsPath('cmaps/'),
         standardFontDataUrl: pdfjsPath('standard_fonts/'),
         isEvalSupported: false,
-    }).promise
+    })
+    const pdf = await loadingTask.promise
 
     // Get viewport dimensions from first page for fixed-layout rendering
     const firstPage = await pdf.getPage(1)
@@ -506,7 +507,9 @@ export const makePDF = async file => {
     // catalog's ViewerPreferences; surface it as book.dir so the fixed-layout
     // renderer pairs and orders two-page spreads right-to-left.
     const viewerPreferences = await pdf.getViewerPreferences().catch(() => null)
-    if (viewerPreferences?.Direction === 'R2L') book.dir = 'rtl'
+    const direction = viewerPreferences?.get?.('Direction')
+        ?? viewerPreferences?.Direction
+    if (direction === 'R2L') book.dir = 'rtl'
 
     const outline = await pdf.getOutline()
     book.toc = outline ? await Promise.all(outline.map(item => makeTOCItem(item, pdf))) : null
@@ -629,7 +632,7 @@ export const makePDF = async file => {
             page?.cleanup()
         }
         pageCache.clear()
-        pdf.destroy()
+        loadingTask.destroy()
     }
     return book
 }
