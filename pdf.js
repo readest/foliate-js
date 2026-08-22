@@ -514,6 +514,17 @@ export const makePDF = async file => {
     const outline = await pdf.getOutline()
     book.toc = outline ? await Promise.all(outline.map(item => makeTOCItem(item, pdf))) : null
 
+    // Page labels (PDF 32000-1 §12.4.2) are the numbers printed on the pages
+    // -- roman-numeral front matter, a body that restarts at 1 -- and are what
+    // the book's own TOC means by "page 139", as opposed to the physical index
+    // into the file. Expose them as the page list so they reach readers through
+    // the same `pageItem` channel as an EPUB page-list nav. Like PDF.js, ignore
+    // labels that merely restate the physical page numbers or are all empty.
+    const labels = await pdf.getPageLabels().catch(() => null)
+    book.pageList = labels?.some((label, i) => label && label !== String(i + 1))
+        ? labels.map((label, i) => ({ label, href: JSON.stringify(i), index: i }))
+        : null
+
     const cache = new Map()
     const pageCache = new Map()
     const getPage = async (i) => {
@@ -600,8 +611,11 @@ export const makePDF = async file => {
         size: 1000,
     }))
     book.isExternal = uri => /^\w+:/i.test(uri)
+    // TOC hrefs are JSON-encoded destinations (named or explicit); page-list
+    // hrefs are JSON-encoded page indices.
     book.resolveHref = async href => {
         const parsed = JSON.parse(href)
+        if (typeof parsed === 'number') return { index: parsed }
         const dest = typeof parsed === 'string'
             ? await pdf.getDestination(parsed) : parsed
         const index = await pdf.getPageIndex(dest[0])
@@ -610,6 +624,7 @@ export const makePDF = async file => {
     book.splitTOCHref = async href => {
         if (!href) return [null, null]
         const parsed = JSON.parse(href)
+        if (typeof parsed === 'number') return [parsed, null]
         const dest = typeof parsed === 'string'
             ? await pdf.getDestination(parsed) : parsed
         try {
