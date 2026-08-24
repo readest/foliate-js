@@ -3287,6 +3287,24 @@ export class Paginator extends HTMLElement {
             this.#getRectMapper(targetView))
         return range ? { range, index: this.#primaryIndex } : undefined
     }
+    // Whether the current Range anchor starts inside the visible range.
+    // Fraction and Element anchors are never considered visible, so they
+    // keep being replaced by the visible range as before.
+    #anchorIsVisible(range) {
+        const anchor = this.#anchor
+        if (!anchor?.startContainer) return false
+        const node = anchor.startContainer
+        // comparePoint throws for a node rooted outside the range's document,
+        // i.e. an anchor in another section or in a torn-down document.
+        if (!node.isConnected || node.ownerDocument !== range.startContainer.ownerDocument)
+            return false
+        try {
+            return range.comparePoint(node, anchor.startOffset) === 0
+        } catch {
+            // The anchored text node has been shortened since (IndexSizeError).
+            return false
+        }
+    }
     // Determine which view is primary based on scroll position
     #detectPrimaryView() {
         if (this.#views.size <= 1) return
@@ -3360,9 +3378,18 @@ export class Paginator extends HTMLElement {
         if (!range) return
         this.#lastVisibleRange = range
         // don't set new anchor if relocation was to scroll to anchor
-        if (reason !== 'selection' && reason !== 'navigation' && reason !== 'anchor')
+        if (reason === 'selection' || reason === 'navigation' || reason === 'anchor')
+            this.#justAnchored = true
+        // The scroll that re-anchoring itself performs (a resize re-render)
+        // lands here through the debounced container scroll listener. Taking
+        // the reflowed page's visible range as the new anchor then moves the
+        // anchor to that page's start, which precedes the old anchor whenever
+        // the two layouts' page boundaries differ, so the next resize back
+        // settles one page earlier every time (readest#5808). A container
+        // scroll that keeps the anchor on the page is not a navigation away
+        // from it: keep the anchor.
+        else if (reason !== 'container-scroll' || !this.#anchorIsVisible(range))
             this.#anchor = range
-        else this.#justAnchored = true
 
         const index = visibleIndex ?? this.#primaryIndex
         const primaryView = this.#primaryView
