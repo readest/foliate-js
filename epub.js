@@ -1219,6 +1219,11 @@ ${doc.querySelector('parsererror').innerText}`)
                 unload: () => this.#loader.unloadItem(item),
                 loadText: () => this.#loader.loadText(item.href),
                 loadContent: () => this.#loader.loadItemXHTMLContent(item),
+                // Load a resource a script references after the section was
+                // rendered (a <video src> built on click); `loadReplaced` only
+                // saw what was in the markup. The section is its parent, so it
+                // is released together with the section.
+                loadHref: href => this.#loader.loadHref(href, item.href),
                 createDocument: () => this.loadDocument(item),
                 size: this.getSize(item.href),
                 cfi: this.resources.cfis[index],
