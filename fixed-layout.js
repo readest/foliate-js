@@ -5,7 +5,7 @@ const parseViewport = str => str
     ?.filter(x => x)
     ?.map(x => x.split('=').map(x => x.trim()))
 
-const getViewport = (doc, viewport) => {
+export const getViewport = (doc, viewport) => {
     // use `viewBox` for SVG
     if (doc.documentElement.localName === 'svg') {
         const [, , width, height] = doc.documentElement
@@ -16,7 +16,13 @@ const getViewport = (doc, viewport) => {
     // get `viewport` `meta` element
     const meta = parseViewport(doc.querySelector('meta[name="viewport"]')
         ?.getAttribute('content'))
-    if (meta) return Object.fromEntries(meta)
+    if (meta) {
+        const props = Object.fromEntries(meta)
+        // A bitmap spine item is loaded as the browser's own image document,
+        // whose synthetic meta (`width=device-width, minimum-scale=0.1`) has no
+        // page size; only a numeric width and height describe a fixed page
+        if (parseFloat(props.width) > 0 && parseFloat(props.height) > 0) return props
+    }
 
     // fallback to book's viewport
     if (typeof viewport === 'string') return parseViewport(viewport)
