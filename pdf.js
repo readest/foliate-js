@@ -1,6 +1,7 @@
 const pdfjsPath = path => `/vendor/pdfjs/${path}`
 
 import '@pdfjs/pdf.min.mjs'
+import { parsePDFMetadata } from './pdf-metadata.js'
 const pdfjsLib = globalThis.pdfjsLib
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.min.mjs')
 
@@ -411,35 +412,6 @@ const makeTOCItem = async (item, pdf) => {
 // back over a recently seen page.
 const MAX_CACHED_PAGES = 16
 
-const CALIBRE_NS = 'http://calibre-ebook.com/xmp-namespace'
-const CALIBRE_SI_NS = 'http://calibre-ebook.com/xmp-namespace-series-index'
-const RDF_NS = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
-
-// Calibre writes series metadata into the XMP packet as
-// <calibre:series rdf:parseType="Resource">
-//   <rdf:value>Name</rdf:value>
-//   <calibreSI:series_index>1.00</calibreSI:series_index>
-// </calibre:series>
-const parseCalibreSeriesFromXMP = raw => {
-    if (!raw || typeof raw !== 'string') return null
-    let doc
-    try {
-        doc = new DOMParser().parseFromString(raw, 'application/xml')
-    } catch {
-        return null
-    }
-    if (!doc || doc.getElementsByTagName('parsererror').length) return null
-    const seriesEls = doc.getElementsByTagNameNS(CALIBRE_NS, 'series')
-    const seriesEl = seriesEls.item(0)
-    if (!seriesEl) return null
-    const valueEl = seriesEl.getElementsByTagNameNS(RDF_NS, 'value').item(0)
-    const name = valueEl?.textContent?.trim()
-    if (!name) return null
-    const indexEl = seriesEl.getElementsByTagNameNS(CALIBRE_SI_NS, 'series_index').item(0)
-    const position = indexEl?.textContent?.trim()
-    return position ? { name, position } : { name }
-}
-
 // Maximum number of range reads to keep in flight at once. While parsing a
 // large PDF's cross-reference and object streams, pdf.js can request hundreds
 // of byte ranges in a single burst. A real HTTP transport is implicitly
@@ -486,22 +458,7 @@ export const makePDF = async file => {
     } }
 
     const { metadata, info } = await pdf.getMetadata() ?? {}
-    // TODO: for better results, parse `metadata.getRaw()`
-    book.metadata = {
-        title: metadata?.get('dc:title') ?? info?.Title,
-        author: metadata?.get('dc:creator') ?? info?.Author,
-        contributor: metadata?.get('dc:contributor'),
-        description: metadata?.get('dc:description') ?? info?.Subject,
-        language: metadata?.get('dc:language'),
-        publisher: metadata?.get('dc:publisher'),
-        subject: metadata?.get('dc:subject'),
-        identifier: metadata?.get('dc:identifier'),
-        source: metadata?.get('dc:source'),
-        rights: metadata?.get('dc:rights'),
-    }
-
-    const calibreSeries = parseCalibreSeriesFromXMP(metadata?.getRaw?.())
-    if (calibreSeries) book.metadata.belongsTo = { series: calibreSeries }
+    book.metadata = parsePDFMetadata({ info, xmp: metadata?.getRaw?.() })
 
     // PDFs bound right-to-left (Japanese photo books, manga) declare it in the
     // catalog's ViewerPreferences; surface it as book.dir so the fixed-layout
