@@ -963,6 +963,7 @@ class KF8 {
     #rawTail = new Uint8Array()
     #lastLoadedHead = -1
     #lastLoadedTail = -1
+    #rawQueue = Promise.resolve()
     #type = MIME.XHTML
     #inlineMap = new Map()
     constructor(mobi) {
@@ -1126,7 +1127,22 @@ class KF8 {
     // NOTE: there doesn't seem to be a way to access text randomly?
     // how to know the decompressed size of the records without decompressing?
     // 4096 is just the maximum size
-    async loadRaw(start, end) {
+    //
+    // `#loadRawLocked` appends records to `#rawHead` / `#rawTail` across an
+    // `await`, so overlapping calls would interleave and land the records in
+    // completion order instead of index order, shifting every byte offset
+    // after the first out-of-order append. That never showed up when the book
+    // is an in-memory `File` (slices settle in issue order), but a file read
+    // through ranged requests finishes out of order, and the renderer does
+    // overlap loads — it preloads the adjacent section while another one is
+    // still loading. Serialize on a promise chain so the walk stays ordered;
+    // whichever call runs second usually finds its window already buffered.
+    loadRaw(start, end) {
+        const result = this.#rawQueue.then(() => this.#loadRawLocked(start, end))
+        this.#rawQueue = result.then(() => {}, () => {})
+        return result
+    }
+    async #loadRawLocked(start, end) {
         // here we load either from the front or back until we have reached the
         // required offsets; at worst you'd have to load half the book at once
         const distanceHead = end - this.#rawHead.length
