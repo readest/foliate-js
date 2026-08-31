@@ -198,6 +198,10 @@ const VIEW_TRANSITION_CLASSES = [
 const RELEASE_VELOCITY_WINDOW_MS = 90
 const RELEASE_PAUSE_THRESHOLD_MS = 80
 const SLIDE_RELEASE_PROJECTION_MS = 240
+// Fraction of a page a drag-follow swipe must cover for the release to
+// commit the turn on displacement alone, when the finger is too slow to
+// register as a flick.
+const DRAG_TURN_DISTANCE_RATIO = 0.06
 const LAYERED_EDGE_REGION = 0.18
 const LAYERED_EARLY_CLAIM_PX = 6
 const LAYERED_EARLY_SAMPLE_INTERVAL_MS = 80
@@ -2268,7 +2272,25 @@ export class Paginator extends HTMLElement {
             const max = Math.abs(offset) + b
             const v =  snapping ? velocity : avgVelocity
             const d = v * sign * size * (aligned ? 1 : 0)
-            const snapOffset = (isNaN(d) ? 0 : snapping ? d * 2 : d * 10)
+            const velocityBased = isNaN(d) ? 0 : snapping ? d * 2 : d * 10
+            // A slow but deliberate drag still turns the page. The drag-follow
+            // release above is judged by its flick velocity alone (`d * 2`), so
+            // a finger that drags most of a page across and then eases to a
+            // stop before lifting scores ~0 and springs back: the page visibly
+            // followed the finger, yet nothing commits, and the reader has to
+            // flick hard to turn. Judge that release by the displacement the
+            // reader actually saw. Alignment uses the displacement ratio, not
+            // `aligned`, for the same reason it does on the displacement path:
+            // at low speed the lift-off velocities are jitter.
+            const distanceBased = snapping
+                && Math.abs(dx) > Math.abs(dy)
+                && Math.abs(dx) > size * DRAG_TURN_DISTANCE_RATIO
+                ? Math.sign(dx) * sign * size
+                : 0
+            // Whichever offset commits more strongly wins, so a fast flick
+            // keeps its existing multi-page reach.
+            const snapOffset = Math.abs(velocityBased) > Math.abs(distanceBased)
+                ? velocityBased : distanceBased
             page = Math.floor(Math.max(min, Math.min(max, (start + end) / 2 + snapOffset)) / size)
         }
         const dir = page < 0 ? -1 : page >= pages ? 1 : null
