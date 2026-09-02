@@ -118,14 +118,19 @@ export const computeScrollPinchTransform = ({
 })
 
 // Scroll offsets to apply to the host (`overflow:auto`) after rendering a
-// paginated page. Horizontal is always re-centered so the page sits in the
-// middle of the viewport. Vertical is reset to the top only on a page turn:
-// a tall fit-width page overflows the host vertically, and without the reset the
-// freshly-shown page inherits the previous page's offset and opens scrolled to
-// the bottom (#4683). Plain re-renders (resize, zoom, theme) keep the reader's
-// current vertical position within the page.
-export const computePaginatedScroll = ({ elementWidth, containerWidth, scrollTop, pageTurn }) => ({
-    scrollLeft: (elementWidth - containerWidth) / 2,
+// paginated page. Horizontal is re-centered so the page sits in the middle of
+// the viewport, unless the horizontal pan lock is on: there the offset the
+// reader panned to is carried over, so a zoomed page whose side margins are
+// cropped out of view stays cropped across page turns (#5976). Vertical is
+// reset to the top only on a page turn: a tall fit-width page overflows the
+// host vertically, and without the reset the freshly-shown page inherits the
+// previous page's offset and opens scrolled to the bottom (#4683). Plain
+// re-renders (resize, zoom, theme) keep the reader's current vertical position
+// within the page.
+export const computePaginatedScroll = ({
+    elementWidth, containerWidth, scrollTop, scrollLeft, pageTurn, lockPanX,
+}) => ({
+    scrollLeft: lockPanX ? scrollLeft : (elementWidth - containerWidth) / 2,
     scrollTop: pageTurn ? 0 : scrollTop,
 })
 
@@ -207,7 +212,7 @@ export const applyOverlayerViewBox = (frame, overlayer) => {
 }
 
 export class FixedLayout extends HTMLElement {
-    static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow', 'scroll-gap', 'scroll-direction']
+    static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow', 'scroll-gap', 'scroll-direction', 'lock-pan-x']
     #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
@@ -223,6 +228,8 @@ export class FixedLayout extends HTMLElement {
     #scaleFactor = 1.0
     #totalScaleFactor = 1.0
     #scrollLocked = false
+    // Horizontal offset handed over by #showSpread for the next #render().
+    #pannedX = null
     #isOverflowX = false
     #isOverflowY = false
     #preloadCache = new Map()
@@ -392,6 +399,16 @@ export class FixedLayout extends HTMLElement {
         :host([flow="scrolled"]) .scroll-page {
             touch-action: pan-x pan-y;
         }
+        /* Horizontal pan lock: the finger only moves the page up and down, so a
+           zoomed-in page panned to hide its wide side margins can't drift back
+           out of alignment with every slightly-diagonal swipe (#5976). Two
+           fingers stay unlisted, so pinch is still delivered to JS. Exempt
+           horizontal scroll flow, where x is the reading axis and locking it
+           would strand the reader. */
+        :host([lock-pan-x]:not([flow="scrolled"][scroll-direction="horizontal"])),
+        :host([lock-pan-x]:not([flow="scrolled"][scroll-direction="horizontal"])) .scroll-page {
+            touch-action: pan-y;
+        }
         :host([flow="scrolled"]) .scroll-container {
             display: flex;
             flex-direction: column;
@@ -464,6 +481,9 @@ export class FixedLayout extends HTMLElement {
                 if (anchor) this.#restoreScrollModeAnchor(anchor)
                 break
             }
+            case 'lock-pan-x':
+                this.#applyPanLockToFrames()
+                break
             case 'scroll-direction': {
                 const horizontal = value === 'horizontal'
                 if (horizontal === this.#scrollHorizontal) break
@@ -477,6 +497,22 @@ export class FixedLayout extends HTMLElement {
                 break
             }
         }
+    }
+    // `touch-action` doesn't cross an iframe boundary: a touch that lands on page
+    // content is governed by that document's own value, so the host's `pan-y`
+    // alone still leaves the page pannable sideways (#5976). Mirror the lock
+    // inside every frame, with the same horizontal-scroll-flow exemption the
+    // stylesheet makes.
+    #applyPanLock(doc) {
+        if (!doc?.documentElement) return
+        const locked = this.hasAttribute('lock-pan-x')
+            && !(this.getAttribute('flow') === 'scrolled'
+                && this.getAttribute('scroll-direction') === 'horizontal')
+        doc.documentElement.style.touchAction = locked ? 'pan-y' : ''
+    }
+    #applyPanLockToFrames() {
+        for (const iframe of this.#root.querySelectorAll('iframe'))
+            this.#applyPanLock(iframe.contentDocument)
     }
     async #createFrame({ index, src: srcOption, detached = false }) {
         const srcOptionIsString = typeof srcOption === 'string'
@@ -512,6 +548,7 @@ export class FixedLayout extends HTMLElement {
         return new Promise(resolve => {
             iframe.addEventListener('load', () => {
                 const doc = iframe.contentDocument
+                this.#applyPanLock(doc)
                 iframe.dataset.sectionIndex = index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
                 const { width, height } = getViewport(doc, this.defaultViewport)
@@ -536,6 +573,12 @@ export class FixedLayout extends HTMLElement {
             return []
         }
         if (!side) return []
+        // The offset the reader panned to, read before transform()'s resizes
+        // let the browser clamp it. #showSpread hands over its own snapshot:
+        // by the time a page turn reaches us its frame swap has already
+        // clamped the live value to 0 (#5976).
+        const pannedX = this.#pannedX ?? this.scrollLeft
+        this.#pannedX = null
         const left = this.#left ?? {}
         const right = this.#center ?? this.#right ?? {}
         const target = side === 'left' ? left : right
@@ -642,7 +685,9 @@ export class FixedLayout extends HTMLElement {
                 elementWidth: element.clientWidth,
                 containerWidth,
                 scrollTop: container.scrollTop,
+                scrollLeft: pannedX,
                 pageTurn,
+                lockPanX: this.hasAttribute('lock-pan-x'),
             })
             container.scrollLeft = scrollLeft
             container.scrollTop = scrollTop
@@ -742,6 +787,11 @@ export class FixedLayout extends HTMLElement {
             ? [this.#center?.element]
             : [this.#left?.element, this.#right?.element]
 
+        // Making the outgoing frames absolute collapses the host's scrollable
+        // width, so the browser clamps the scroll offset to 0 before #render()
+        // gets to read it. Under the horizontal pan lock that offset is the
+        // one thing the page turn has to preserve, so snapshot it first.
+        if (this.hasAttribute('lock-pan-x')) this.#pannedX = this.scrollLeft
         Array.from(this.#root.children).forEach(child => {
             const isVisible = visibleFrames.includes(child)
             Object.assign(child.style, {
@@ -990,6 +1040,7 @@ export class FixedLayout extends HTMLElement {
         return new Promise(resolve => {
             iframe.addEventListener('load', () => {
                 const doc = iframe.contentDocument
+                this.#applyPanLock(doc)
                 iframe.dataset.sectionIndex = pageData.index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index: pageData.index } }))
                 const { width, height } = getViewport(doc, this.defaultViewport)
