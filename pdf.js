@@ -212,7 +212,7 @@ const activeRenderTasks = new WeakMap()
 const renderGenerations = new WeakMap()
 
 // Set up panning and selection event handlers once per iframe document
-const setupPanningEvents = (doc) => {
+export const setupPanningEvents = (doc) => {
     if (doc._readestEventsInitialized) return
     doc._readestEventsInitialized = true
 
@@ -287,11 +287,17 @@ const setupPanningEvents = (doc) => {
 
             const dx = e.screenX - startX
             const dy = e.screenY - startY
+            // Panning a zoomed page is a script write, not native scrolling, so
+            // `touch-action` cannot constrain it. The renderer mirrors the
+            // horizontal pan lock onto this document's root element (#5976);
+            // read it back so a drag that is only slightly diagonal can't shift
+            // the page sideways again.
+            const lockX = doc.documentElement.style.touchAction === 'pan-y'
 
             if (scrollParent === window) {
-                window.scrollTo(scrollLeft - dx, scrollTop - dy)
+                window.scrollTo(lockX ? window.scrollX : scrollLeft - dx, scrollTop - dy)
             } else {
-                scrollParent.scrollLeft = scrollLeft - dx
+                if (!lockX) scrollParent.scrollLeft = scrollLeft - dx
                 scrollParent.scrollTop = scrollTop - dy
             }
         }
