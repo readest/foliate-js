@@ -710,10 +710,18 @@ class View {
             justifyContent: 'flex-start',
             alignItems: 'center',
         })
+        // Hidden but laid out, rather than `display: none`. A section's own
+        // scripts run while the document loads, before this view has rendered,
+        // and a display:none subtree has no boxes at all, so anything the book
+        // measures then comes back zero. The IDPF `trees` sample sizes its
+        // canvas backing store from the element's own width, so it ended up
+        // 0x0 and drew nothing at all (readest/readest#6041). `visibility:
+        // hidden` still paints nothing while giving those scripts real
+        // geometry to measure.
         Object.assign(this.#iframe.style, {
             overflow: 'hidden',
             border: '0',
-            display: 'none',
+            visibility: 'hidden',
             width: '100%', height: '100%',
         })
         // `allow-scripts` is needed for events because of WebKit bug
@@ -740,7 +748,7 @@ class View {
 
                 this.#iframe.setAttribute('aria-label', doc.title)
                 // it needs to be visible for Firefox to get computed style
-                this.#iframe.style.display = 'block'
+                this.#iframe.style.visibility = 'visible'
                 const { vertical, rtl } = getDirection(doc)
                 this.docBackground = getBackground(doc)
                 doc.body.style.background = 'none'
@@ -790,14 +798,14 @@ class View {
                 // have been torn down or reloaded meanwhile — don't render into
                 // a stale document.
                 if (this.document !== doc) return resolve()
-                this.#iframe.style.display = 'none'
+                this.#iframe.style.visibility = 'hidden'
 
                 this.#vertical = vertical
                 this.#rtl = rtl
 
                 this.#contentRange.selectNodeContents(doc.body)
                 const layout = beforeRender?.({ vertical, rtl })
-                this.#iframe.style.display = 'block'
+                this.#iframe.style.visibility = 'visible'
                 this.render(layout)
                 bgRendered = true
                 this.#observer.observe(doc.body)
@@ -954,7 +962,11 @@ class View {
         // `auto`, so height:100% resolves to 0 and the cover collapses out of
         // sight (#4379). Apply it only when columnized.
         const applyFullscreen = pageFullscreen && this.#column
-        for (const el of doc.body.querySelectorAll('img, svg, video')) {
+        // `canvas` belongs with the other replaced elements: a book is free to
+        // size one past the page box, and without the clamp it spills over the
+        // column rule and paints on top of the next column's text
+        // (readest/readest#6041).
+        for (const el of doc.body.querySelectorAll('img, svg, video, canvas')) {
             // clear previous inline constraints so we read CSS-authored values,
             // not stale pixel values from a previous resize (#3634)
             el.style.removeProperty('max-width')
