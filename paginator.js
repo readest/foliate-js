@@ -972,7 +972,18 @@ class View {
             el.style.removeProperty('max-width')
             el.style.removeProperty('max-height')
             // preserve max size if they are already set in CSS
-            let { maxHeight, maxWidth } = doc.defaultView.getComputedStyle(el)
+            let { maxHeight, maxWidth, marginLeft: elMarginLeft, marginRight: elMarginRight,
+                marginTop: elMarginTop, marginBottom: elMarginBottom }
+                = doc.defaultView.getComputedStyle(el)
+            // `100%` caps the border box, and the element's own margins sit
+            // outside it, so an element the book sized at or past the column
+            // still hangs its margins over the edge — the IDPF `trees` canvas
+            // carries `margin: 1em` and spilled exactly 2em past the column
+            // rule (readest/readest#6041). Cap the margin box instead.
+            const fill = (a, b) => {
+                const margins = (parseFloat(a) || 0) + (parseFloat(b) || 0)
+                return margins > 0 ? `calc(100% - ${margins}px)` : '100%'
+            }
             if (parseInt(maxWidth) > availableWidth) {
                 maxWidth = `${availableWidth}px`
             }
@@ -981,11 +992,13 @@ class View {
             }
             setStylesImportant(el, {
                 'max-height': vertical
-                    ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight : '100%')
+                    ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight
+                        : fill(elMarginTop, elMarginBottom))
                     : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))}px`,
                 'max-width': vertical
                     ? `${width - (applyFullscreen ? 0 : (marginLeft + marginRight))}px`
-                    : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth : '100%'),
+                    : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth
+                        : fill(elMarginLeft, elMarginRight)),
                 'object-fit': 'contain',
                 'page-break-inside': 'avoid',
                 'break-inside': 'avoid',
