@@ -3313,6 +3313,7 @@ export class Paginator extends HTMLElement {
             // bottom of the book).
             const center = this.#renderedStart + this.size / 2
             let fallback
+            let collapsed
             for (const [index, v] of this.#sortedViews) {
                 if (!v.document) continue
                 const off = this.#getViewOffset(index)
@@ -3322,11 +3323,24 @@ export class Paginator extends HTMLElement {
                 const range = getVisibleRange(v.document,
                     this.#renderedStart - off, this.#renderedEnd - off,
                     this.#getRectMapper(v))
-                if (!range || range.collapsed) continue
-                if (center >= off && center < off + vSize) return { range, index }
+                if (!range) continue
+                const coversCenter = center >= off && center < off + vSize
+                // A section with no accepted node in view (an image-only cover
+                // whose <svg>/<img> is clipped by the viewport, a text-less
+                // background page) collapses onto <body>. Prefer any view with
+                // real content, but keep the collapsed range as a last resort:
+                // dropping it left an image-only cover with no relocate at all
+                // on open, so the host never got a location to record or sync
+                // reading progress from. Paginated mode relocates on the same
+                // collapsed range.
+                if (range.collapsed) {
+                    if (!collapsed || coversCenter) collapsed = { range, index }
+                    continue
+                }
+                if (coversCenter) return { range, index }
                 fallback ??= { range, index }
             }
-            return fallback
+            return fallback ?? collapsed
         }
         const range = getVisibleRange(targetView.document,
             this.#renderedStart - viewOffset,
