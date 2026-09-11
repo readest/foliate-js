@@ -3,6 +3,16 @@ const createSVGElement = tag =>
 
 let overlayerCounter = 0
 
+// The page a rect sits in. The paginator sizes the root to a single page and
+// lets the rest overflow it, so the root box tiles the pages along either
+// axis, in either direction; in scrolled mode the root is the whole document.
+const pageOf = (root, { left, top, right, bottom }) => {
+    if (!(root.width > 0 && root.height > 0)) return null
+    const x = root.left + Math.floor(((left + right) / 2 - root.left) / root.width) * root.width
+    const y = root.top + Math.floor(((top + bottom) / 2 - root.top) / root.height) * root.height
+    return { left: x, top: y, right: x + root.width, bottom: y + root.height }
+}
+
 export class Overlayer {
     #svg = createSVGElement('svg')
     #map = new Map()
@@ -118,17 +128,20 @@ export class Overlayer {
     }
     #getRects(range) {
         const zoom = this.#zoom
+        const root = this.#doc.documentElement.getBoundingClientRect()
         const rects = []
         for (const subRange of this.#splitRange(range)) {
             for (const rect of subRange.getClientRects()) {
-                rects.push({
+                const scaled = {
                     left: rect.left * zoom,
                     top: rect.top * zoom,
                     right: rect.right * zoom,
                     bottom: rect.bottom * zoom,
                     width: rect.width * zoom,
                     height: rect.height * zoom,
-                })
+                }
+                scaled.page = pageOf(root, scaled)
+                rects.push(scaled)
             }
         }
         return rects
@@ -264,7 +277,7 @@ export class Overlayer {
         g.style.opacity = 'var(--overlayer-highlight-opacity, .3)'
         g.style.mixBlendMode = 'var(--overlayer-highlight-blend-mode, normal)'
 
-        for (const [index, { left, top, height, width }] of rects.entries()) {
+        for (const [index, { left, top, height, width, page }] of rects.entries()) {
             const isFirst = index === 0
             const isLast = index === rects.length - 1
 
@@ -290,6 +303,21 @@ export class Overlayer {
                 radiusTopRight = isLast ? radius : 0
                 radiusBottomRight = isLast ? radius : 0
                 radiusBottomLeft = isFirst ? radius : 0
+            }
+
+            // The caps pad past the rects, and with the page margins and gap
+            // at zero the pages touch: the 2px after a column-wide image
+            // painted a stripe the height of the image down the edge of the
+            // next page (readest/readest#6128). Never paint past the rect's
+            // own page.
+            if (page) {
+                const right = Math.min(x + w, page.right)
+                const bottom = Math.min(y + h, page.bottom)
+                x = Math.max(x, page.left)
+                y = Math.max(y, page.top)
+                w = right - x
+                h = bottom - y
+                if (w <= 0 || h <= 0) continue
             }
 
             const rtl = Math.min(radiusTopLeft, w / 2, h / 2)
