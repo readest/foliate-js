@@ -593,6 +593,9 @@ export const getDirection = doc => {
     return { vertical, rtl }
 }
 
+export const getPageProgressionRTL = (bookDir, documentRTL) =>
+    bookDir === 'rtl' ? true : bookDir === 'ltr' ? false : documentRTL
+
 const getBackground = doc => {
     // Same blank/detached-document guard as getDirection (READEST-2X).
     if (!doc.defaultView || !doc.body) return ''
@@ -1948,7 +1951,7 @@ export class Paginator extends HTMLElement {
         if (!ctx) return
         this.#paintPaginatedBackground(ctx, atPosition)
     }
-    #beforeRender({ vertical, rtl }) {
+    #beforeRender({ vertical, rtl: documentRTL }) {
         // If writing-mode is about to change, destroy all non-primary
         // views BEFORE updating global state. This prevents stale views
         // with the wrong direction from remaining in the container while
@@ -1959,7 +1962,7 @@ export class Paginator extends HTMLElement {
             }
         }
         this.#vertical = vertical
-        this.#rtl = rtl
+        this.#rtl = getPageProgressionRTL(this.bookDir, documentRTL)
         this.#top.classList.toggle('vertical', vertical)
         this.#container.classList.toggle('vertical', vertical)
 
@@ -2040,7 +2043,7 @@ export class Paginator extends HTMLElement {
         // `dir` mirrors the horizontal scroll coordinates (negative scrollLeft
         // for RTL). Vertical books page along scrollTop, which never flips, so
         // an RTL writing mode must not reverse the host grid there.
-        this.setAttribute('dir', rtl && !vertical ? 'rtl' : 'ltr')
+        this.setAttribute('dir', this.#rtl && !vertical ? 'rtl' : 'ltr')
 
         // set background to `doc` background
         // this is needed because the iframe does not fill the whole element
