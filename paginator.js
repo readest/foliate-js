@@ -593,6 +593,11 @@ export const getDirection = doc => {
     return { vertical, rtl }
 }
 
+// The spine's `page-progression-direction` is a publication-wide declaration,
+// so it outranks the direction of any single content document: an LTR colophon
+// in a Japanese book still pages right-to-left. Only `ltr` and `rtl` are
+// binding — an absent attribute or the `default` keyword leaves the choice to
+// the Reading System, which falls back to the document.
 export const getPageProgressionRTL = (bookDir, documentRTL) =>
     bookDir === 'rtl' ? true : bookDir === 'ltr' ? false : documentRTL
 
@@ -691,6 +696,10 @@ class View {
     #overlayer
     #vertical = false
     #rtl = false
+    // The document's own inline direction, read before any of our overrides
+    // touch it. `#rtl` is the book's page progression, which can disagree.
+    #docDirection = 'ltr'
+    #directionStyle = null
     #column = true
     #size
     #columnCount = 1
@@ -805,6 +814,9 @@ class View {
 
                 this.#vertical = vertical
                 this.#rtl = rtl
+                this.#docDirection =
+                    doc.defaultView.getComputedStyle(doc.documentElement).direction === 'rtl'
+                        ? 'rtl' : 'ltr'
 
                 this.#contentRange.selectNodeContents(doc.body)
                 const layout = beforeRender?.({ vertical, rtl })
@@ -829,8 +841,19 @@ class View {
     }
     render(layout) {
         if (!layout || !this.document?.documentElement) return
+        if (layout.rtl != null) this.#rtl = layout.rtl
         this.#column = layout.flow !== 'scrolled'
         this.#layout = layout
+        // Column boxes are laid out along the multi-column container's inline
+        // direction, so a section whose own direction disagrees with the book's
+        // page progression would run its columns against the scroll and open on
+        // its last page. Give the multicol box the progression instead, and hand
+        // the document's own direction back to the content. Vertical writing
+        // paginates along `scrollTop` with the host grid left alone, and there
+        // `direction` picks the line-stacking axis rather than the column order,
+        // so leave it — as scrolled flow, which has no columns to order, does.
+        this.#setProgressionDirection(
+            this.#column && !this.#vertical ? this.#rtl ? 'rtl' : 'ltr' : null)
         if (this.#column) this.columnize(layout)
         else this.scrolled(layout)
     }
@@ -869,6 +892,33 @@ class View {
         })
         this.setImageSize(availableWidth, availableHeight)
         this.expand()
+    }
+    // In an HTML document the principal writing mode — the one the root
+    // element's own box uses, and with it the order of its column boxes — is
+    // taken from `body`, not from the root (CSS Writing Modes §8.1). So the
+    // progression has to be written onto `body`, which is also where the text
+    // direction lives; a rule one level down gives the content back the
+    // direction the book authored, leaving elements that declare one alone.
+    #setProgressionDirection(direction) {
+        const doc = this.document
+        if (!doc?.head) return
+        if (!direction || direction === this.#docDirection) {
+            doc.documentElement.style.removeProperty('direction')
+            doc.body?.style.removeProperty('direction')
+            this.#directionStyle?.remove()
+            this.#directionStyle = null
+            return
+        }
+        setStylesImportant(doc.documentElement, { 'direction': direction })
+        if (doc.body) setStylesImportant(doc.body, { 'direction': direction })
+        // The view outlives its documents, so a style element kept from the
+        // previous section is detached by the time this one renders.
+        if (this.#directionStyle?.ownerDocument !== doc) {
+            this.#directionStyle = doc.createElement('style')
+            doc.head.append(this.#directionStyle)
+        }
+        this.#directionStyle.textContent =
+            `body > *:not([dir]) { direction: ${this.#docDirection}; }`
     }
     columnize({ width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount }) {
         const vertical = this.#vertical
@@ -1979,6 +2029,11 @@ export class Paginator extends HTMLElement {
             }
         }
         this.#vertical = vertical
+        // One scroll container holds the views of several sections at once, so
+        // the progression cannot be per-document: a section that flipped it
+        // would reverse the sections mounted beside it. The publication-wide
+        // declaration settles it for the whole book; only a book that declares
+        // nothing still follows its documents.
         this.#rtl = getPageProgressionRTL(this.bookDir, documentRTL)
         this.#top.classList.toggle('vertical', vertical)
         this.#container.classList.toggle('vertical', vertical)
@@ -2049,7 +2104,7 @@ export class Paginator extends HTMLElement {
             this.columnCount = 1
             this.#replaceBackground()
 
-            const layout = { width, height, flow, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: 1 }
+            const layout = { width, height, flow, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: 1, rtl: this.#rtl }
             this.#lastLayout = layout
             return layout
         }
@@ -2084,7 +2139,7 @@ export class Paginator extends HTMLElement {
         this.#header.replaceChildren(...heads)
         this.#footer.replaceChildren(...feet)
 
-        const layout = { width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: divisor }
+        const layout = { width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: divisor, rtl: this.#rtl }
         this.#lastLayout = layout
         return layout
     }
