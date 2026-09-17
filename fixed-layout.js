@@ -169,6 +169,21 @@ export const computeSpreadSpineOverlap = ({
     return -1 / (devicePixelRatio || 1)
 }
 
+// Page columns the reader cell is showing, for the captured page curl
+// (readest#6239). Two means the curl turns just the outer page as a leaf hinged
+// at the spine (readest#6106): the shader reflects that leaf about the cell's
+// horizontal centre, which is where the spine actually is, because
+// `computeSpreadInlineMargins` pushes both pages together and centres the pair.
+// Every other shape — a centred page, the lone page portrait shows, a
+// blank-padded slot, a spread that has not been laid out yet, scroll mode —
+// has no spine to hinge on and curls as one sheet — hence the `true` blank
+// defaults, which make a spread nobody has laid out yet report one column. This
+// is deliberately the same notion of "spread" as `computeSpreadSpineOverlap`.
+export const computeSpreadColumnCount = ({
+    center = false, portrait = false, scrolled = false,
+    leftBlank = true, rightBlank = true,
+} = {}) => center || portrait || scrolled || leftBlank || rightBlank ? 1 : 2
+
 // Inline margins for the two pages of a spread. In landscape both pages are
 // shown and pushed together at the spine: the left page hugs the right edge
 // (`margin-inline-start: auto`) and the right page hugs the left edge
@@ -1368,6 +1383,15 @@ export class FixedLayout extends HTMLElement {
         this.#spreadAccessTime.clear()
         this.#overlayers.clear()
         this.goToSpread(index, this.rtl ? 'right' : 'left', 'page')
+    }
+    get columnCount() {
+        return computeSpreadColumnCount({
+            center: !!this.#center,
+            portrait: this.#portrait,
+            scrolled: this.#scrollMode,
+            leftBlank: !this.#left || !!this.#left.blank,
+            rightBlank: !this.#right || !!this.#right.blank,
+        })
     }
     get index() {
         if (this.#scrollMode) return this.#scrollCurrentIndex >= 0
