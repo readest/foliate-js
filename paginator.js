@@ -699,6 +699,10 @@ class View {
     // The document's own inline direction, read before any of our overrides
     // touch it. `#rtl` is the book's page progression, which can disagree.
     #docDirection = 'ltr'
+    // The document `load()` has taken `#docDirection` from. A re-render can
+    // reach this view earlier, while the iframe holds a section whose load
+    // event has not fired yet; see `render()`.
+    #loadedDoc = null
     #directionStyle = null
     #column = true
     #size
@@ -817,6 +821,7 @@ class View {
                 this.#docDirection =
                     doc.defaultView.getComputedStyle(doc.documentElement).direction === 'rtl'
                         ? 'rtl' : 'ltr'
+                this.#loadedDoc = doc
 
                 this.#contentRange.selectNodeContents(doc.body)
                 const layout = beforeRender?.({ vertical, rtl })
@@ -841,6 +846,16 @@ class View {
     }
     render(layout) {
         if (!layout || !this.document?.documentElement) return
+        // A resize or an attribute change re-renders every view that already
+        // has a document, and the iframe reports the incoming section as its
+        // document as soon as it commits — well before the load event where
+        // `#docDirection` is taken. Rendering it there would stamp the
+        // progression override onto a document whose own direction has not
+        // been read yet, and that read would then come back as the override
+        // itself: the view would look like it already agrees with the book,
+        // the override would be dropped, and the section's columns would run
+        // against the scroll for good. The load handler renders it anyway.
+        if (this.document !== this.#loadedDoc) return
         if (layout.rtl != null) this.#rtl = layout.rtl
         this.#column = layout.flow !== 'scrolled'
         this.#layout = layout
