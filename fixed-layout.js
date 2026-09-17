@@ -250,6 +250,7 @@ export class FixedLayout extends HTMLElement {
     #preloadCache = new Map()
     #prerenderedSpreads = new Map()
     #spreadAccessTime = new Map()
+    #spreadAccessTick = 0
     #maxConcurrentPreloads = 1
     #numPrerenderedSpreads = 1
     #maxCachedSpreads = 2
@@ -772,7 +773,7 @@ export class FixedLayout extends HTMLElement {
         const prerendered = cacheKey ? this.#prerenderedSpreads.get(cacheKey) : null
 
         if (prerendered) {
-            this.#spreadAccessTime.set(cacheKey, Date.now())
+            this.#touchSpread(cacheKey)
             if (prerendered.center) {
                 this.#center = prerendered.center
             } else {
@@ -784,14 +785,14 @@ export class FixedLayout extends HTMLElement {
                 this.#center = await this.#createFrame(center)
                 if (cacheKey) {
                     this.#prerenderedSpreads.set(cacheKey, { center: this.#center })
-                    this.#spreadAccessTime.set(cacheKey, Date.now())
+                    this.#touchSpread(cacheKey)
                 }
             } else {
                 this.#left = await this.#createFrame(left)
                 this.#right = await this.#createFrame(right)
                 if (cacheKey) {
                     this.#prerenderedSpreads.set(cacheKey, { left: this.#left, right: this.#right })
-                    this.#spreadAccessTime.set(cacheKey, Date.now())
+                    this.#touchSpread(cacheKey)
                 }
             }
         }
@@ -1454,6 +1455,14 @@ export class FixedLayout extends HTMLElement {
             this.#render(side)
             return
         }
+        // The spread being left is the one the reader may still be touching: a
+        // captured page turn navigates under its overlay with the finger down on
+        // the outgoing frame, and detaching that iframe ends the touch sequence
+        // with no touchend, freezing the turn (readest#6239). Its stamp dates
+        // from when it was shown — older than every preload made since, so the
+        // trim in #preloadNextSpreads evicted it on each backward turn. Bump it
+        // now; the trim then drops a stale preload instead.
+        if (this.#index >= 0) this.#touchSpread(`spread-${this.#index}`)
         this.#index = index
         const spread = this.#spreads[index]
         const cacheKey = `spread-${index}`
@@ -1537,7 +1546,7 @@ export class FixedLayout extends HTMLElement {
                         const frame = await this.#createFrame({ index: sectionIndex, src, detached: true })
 
                         this.#prerenderedSpreads.set(cacheKey, { center: frame })
-                        this.#spreadAccessTime.set(cacheKey, Date.now())
+                        this.#touchSpread(cacheKey)
                         if (frame.onZoom) {
                             const doc = frame.iframe.contentDocument
                             frame.onZoom({ doc, scale: this.#totalScaleFactor, pageColors: this.#pageColors })
@@ -1553,7 +1562,7 @@ export class FixedLayout extends HTMLElement {
                         const rightFrame = await this.#createFrame({ index: indexR, src: srcR, detached: true })
 
                         this.#prerenderedSpreads.set(cacheKey, { left: leftFrame, right: rightFrame })
-                        this.#spreadAccessTime.set(cacheKey, Date.now())
+                        this.#touchSpread(cacheKey)
 
                         if (leftFrame.onZoom) {
                             const docL = leftFrame.iframe.contentDocument
@@ -1573,6 +1582,12 @@ export class FixedLayout extends HTMLElement {
                 }
             })
         }
+    }
+    // Most-recently-used ordering for the spread cache. A counter, not a clock:
+    // the trim sorts by this value, and two stamps in the same millisecond fell
+    // back to Map insertion order, which ranked the current spread oldest.
+    #touchSpread(cacheKey) {
+        this.#spreadAccessTime.set(cacheKey, ++this.#spreadAccessTick)
     }
     #cleanupPreloadCache() {
         const maxSpreads = this.#maxCachedSpreads
