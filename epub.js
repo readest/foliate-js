@@ -526,6 +526,28 @@ const getFontMediaType = (path) => {
     return mediaTypeMap[extension] || 'font/ttf'
 }
 
+const AUDIO_VIDEO_MEDIA_TYPES = {
+    'mp4': 'video/mp4',
+    'm4v': 'video/mp4',
+    'webm': 'video/webm',
+    'ogv': 'video/ogg',
+    'mov': 'video/quicktime',
+    'mp3': 'audio/mpeg',
+    'm4a': 'audio/mp4',
+    'm4b': 'audio/mp4',
+    'aac': 'audio/aac',
+    'oga': 'audio/ogg',
+    'ogg': 'audio/ogg',
+    'opus': 'audio/ogg',
+    'wav': 'audio/wav',
+    'flac': 'audio/flac',
+}
+
+const AUDIO_VIDEO_EXTENSIONS = Object.keys(AUDIO_VIDEO_MEDIA_TYPES)
+
+const getAudioVideoMediaType = path =>
+    AUDIO_VIDEO_MEDIA_TYPES[path.toLowerCase().split('.').pop()]
+
 // Container entry whose file name ends in `cover`/`couv` (the French
 // spelling) plus an image extension, e.g. `cover.jpg`, `Images/Cover.PNG`,
 // `couv.jpeg`. Same shape `gnome-epub-thumbnailer` falls back to.
@@ -1017,12 +1039,29 @@ class Loader {
             mediaType: getFontMediaType(path),
         }
     }
+    // Builders like epubBuilder (cnepub) ship audio and video in the container
+    // but never declare them in the manifest, the same way they leave out the
+    // illustrations. A relative href can't resolve against the section's
+    // `blob:` URL, so the media element would otherwise end up with no source.
+    tryAudioVideoEntryItem(path) {
+        if (!AUDIO_VIDEO_EXTENSIONS.some(ext => path.toLowerCase().endsWith(`.${ext}`))) {
+            return null
+        }
+        if (!this.entries.get(path)) {
+            return null
+        }
+        return {
+            href: path,
+            mediaType: getAudioVideoMediaType(path),
+        }
+    }
     async loadHref(href, base, parents = []) {
         if (isExternal(href)) return href
         const path = resolveURL(href, base)
         let item = this.manifest.find(item => item.href === path)
         if (!item) {
             item = this.tryImageEntryItem(path) ?? this.tryFontEntryItem(path)
+                ?? this.tryAudioVideoEntryItem(path)
             if (!item) {
                 return href
             }
