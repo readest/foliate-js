@@ -962,11 +962,20 @@ class View {
             // fix glyph clipping in WebKit
             '-webkit-line-box-contain': 'block glyphs replaced',
         })
+        // Along the pagination axis every page is a tile of `size / columnCount`
+        // and the root's own side padding sits inside that tile, so the column's
+        // content box is the tile minus the padding. `--available-*` and the
+        // image clamp must use the content box: sized to the whole tile, a
+        // replaced element runs across the column gap and its trailing edge
+        // paints down the margin of the next page (readest/readest#6221).
+        // `--full-*` keeps the whole tile, which is what a bleed spans.
+        const pageWidth = Math.trunc(width / this.#columnCount)
+        const pageHeight = Math.trunc(height / this.#columnCount)
         const availableWidth = vertical
             ? Math.trunc(width - marginLeft / 2 - marginRight / 2 - gap)
-            : Math.trunc(width / this.#columnCount)
+            : Math.trunc(width / this.#columnCount - sidePaddingLeft - sidePaddingRight)
         const availableHeight = vertical
-            ? Math.trunc(height / this.#columnCount)
+            ? Math.trunc(height / this.#columnCount - marginTop * 1.5 - marginBottom * 1.5)
             : Math.trunc(height - marginTop - marginBottom)
         setStyles(doc.documentElement, {
             'padding': vertical
@@ -976,8 +985,8 @@ class View {
             '--page-margin-right': `${vertical ? marginRight : sidePaddingRight}px`,
             '--page-margin-bottom': `${vertical ? marginBottom * 1.5 : marginBottom}px`,
             '--page-margin-left': `${vertical ? marginLeft : sidePaddingLeft}px`,
-            '--full-width': `${Math.trunc(availableWidth)}`,
-            '--full-height': `${Math.trunc(availableHeight)}`,
+            '--full-width': `${vertical ? availableWidth : pageWidth}`,
+            '--full-height': `${vertical ? pageHeight : availableHeight}`,
             '--available-width': `${availableWidth}`,
             '--available-height': `${availableHeight}`,
         })
