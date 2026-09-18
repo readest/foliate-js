@@ -754,10 +754,13 @@ class View {
     get contentPages() {
         return this.#contentPages
     }
-    async load(src, data, afterLoad, beforeRender) {
+    async load(src, data, afterLoad, beforeRender, waitForIdle) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
         return new Promise(resolve => {
             this.#iframe.addEventListener('load', async () => {
+                // A background fetch can finish after a swipe has started.
+                // Defer its style/layout work, not just the start of preloading.
+                if (waitForIdle) await waitForIdle()
                 const doc = this.document
                 if (!doc?.documentElement || !doc.body) return resolve()
                 afterLoad?.(doc)
@@ -809,6 +812,7 @@ class View {
                         new Promise(res => { timer = setTimeout(res, 3000) }),
                     ])
                     clearTimeout(timer)
+                    if (waitForIdle) await waitForIdle()
                 }
                 // Awaiting the background image yields control, so the view may
                 // have been torn down or reloaded meanwhile — don't render into
@@ -3695,7 +3699,20 @@ export class Paginator extends HTMLElement {
             // global state (direction, CSS classes, dir attribute, etc.).
             const cachedLayout = this.#lastLayout
             const beforeRender = () => cachedLayout
-            await view.load(src, data, afterLoad, beforeRender)
+            await view.load(src, data, afterLoad, beforeRender, async () => {
+                // touchend queues the snap in rAF. Require two idle frames so
+                // we cannot slip layout between finger release and that snap.
+                // Stop waiting when navigation has discarded this view.
+                for (let idleFrames = 0; idleFrames < 2 && this.#views.get(index) === view;) {
+                    // Near the viewport this is required content, not spare
+                    // buffer. Holding it back exposes an unrendered placeholder
+                    // and can make boundary navigation skip the section.
+                    if (this.#getViewOffset(index) <= this.#renderedEnd + this.size) return
+                    await new Promise(resolve => requestAnimationFrame(resolve))
+                    idleFrames = this.#touchState?.active || this.#isAnimating ? 0 : idleFrames + 1
+                }
+            })
+            if (this.#views.get(index) !== view) return
             if (!view.document?.documentElement || !view.document.body) {
                 this.#destroyView(index)
                 return
