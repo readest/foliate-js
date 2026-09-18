@@ -1,5 +1,10 @@
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+// A microtask (or rAF alone) resumes before paint. Give input and rendering a
+// turn between the style, host-load, and pagination phases of a chapter load.
+const yieldToFrame = () => document.hidden ? wait(0)
+    : new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)))
+
 // WebKit before Safari 17 (iOS <= 16) resolves the `document.fonts.ready`
 // promise synchronously while purging still-loading `@font-face`s during a
 // style resolver rebuild (CSSFontFaceSet::purge). Script execution is
@@ -763,7 +768,9 @@ class View {
                 if (waitForIdle) await waitForIdle()
                 const doc = this.document
                 if (!doc?.documentElement || !doc.body) return resolve()
-                afterLoad?.(doc)
+                await afterLoad?.(doc)
+                await yieldToFrame()
+                if (this.document !== doc) return resolve()
 
                 this.#iframe.setAttribute('aria-label', doc.title)
                 // it needs to be visible for Firefox to get computed style
@@ -1161,7 +1168,9 @@ class View {
         return 1.0
     }
     expand() {
-        if (!this.document?.documentElement) return
+        // Font-ready callbacks can run while a preload yields between phases.
+        // Its range and page geometry are not initialized until first render.
+        if (!this.document?.documentElement || this.document !== this.#loadedDoc) return
         const { documentElement } = this.document
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
@@ -3603,10 +3612,11 @@ export class Paginator extends HTMLElement {
                         prop => doc.documentElement.setAttribute('data-' + prop, ''))
                     this.#styleMap.set(doc, [$styleBefore, $style])
                 }
-                onLoad?.({ doc, index })
+                return onLoad?.({ doc, index })
             }
             const beforeRender = this.#beforeRender.bind(this)
             await view.load(src, data, afterLoad, beforeRender)
+            if (this.#views.get(index) !== view) return
             if (!view.document?.documentElement || !view.document.body) {
                 this.#destroyView(index)
                 this.#primaryIndex = this.#sortedViews[0]?.[0] ?? -1
@@ -3681,7 +3691,7 @@ export class Paginator extends HTMLElement {
             const src = await section.load()
             const data = await section.loadContent?.()
             const view = this.#createView(index)
-            const afterLoad = doc => {
+            const afterLoad = async doc => {
                 if (doc.head) {
                     const $styleBefore = doc.createElement('style')
                     doc.head.prepend($styleBefore)
@@ -3691,7 +3701,11 @@ export class Paginator extends HTMLElement {
                         prop => doc.documentElement.setAttribute('data-' + prop, ''))
                     this.#styleMap.set(doc, [$styleBefore, $style])
                 }
-                this.setStyles(this.#styles)
+                // A preload needs its own styles, not a restyle and font-ready
+                // remeasurement of every chapter the reader can already see.
+                this.#applyStyles(doc)
+                await yieldToFrame()
+                if (this.#views.get(index) !== view || view.document !== doc) return
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
             }
             // Adjacent sections reuse the primary view's cached layout
@@ -3913,10 +3927,12 @@ export class Paginator extends HTMLElement {
                 this.#clearViewsExcept(keep)
             }
             const oldIndex = this.#primaryIndex
-            const onLoad = detail => {
+            const onLoad = async detail => {
                 if (oldIndex >= 0 && !this.#views.has(oldIndex))
                     this.sections[oldIndex]?.unload?.()
-                this.setStyles(this.#styles)
+                this.#applyStyles(detail.doc)
+                await yieldToFrame()
+                if (this.#views.get(index)?.document !== detail.doc) return
                 this.dispatchEvent(new CustomEvent('load', { detail }))
             }
             await this.#display(Promise.resolve(section.load())
@@ -4038,17 +4054,22 @@ export class Paginator extends HTMLElement {
         }
         return contents
     }
+    #applyStyles(doc) {
+        const $$styles = this.#styleMap.get(doc)
+        if (!$$styles) return
+        const [$beforeStyle, $style] = $$styles
+        const styles = this.#styles
+        if (Array.isArray(styles)) {
+            const [beforeStyle, style] = styles
+            $beforeStyle.textContent = beforeStyle
+            $style.textContent = style
+        } else $style.textContent = styles
+    }
     setStyles(styles) {
         this.#styles = styles
         for (const [, view] of this.#views) {
-            const $$styles = this.#styleMap.get(view.document)
-            if (!$$styles) continue
-            const [$beforeStyle, $style] = $$styles
-            if (Array.isArray(styles)) {
-                const [beforeStyle, style] = styles
-                $beforeStyle.textContent = beforeStyle
-                $style.textContent = style
-            } else $style.textContent = styles
+            if (!this.#styleMap.has(view.document)) continue
+            this.#applyStyles(view.document)
 
             // needed because the resize observer doesn't work in Firefox
             fontsReady(view.document).then(() => view.expand())
