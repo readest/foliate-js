@@ -251,6 +251,8 @@ export class FixedLayout extends HTMLElement {
     #prerenderedSpreads = new Map()
     #spreadAccessTime = new Map()
     #spreadAccessTick = 0
+    // Counter for the keys stale cached spreads move to on a regroup.
+    #staleSpreads = 0
     #maxConcurrentPreloads = 1
     #numPrerenderedSpreads = 1
     #maxCachedSpreads = 2
@@ -1385,6 +1387,47 @@ export class FixedLayout extends HTMLElement {
         this.#overlayers.clear()
         this.goToSpread(index, this.rtl ? 'right' : 'left', 'page')
     }
+    // A section can find out as it loads that it is a spread of its own: a
+    // streamed comic measures a page when its image arrives, and a wide one
+    // marks itself `pageSpread: 'center'`. Regroup from the first spread that
+    // changed; the spreads before it keep their objects and cached frames, so
+    // a spread object still at its index is still current.
+    #regroup() {
+        const old = this.#spreads
+        this.#spread(this.spread)
+        const same = (a, b) => a && b
+            && a.left === b.left && a.right === b.right && a.center === b.center
+        let from = 0
+        while (from < old.length && same(old[from], this.#spreads[from])) from++
+        if (from === old.length && from === this.#spreads.length) {
+            this.#spreads = old
+            return
+        }
+        this.#spreads = [...old.slice(0, from), ...this.#spreads.slice(from)]
+        const isRegrouped = key => Number(/^spread-(\d+)$/.exec(key)?.[1] ?? -1) >= from
+        for (const key of [...this.#preloadCache.keys()])
+            if (isRegrouped(key)) this.#preloadCache.delete(key)
+        // The spread on screen can be among the stale ones, and it has to
+        // outlive the turn that leaves it (readest#6239). So nothing is removed
+        // here: the frames move out of reach of the new indices, and the trim
+        // evicts them by age.
+        for (const key of [...this.#prerenderedSpreads.keys()]) {
+            if (!isRegrouped(key)) continue
+            const staleKey = `stale-${++this.#staleSpreads}`
+            this.#prerenderedSpreads.set(staleKey, this.#prerenderedSpreads.get(key))
+            this.#spreadAccessTime.set(staleKey, this.#spreadAccessTime.get(key) ?? 0)
+            this.#prerenderedSpreads.delete(key)
+            this.#spreadAccessTime.delete(key)
+        }
+    }
+    // After a regroup, go where the page a turn aimed at now sits: the page on
+    // `side` of the spread it was headed for.
+    #goToPageOf(spread, side, reason) {
+        const section = spread.center ?? spread[side] ?? spread.left ?? spread.right
+        const target = this.getSpreadOf(section)
+        this.#index = -1
+        return this.goToSpread(target.index, target.side, reason)
+    }
     get columnCount() {
         return computeSpreadColumnCount({
             center: !!this.#center,
@@ -1482,12 +1525,16 @@ export class FixedLayout extends HTMLElement {
             if (spread.center) {
                 const sectionIndex = this.book.sections.indexOf(spread.center)
                 const src = await spread.center?.load?.()
+                this.#regroup()
+                if (this.#spreads[index] !== spread) return this.#goToPageOf(spread, side, reason)
                 await this.#showSpread({ center: { index: sectionIndex, src }, spreadIndex: index, side })
             } else {
                 const indexL = this.book.sections.indexOf(spread.left)
                 const indexR = this.book.sections.indexOf(spread.right)
                 const srcL = await spread.left?.load?.()
                 const srcR = await spread.right?.load?.()
+                this.#regroup()
+                if (this.#spreads[index] !== spread) return this.#goToPageOf(spread, side, reason)
                 const left = { index: indexL, src: srcL }
                 const right = { index: indexR, src: srcR }
                 await this.#showSpread({ left, right, side, spreadIndex: index })
@@ -1533,17 +1580,23 @@ export class FixedLayout extends HTMLElement {
             const task = this.#preloadQueue.shift()
             if (!task) break
 
-            const { spread, cacheKey } = task
+            const { spread, cacheKey, targetIndex } = task
+            // A page that loads wide regroups the spreads, which can leave
+            // this task holding a spread that is no longer at its index.
+            const isStale = () => this.#spreads[targetIndex] !== spread
             this.#preloadCache.set(cacheKey, 'loading')
             this.#activePreloads++
             Promise.resolve().then(async () => {
                 try {
                     if (spread.center) {
                         const src = await spread.center?.load?.()
+                        this.#regroup()
+                        if (isStale()) return this.#preloadNextSpreads()
                         this.#preloadCache.set(cacheKey, { center: src })
 
                         const sectionIndex = this.book.sections.indexOf(spread.center)
                         const frame = await this.#createFrame({ index: sectionIndex, src, detached: true })
+                        if (isStale()) return frame.element.remove()
 
                         this.#prerenderedSpreads.set(cacheKey, { center: frame })
                         this.#touchSpread(cacheKey)
@@ -1554,12 +1607,19 @@ export class FixedLayout extends HTMLElement {
                     } else {
                         const srcL = await spread.left?.load?.()
                         const srcR = await spread.right?.load?.()
+                        this.#regroup()
+                        if (isStale()) return this.#preloadNextSpreads()
                         this.#preloadCache.set(cacheKey, { left: srcL, right: srcR })
 
                         const indexL = this.book.sections.indexOf(spread.left)
                         const indexR = this.book.sections.indexOf(spread.right)
                         const leftFrame = await this.#createFrame({ index: indexL, src: srcL, detached: true })
                         const rightFrame = await this.#createFrame({ index: indexR, src: srcR, detached: true })
+                        if (isStale()) {
+                            leftFrame.element.remove()
+                            rightFrame.element.remove()
+                            return
+                        }
 
                         this.#prerenderedSpreads.set(cacheKey, { left: leftFrame, right: rightFrame })
                         this.#touchSpread(cacheKey)
