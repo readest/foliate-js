@@ -2348,14 +2348,17 @@ export class Paginator extends HTMLElement {
         if (!this.#scrollBounds) return
         // Page-turn swipes are horizontal in every writing mode: vertical-rl
         // books turn pages right-to-left like printed Japanese books
-        // (readest#624), vertical-lr left-to-right. A predominantly vertical
-        // swipe on a vertical book still pages along the block axis so the
-        // legacy gesture keeps working.
+        // (readest#624), vertical-lr left-to-right. Vertical gestures belong
+        // to the host's toolbar toggle, including a sideways lift-off flick.
+        // Settle any horizontal drag started before the gesture turned vertical.
+        if (this.#vertical && Math.abs(dx) <= Math.abs(dy)) {
+            this.#settleDrag()
+            return
+        }
         const horizontal = Math.abs(vx) * 2 > Math.abs(vy)
-        const useHorizontal = horizontal || !this.#vertical
         const pages = this.#renderedPages
         let page
-        if (this.#vertical && useHorizontal && !this.#layeredTurn
+        if (this.#vertical && !this.#layeredTurn
             && this.hasAttribute('animated') && !this.hasAttribute('eink')) {
             // Drag-follow gestures on vertical books (readest#624): the views
             // tracked the finger, so judge the turn like a paged carousel by
@@ -2379,9 +2382,9 @@ export class Paginator extends HTMLElement {
             }
             page = this.#renderedPage + turn * forwardSign
         } else {
-            const velocity = useHorizontal ? vx : vy
-            const avgVelocity = useHorizontal ? dx / dt : dy / dt
-            // Without drag-follow (eink, animation off, block-axis swipes,
+            const velocity = vx
+            const avgVelocity = dx / dt
+            // Without drag-follow (eink, animation off,
             // layered turn styles) the scroll position never moves with the
             // finger; judge the whole gesture by displacement (avgVelocity)
             // like the eink path.
@@ -2394,13 +2397,9 @@ export class Paginator extends HTMLElement {
             // whose finger hooks sideways in its final milliseconds read as
             // horizontal, and the displacement heuristic amplified the tiny
             // net x-drift into a random page turn (layered slide on Android).
-            const aligned = useHorizontal
-                ? (snapping ? horizontal : Math.abs(dx) > Math.abs(dy))
-                : true
-            // Horizontal swipes advance against the page progression (RTL:
-            // next page is to the left); block-axis swipes always advance
-            // with the scroll axis.
-            const sign = useHorizontal && this.#rtl ? -1 : 1
+            const aligned = snapping ? horizontal : Math.abs(dx) > Math.abs(dy)
+            // Horizontal swipes advance against the page progression.
+            const sign = this.#rtl ? -1 : 1
             const [offset, a, b] = this.#scrollBounds
             const size = this.size
             const start = this.#renderedStart
@@ -2964,7 +2963,7 @@ export class Paginator extends HTMLElement {
         if (this.hasAttribute('no-swipe')) return
         const layeredRejected = this.#layeredTurn
             && state?.layeredGesture === 'rejected'
-        // Horizontal books have no block-axis page gesture to preserve.
+        // Vertical books still need snap() to settle any horizontal drag.
         if (layeredRejected && !this.#vertical) return
 
         // A finger that rested before lifting has no flick momentum; the
@@ -3050,7 +3049,7 @@ export class Paginator extends HTMLElement {
                 const { vx, vy, dx, dy, dt } = snapState
                 // Direction ownership is final for this touch sequence. Once
                 // vertical wins the layered arena, discard later horizontal
-                // hooks while preserving block-axis paging in vertical books.
+                // hooks; snap() settles any horizontal drag in vertical books.
                 this.snap(layeredRejected ? 0 : vx, vy,
                     layeredRejected ? 0 : dx, dy, dt)
             }
