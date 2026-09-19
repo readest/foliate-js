@@ -946,18 +946,22 @@ class View {
         this.#directionStyle.textContent =
             `body > *:not([dir]) { direction: ${this.#docDirection}; }`
     }
-    columnize({ width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount }) {
+    columnize({ width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount, columnGap }) {
         const vertical = this.#vertical
         this.#size = vertical ? height : width
         this.#columnCount = columnCount || 1
 
         const doc = this.document
-        const horizontalColumnGap = columnCount > 1 ? (marginLeft + marginRight) / 4 + gap / 2 : (marginLeft + marginRight) / 2 + gap
-        const sidePaddingLeft = columnCount > 1 ? marginLeft / 4 + gap / 4 : marginLeft / 2 + gap / 2
-        const sidePaddingRight = columnCount > 1 ? marginRight / 4 + gap / 4 : marginRight / 2 + gap / 2
+        const {
+            columnGap: horizontalColumnGap, sidePaddingLeft, sidePaddingRight,
+            columnWidth: columnWidthHint, availableWidth: horizontalAvailableWidth,
+        } = getHorizontalColumnMetrics({
+            width, marginLeft, marginRight, gap, columnWidth, columnCount,
+            columnGap: vertical ? null : columnGap,
+        })
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
-            'column-width': `${Math.trunc(columnWidth)}px`,
+            'column-width': `${columnWidthHint}px`,
             'column-gap': vertical ? `${(marginTop + marginBottom) * 1.5}px` : `${horizontalColumnGap}px`,
             'column-fill': 'auto',
             ...(vertical
@@ -984,7 +988,7 @@ class View {
         const pageHeight = Math.trunc(height / this.#columnCount)
         const availableWidth = vertical
             ? Math.trunc(width - marginLeft / 2 - marginRight / 2 - gap)
-            : Math.trunc(width / this.#columnCount - sidePaddingLeft - sidePaddingRight)
+            : horizontalAvailableWidth
         const availableHeight = vertical
             ? Math.trunc(height / this.#columnCount - marginTop * 1.5 - marginBottom * 1.5)
             : Math.trunc(height - marginTop - marginBottom)
@@ -1402,10 +1406,63 @@ class View {
     }
 }
 
+// Horizontal metrics of a paginated column layout: the CSS column gap, the
+// root's side padding, the `column-width` hint and the content width of one
+// column. The document is one multi-column flow that the container scrolls
+// through a page at a time, so a page tiles only when the side paddings add
+// up to the column gap: by default each side takes a quarter of its margin
+// plus a quarter of the gap and the centre gets the sum, which makes every
+// page edge look the same. A `column-gap` override sets the centre gap and
+// splits it evenly over the two sides; the outer edge of the text is kept by
+// the host grid instead (getColumnGapHostTracks). The width hint shrinks with
+// the gap: the browser fits floor((content + gap) / (hint + gap)) columns, so
+// the derived hint under a wider gap collapses the spread to a single column.
+export const getHorizontalColumnMetrics = ({ width, marginLeft, marginRight, gap, columnWidth, columnCount, columnGap }) => {
+    const multi = columnCount > 1
+    if (!multi || !Number.isFinite(columnGap) || columnGap < 0) {
+        const sidePaddingLeft = multi ? marginLeft / 4 + gap / 4 : marginLeft / 2 + gap / 2
+        const sidePaddingRight = multi ? marginRight / 4 + gap / 4 : marginRight / 2 + gap / 2
+        return {
+            columnGap: multi ? (marginLeft + marginRight) / 4 + gap / 2 : (marginLeft + marginRight) / 2 + gap,
+            sidePaddingLeft,
+            sidePaddingRight,
+            columnWidth: Math.trunc(columnWidth),
+            availableWidth: Math.trunc(width / columnCount - sidePaddingLeft - sidePaddingRight),
+        }
+    }
+    const sidePadding = columnGap / 2
+    const column = Math.trunc(width / columnCount - columnGap)
+    return { columnGap, sidePaddingLeft: sidePadding, sidePaddingRight: sidePadding, columnWidth: column, availableWidth: column }
+}
+
+// How the host grid keeps the text's outer edge under a `column-gap`
+// override. #container spans the margin tracks, so the only host space
+// outside a page is the flexible outer track, whose minimum matches the
+// page's derived side padding: by default the outer edge of the text is
+// about the derived gap wide (outer minimum + side padding), the same as the
+// centre. Under an override the side padding becomes half the gap, so the
+// outer minimum gives up the difference and the container cap grows by the
+// whole of it: a capped spread widens rather than squeezing its columns, and
+// an uncapped one takes the room from the outer tracks. The minimum cannot
+// go below zero, so past twice the derived gap the outer edge moves inward
+// with half the gap: on a page the gutter is at most about twice the outer
+// edge. `hostGap` is the gap percentage resolved against the host, which is
+// what the grid's own tracks use; the page's padding resolves it against
+// the container instead, so the edge can drift by a pixel or two.
+export const getColumnGapHostTracks = ({ columnGap, marginLeft, marginRight, hostGap }) => {
+    const derivedLeft = marginLeft / 4 + hostGap / 4
+    const derivedRight = marginRight / 4 + hostGap / 4
+    return {
+        outerMinLeft: Math.max(0, 2 * derivedLeft - columnGap / 2),
+        outerMinRight: Math.max(0, 2 * derivedRight - columnGap / 2),
+        capExtra: columnGap - derivedLeft - derivedRight,
+    }
+}
+
 // NOTE: everything here assumes the so-called "negative scroll type" for RTL
 export class Paginator extends HTMLElement {
     static observedAttributes = [
-        'flow', 'gap', 'margin-top', 'margin-bottom', 'margin-left', 'margin-right',
+        'flow', 'gap', 'column-gap', 'margin-top', 'margin-bottom', 'margin-left', 'margin-right',
         'max-inline-size', 'max-block-size', 'max-column-count',
         'no-preload', 'no-background', 'no-continuous-scroll',
     ]
@@ -1461,6 +1518,7 @@ export class Paginator extends HTMLElement {
     #stabilizing = false // true while #display is stabilizing layout
     #rendered = false // true after first #display completes
     #lastLayout = null // cached layout from the last #beforeRender call
+    #columnGap = null // px; set by `column-gap`, overrides the centre gap of a spread
     // Cache of section index → vertical (boolean). Populated as views
     // are loaded so we can check direction *before* loading a section.
     #directionCache = new Map()
@@ -1497,11 +1555,14 @@ export class Paginator extends HTMLElement {
             --_column-count: 1;
             --_outer-min-left: calc((var(--_column-count) - 1) * (var(--_margin-left) / 4 + var(--_gap) / 4));
             --_outer-min-right: calc((var(--_column-count) - 1) * (var(--_margin-right) / 4 + var(--_gap) / 4));
+            /* A column-gap override lowers the outer minimums and widens the
+               cap so the text keeps its outer edge; see getColumnGapHostTracks. */
+            --_gap-cap-extra: 0px;
             display: grid;
             grid-template-columns:
                 minmax(var(--_outer-min-left), 1fr)
                 var(--_margin-left)
-                minmax(0, calc(var(--_max-width) - var(--_gap)))
+                minmax(0, calc(var(--_max-width) - var(--_gap) + var(--_gap-cap-extra)))
                 var(--_margin-right)
                 minmax(var(--_outer-min-right), 1fr);
             grid-template-rows:
@@ -1822,6 +1883,12 @@ export class Paginator extends HTMLElement {
             case 'flow':
                 this.render()
                 break
+            case 'column-gap': {
+                const px = parseFloat(value)
+                this.#columnGap = Number.isFinite(px) ? px : null
+                this.render()
+                break
+            }
             case 'gap':
             case 'margin-top':
             case 'margin-bottom':
@@ -2103,6 +2170,19 @@ export class Paginator extends HTMLElement {
         // Set --_column-count BEFORE measuring the container so the read
         // below reflects the grid template that will actually be used.
         this.#top.style.setProperty('--_column-count', divisor)
+        // Same for the `column-gap` override's tracks (see getColumnGapHostTracks).
+        const columnGap = flow !== 'scrolled' && !vertical && divisor > 1 ? this.#columnGap : null
+        if (columnGap != null) {
+            const hostGap = parseFloat(style.getPropertyValue('--_gap')) / 100 * hostSize
+            const tracks = getColumnGapHostTracks({ columnGap, marginLeft, marginRight, hostGap })
+            this.#top.style.setProperty('--_outer-min-left', `${tracks.outerMinLeft}px`)
+            this.#top.style.setProperty('--_outer-min-right', `${tracks.outerMinRight}px`)
+            this.#top.style.setProperty('--_gap-cap-extra', `${tracks.capExtra}px`)
+        } else {
+            this.#top.style.removeProperty('--_outer-min-left')
+            this.#top.style.removeProperty('--_outer-min-right')
+            this.#top.style.setProperty('--_gap-cap-extra', '0px')
+        }
 
         const { width, height } = this.#container.getBoundingClientRect()
         const size = vertical ? height : width
@@ -2164,7 +2244,7 @@ export class Paginator extends HTMLElement {
             : divisor
         const marginalStyle = {
             gridTemplateColumns: `repeat(${marginalDivisor}, 1fr)`,
-            gap: `${gap}px`,
+            gap: `${columnGap ?? gap}px`,
             direction: this.bookDir === 'rtl' ? 'rtl' : 'ltr',
         }
         Object.assign(this.#header.style, marginalStyle)
@@ -2176,7 +2256,7 @@ export class Paginator extends HTMLElement {
         this.#header.replaceChildren(...heads)
         this.#footer.replaceChildren(...feet)
 
-        const layout = { width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: divisor, rtl: this.#rtl }
+        const layout = { width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth, columnCount: divisor, columnGap, rtl: this.#rtl }
         this.#lastLayout = layout
         return layout
     }
