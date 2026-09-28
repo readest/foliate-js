@@ -19,9 +19,13 @@ export class TOCProgress {
     async init({ toc, ids, splitHref, getFragment }) {
         assignIDs(toc)
         const items = flatten(toc)
+        // splitHref is synchronous for EPUB (href.split) — awaiting it per
+        // item used to schedule one microtask per TOC entry, thousands on
+        // large collections. Batch instead; also parallelizes async providers.
+        const splits = await Promise.all(items.map(item => splitHref(item?.href)))
         const grouped = new Map()
         for (const [i, item] of items.entries()) {
-            const [id, fragment] = await splitHref(item?.href) ?? []
+            const [id, fragment] = splits[i] ?? []
             const value = { fragment, item }
             if (grouped.has(id)) grouped.get(id).items.push(value)
             else grouped.set(id, { prev: items[i - 1], items: [value] })

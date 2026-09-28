@@ -166,13 +166,33 @@ const pathRelative = (from, to) => {
 
 const pathDirname = str => str.slice(0, str.lastIndexOf('/') + 1)
 
-// replace asynchronously and sequentially
+// Run `f` over `items` with bounded concurrency, preserving order. Resource
+// loads inside `loadReplaced` used to be fully serial -- one image/CSS after
+// another, each paying its own ZIP read, which stacks up on image-heavy
+// sections (worse on weak devices). Tasks are independent; a rejection still
+// propagates through Promise.all, just like the old serial loop aborted at
+// the first failure. Order is preserved by writing into preallocated slots.
+const mapBounded = async (items, f, limit = 4) => {
+    if (!items.length) return []
+    const results = new Array(items.length)
+    let next = 0
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) },
+        async () => {
+            while (next < items.length) {
+                const i = next++
+                results[i] = await f(items[i], i)
+            }
+        }))
+    return results
+}
+
+// replace asynchronously; matches were resolved with bounded concurrency
+// (was: strictly sequential) and are substituted back in match order
 // same technique as https://stackoverflow.com/a/48032528
 const replaceSeries = async (str, regex, f) => {
     const matches = []
     str.replace(regex, (...args) => (matches.push(args), null))
-    const results = []
-    for (const args of matches) results.push(await f(...args))
+    const results = await mapBounded(matches, args => f(...args))
     return str.replace(regex, () => results.shift())
 }
 
@@ -1113,25 +1133,29 @@ class Loader {
             // replace hrefs (excluding anchors)
             const replace = async (el, attr) => el.setAttribute(attr,
                 await this.loadHref(el.getAttribute(attr), href, parents))
-            for (const el of doc.querySelectorAll('link[href]')) await replace(el, 'href')
-            for (const el of doc.querySelectorAll('[src]')) await replace(el, 'src')
-            for (const el of doc.querySelectorAll('[poster]')) await replace(el, 'poster')
-            for (const el of doc.querySelectorAll('object[data]')) await replace(el, 'data')
-            for (const el of doc.querySelectorAll('[*|href]:not([href])'))
-                el.setAttributeNS(NS.XLINK, 'href', await this.loadHref(
-                    el.getAttributeNS(NS.XLINK, 'href'), href, parents))
-            for (const el of doc.querySelectorAll('[srcset]'))
-                el.setAttribute('srcset', await replaceSeries(el.getAttribute('srcset'),
+            const attrTasks = [
+                [...doc.querySelectorAll('link[href]')].map(el => [el, 'href']),
+                [...doc.querySelectorAll('[src]')].map(el => [el, 'src']),
+                [...doc.querySelectorAll('[poster]')].map(el => [el, 'poster']),
+                [...doc.querySelectorAll('object[data]')].map(el => [el, 'data']),
+            ].flat()
+            await mapBounded(attrTasks, ([el, attr]) => replace(el, attr))
+            await mapBounded([...doc.querySelectorAll('[*|href]:not([href])')],
+                async el => el.setAttributeNS(NS.XLINK, 'href', await this.loadHref(
+                    el.getAttributeNS(NS.XLINK, 'href'), href, parents)))
+            await mapBounded([...doc.querySelectorAll('[srcset]')],
+                async el => el.setAttribute('srcset', await replaceSeries(el.getAttribute('srcset'),
                     /(\s*)(.+?)\s*((?:\s[\d.]+[wx])+\s*(?:,|$)|,\s+|$)/g,
                     (_, p1, p2, p3) => this.loadHref(p2, href, parents)
-                        .then(p2 => `${p1}${p2}${p3}`)))
+                        .then(p2 => `${p1}${p2}${p3}`))))
             // replace inline styles
-            for (const el of doc.querySelectorAll('style'))
+            await mapBounded([...doc.querySelectorAll('style')], async el => {
                 if (el.textContent) el.textContent =
                     await this.replaceCSS(el.textContent, href, parents)
-            for (const el of doc.querySelectorAll('[style]'))
-                el.setAttribute('style',
-                    await this.replaceCSS(el.getAttribute('style'), href, parents))
+            })
+            await mapBounded([...doc.querySelectorAll('[style]')],
+                async el => el.setAttribute('style',
+                    await this.replaceCSS(el.getAttribute('style'), href, parents)))
             // TODO: replace inline scripts? probably not worth the trouble
             const result = new XMLSerializer().serializeToString(doc)
             return this.createURL(href, result, item.mediaType, parent)
