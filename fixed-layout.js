@@ -245,6 +245,9 @@ export class FixedLayout extends HTMLElement {
     #scrollLocked = false
     // Horizontal offset handed over by #showSpread for the next #render().
     #pannedX = null
+    // Horizontal offset of the vertical scroll strip while the pan lock holds
+    // it (see #syncScrollPanLock); null while the host scrolls on x itself.
+    #lockedPanX = null
     #isOverflowX = false
     #isOverflowY = false
     #preloadCache = new Map()
@@ -315,7 +318,9 @@ export class FixedLayout extends HTMLElement {
         const maxTop = Math.max(0, this.scrollHeight - this.clientHeight)
         const maxLeft = Math.max(0, this.scrollWidth - this.clientWidth)
         this.scrollTop = clamp(this.scrollTop + (rect.top - anchor.top), 0, maxTop)
-        this.scrollLeft = clamp(this.scrollLeft + (rect.left - anchor.left), 0, maxLeft)
+        if (this.#lockedPanX !== null)
+            this.#setLockedPanX(this.#lockedPanX + (rect.left - anchor.left))
+        else this.scrollLeft = clamp(this.scrollLeft + (rect.left - anchor.left), 0, maxLeft)
     }
     #getScrollModePageMetrics() {
         return this.#scrollPages.map(page => ({
@@ -427,6 +432,17 @@ export class FixedLayout extends HTMLElement {
         :host([lock-pan-x]:not([flow="scrolled"][scroll-direction="horizontal"])) .scroll-page {
             touch-action: pan-y;
         }
+        /* iOS ignores touch-action for a swipe that lands while the strip is
+           still coasting from the previous fling, so vertical scroll flow drops
+           the horizontal scroll range altogether: the host stops scrolling on
+           x and the strip is shifted by the offset the reader panned to
+           (#6407). */
+        :host([lock-pan-x][flow="scrolled"]:not([scroll-direction="horizontal"])) {
+            overflow-x: hidden;
+        }
+        :host([lock-pan-x][flow="scrolled"]:not([scroll-direction="horizontal"])) .scroll-container {
+            translate: var(--locked-pan-x, 0px) 0;
+        }
         :host([flow="scrolled"]) .scroll-container {
             display: flex;
             flex-direction: column;
@@ -501,6 +517,7 @@ export class FixedLayout extends HTMLElement {
             }
             case 'lock-pan-x':
                 this.#applyPanLockToFrames()
+                this.#syncScrollPanLock()
                 break
             case 'scroll-direction': {
                 const horizontal = value === 'horizontal'
@@ -531,6 +548,31 @@ export class FixedLayout extends HTMLElement {
     #applyPanLockToFrames() {
         for (const iframe of this.#root.querySelectorAll('iframe'))
             this.#applyPanLock(iframe.contentDocument)
+    }
+    // Hand the horizontal offset between the host's scrollLeft and the strip's
+    // translate as the lock's overflow-x rule turns on or off, so the page
+    // stays where the reader panned it.
+    #syncScrollPanLock() {
+        const locked = !!this.#scrollContainer && !this.#scrollHorizontal
+            && this.hasAttribute('lock-pan-x')
+        if (locked === (this.#lockedPanX !== null)) return
+        if (locked) {
+            this.#setLockedPanX(this.scrollLeft)
+            this.scrollLeft = 0
+        } else {
+            const x = this.#lockedPanX
+            this.#clearLockedPanX()
+            this.scrollLeft = x
+        }
+    }
+    #setLockedPanX(x) {
+        const max = Math.max(0, this.#scrollContainer.offsetWidth - this.clientWidth)
+        this.#lockedPanX = clamp(x, 0, max)
+        this.style.setProperty('--locked-pan-x', `${-this.#lockedPanX}px`)
+    }
+    #clearLockedPanX() {
+        this.#lockedPanX = null
+        this.style.removeProperty('--locked-pan-x')
     }
     async #createFrame({ index, src: srcOption, detached = false }) {
         const srcOptionIsString = typeof srcOption === 'string'
@@ -893,6 +935,7 @@ export class FixedLayout extends HTMLElement {
                 this.#scrollHorizontal ? { inline: 'start', block: 'nearest' } : undefined)
             this.#scrollCurrentIndex = currentIndex
         }
+        this.#syncScrollPanLock()
 
         this.addEventListener('scroll', this.#handleScrollEvent)
         if (this.#scrollHorizontal) {
@@ -1005,6 +1048,7 @@ export class FixedLayout extends HTMLElement {
         }
 
         // Reset scroll position left over from scroll mode
+        this.#clearLockedPanX()
         this.scrollTop = 0
         this.scrollLeft = 0
         // Must run even when navigate is false (axis rebuild): otherwise a
@@ -1211,6 +1255,9 @@ export class FixedLayout extends HTMLElement {
                 this.#renderScrollPage(page)
             }
         }
+        // Clamp the locked offset to the resized strip, as the browser would
+        // clamp scrollLeft.
+        if (this.#lockedPanX !== null) this.#setLockedPanX(this.#lockedPanX)
         if (pinchAnchor) {
             this.#restorePinchAnchor(pinchAnchor)
             this.#pinchAnchor = null
@@ -1844,7 +1891,7 @@ export class FixedLayout extends HTMLElement {
                     ratio,
                     scrollLeft: this.#scrollHorizontal && this.rtl
                         ? this.scrollWidth - this.clientWidth + this.scrollLeft
-                        : this.scrollLeft,
+                        : this.scrollLeft + (this.#lockedPanX ?? 0),
                     scrollTop: this.scrollTop,
                     viewportWidth: this.clientWidth,
                     viewportHeight: this.clientHeight,
