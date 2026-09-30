@@ -1128,6 +1128,15 @@ class View {
                     // the leftover space like Duokan's native full-page render
                     'background-color': '#000',
                 })
+                // a page closer to a 20:9 phone than a 4:3 print cover shows
+                // the book's tall `~slim` variant (readest/readest#6513)
+                const slim = el.getAttribute('data-duokan-slim-src')
+                if (slim) {
+                    if (!el.hasAttribute('data-duokan-src'))
+                        el.setAttribute('data-duokan-src', el.getAttribute('src'))
+                    const src = height / width > 1.7 ? slim : el.getAttribute('data-duokan-src')
+                    if (el.getAttribute('src') !== src) el.setAttribute('src', src)
+                }
                 let ancestor = el.parentElement
                 while (ancestor && ancestor !== doc.body) {
                     setStylesImportant(ancestor, {
@@ -1154,6 +1163,8 @@ class View {
                 for (const prop of ['position', 'inset', 'width', 'height', 'margin', 'background-color']) {
                     el.style.removeProperty(prop)
                 }
+                const original = el.getAttribute('data-duokan-src')
+                if (original) el.setAttribute('src', original)
                 let ancestor = el.parentElement
                 while (ancestor && ancestor !== doc.body) {
                     for (const prop of ['width', 'height', 'margin', 'padding', 'position']) {
