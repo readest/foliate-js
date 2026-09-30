@@ -169,6 +169,18 @@ export const computeSpreadSpineOverlap = ({
     return -1 / (devicePixelRatio || 1)
 }
 
+// Overlap (CSS px) between neighbouring scroll-mode pages, the scroll-flow
+// counterpart of `computeSpreadSpineOverlap` (readest#6484). With a zero gap
+// (Webtoon Mode) each zoomed page is a scaled compositor layer whose edge lands
+// on a fractional device pixel and is anti-aliased against transparency, so the
+// scroll background shows through as a thin line between the images. Pulling
+// every page onto the previous one puts each soft edge over the neighbour's
+// opaque content. It takes two device pixels: at a fractional
+// devicePixelRatio the resampled edge can be soft across two rows. Pages with
+// a gap between them never touch.
+export const computeScrollPageOverlap = ({ gap = 4, devicePixelRatio = 1 } = {}) =>
+    gap === 0 ? 2 / (devicePixelRatio || 1) : 0
+
 // Page columns the reader cell is showing, for the captured page curl
 // (readest#6239). Two means the curl turns just the outer page as a leaf hinged
 // at the spine (readest#6106): the shader reflects that leaf about the cell's
@@ -460,12 +472,18 @@ export class FixedLayout extends HTMLElement {
         :host([flow="scrolled"]) .scroll-page {
             position: relative;
             flex-shrink: 0;
-            overflow: hidden;
             /* Scale the gap with the zoom so the committed layout matches the
                pinch preview, whose transform scales the whole container (gaps
                included). Without this the gap snaps back to a fixed px on
                release and the pages shift. */
             margin: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1)) 0;
+        }
+        /* Webtoon Mode: overlap each page onto the previous one to hide the
+           anti-aliased seam (readest#6484). The pages are not clipped
+           (no overflow: hidden) because the clip of a box on a fractional
+           device pixel is itself anti-aliased and reopens the seam. */
+        :host([flow="scrolled"]) .scroll-page + .scroll-page {
+            margin-top: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1) - var(--scroll-page-overlap, 0px));
         }
         :host([flow="scrolled"]) .scroll-page iframe {
             pointer-events: none;
@@ -477,6 +495,9 @@ export class FixedLayout extends HTMLElement {
         }
         :host([flow="scrolled"][scroll-direction="horizontal"]) .scroll-page {
             margin: 0 calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1));
+        }
+        :host([flow="scrolled"][scroll-direction="horizontal"]) .scroll-page + .scroll-page {
+            margin-inline-start: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1) - var(--scroll-page-overlap, 0px));
         }`)
 
         this.#observer.observe(this)
@@ -512,6 +533,7 @@ export class FixedLayout extends HTMLElement {
                 const anchor = this.#scrollMode ? this.#captureScrollModeAnchor() : null
                 if (css === null) this.style.removeProperty('--scroll-page-gap')
                 else this.style.setProperty('--scroll-page-gap', css)
+                this.#updateScrollPageOverlap()
                 if (anchor) this.#restoreScrollModeAnchor(anchor)
                 break
             }
@@ -1240,6 +1262,7 @@ export class FixedLayout extends HTMLElement {
         // Scale the inter-page gap with the zoom so the committed layout matches
         // the pinch preview (which scales the whole container, gaps included).
         this.style.setProperty('--scroll-zoom', String(this.#scaleFactor))
+        this.#updateScrollPageOverlap()
         // A pinch commit restores the viewport-centre anchor (both axes) so the
         // zoom lands exactly where the live preview showed it; every other
         // re-render keeps the reader's vertical position via the top anchor.
@@ -1264,6 +1287,13 @@ export class FixedLayout extends HTMLElement {
         } else {
             this.#restoreScrollModeAnchor(scrollAnchor)
         }
+    }
+    #updateScrollPageOverlap() {
+        const overlap = computeScrollPageOverlap({
+            gap: parseFloat(this.getAttribute('scroll-gap')),
+            devicePixelRatio: window.devicePixelRatio || 1,
+        })
+        this.style.setProperty('--scroll-page-overlap', `${overlap}px`)
     }
     #renderScrollPage(pageData) {
         const { width: hostWidth, height: hostHeight } = this.getBoundingClientRect()
