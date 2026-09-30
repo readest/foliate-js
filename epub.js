@@ -1130,6 +1130,15 @@ class Loader {
                     child = child.nextSibling
                 }
             }
+            // Duokan packs a taller `~slim` variant beside an image
+            // (`cover~slim.jpg` next to `cover.jpg`) for tall phone screens;
+            // expose it so the paginator can swap it in for a full-page cover
+            // (readest/readest#6513)
+            await mapBounded([...doc.querySelectorAll('img[src]')], async el => {
+                const slim = el.getAttribute('src').replace(/(\.\w+)$/, '~slim$1')
+                const url = await this.loadHref(slim, href, parents)
+                if (url !== slim) el.setAttribute('data-duokan-slim-src', url)
+            })
             // replace hrefs (excluding anchors)
             const replace = async (el, attr) => el.setAttribute(attr,
                 await this.loadHref(el.getAttribute(attr), href, parents))
