@@ -1,4 +1,8 @@
 const pdfjsPath = path => `/vendor/pdfjs/${path}`
+// The worker fetches decoder data itself and resolves a relative URL against its
+// own script, which is a blob: URL when Readest wraps the worker; the JBIG2/CCITT
+// decoder then fails to load and every scanned page renders blank.
+const pdfjsURL = path => new URL(pdfjsPath(path), location.href).href
 
 let pdfjsLib
 let pdfjsLibPromise
@@ -348,6 +352,13 @@ const MAX_RENDER_DPR = 2
 // Hard ceiling on a single page's bitmap area (~3.1 Mpx ≈ 12.6 MB) so a large
 // tablet page can't blow the budget even after the dpr clamp.
 const MAX_CANVAS_PIXELS = 2048 * 1536
+// Ceiling on a decoded image (4 bytes per pixel), a few times the page budget so
+// zooming still has detail. Scanned scores carry 1-bit ~9000x12000 px pages that
+// pdf.js would otherwise decode to ~430 MB bitmaps; iOS holds those in the WebKit
+// GPU process, which jetsam kills past ~300 MB until WebKit gives up on the page
+// and the reader reloads (readest #6521). pdf.js downscales anything larger, and
+// Readest's worker hook does so without the full-size intermediate bitmap.
+const MAX_IMAGE_BYTES = 4 * MAX_CANVAS_PIXELS * 4
 
 // Only mobile WebViews get that budget. Desktop browsers have no per-process
 // memory ceiling, and a page fitted to a desktop window is several times the
@@ -652,10 +663,16 @@ export const makePDF = async file => {
     }
     const loadingTask = pdfjsLib.getDocument({
         range: transport,
-        wasmUrl: pdfjsPath(''),
-        cMapUrl: pdfjsPath('cmaps/'),
-        standardFontDataUrl: pdfjsPath('standard_fonts/'),
+        wasmUrl: pdfjsURL(''),
+        cMapUrl: pdfjsURL('cmaps/'),
+        standardFontDataUrl: pdfjsURL('standard_fonts/'),
         isEvalSupported: false,
+        // Readest's worker hook shrinks those images as it decodes them. It runs
+        // in a blob: worker, which on iOS can't fetch tauri:// URLs, so the page
+        // fetches the decoder data (JBIG2/CCITT wasm, CMaps, fonts) for it.
+        ...(isMobileWebView()
+            ? { canvasMaxAreaInBytes: MAX_IMAGE_BYTES, useWorkerFetch: false }
+            : {}),
     })
     const pdf = await loadingTask.promise
 
