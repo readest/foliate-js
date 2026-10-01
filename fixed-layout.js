@@ -5,7 +5,23 @@ const parseViewport = str => str
     ?.filter(x => x)
     ?.map(x => x.split('=').map(x => x.trim()))
 
-export const getViewport = (doc, viewport) => {
+// A bitmap spine item is loaded as the browser's own image document, whose
+// synthetic meta (`width=device-width, minimum-scale=0.1`) has no page size,
+// and some comic converters write `width=(None, None), height=(None, None)`;
+// only a numeric width and height describe a fixed page
+const getPageSize = str => {
+    const props = Object.fromEntries(parseViewport(str) ?? [])
+    if (parseFloat(props.width) > 0 && parseFloat(props.height) > 0) return props
+}
+
+const getImageSize = async src => {
+    const img = new Image()
+    img.src = src
+    await img.decode().catch(() => {})
+    return { width: img.naturalWidth, height: img.naturalHeight }
+}
+
+export const getViewport = async (doc, viewport) => {
     // use `viewBox` for SVG
     if (doc.documentElement.localName === 'svg') {
         const [, , width, height] = doc.documentElement
@@ -14,23 +30,28 @@ export const getViewport = (doc, viewport) => {
     }
 
     // get `viewport` `meta` element
-    const meta = parseViewport(doc.querySelector('meta[name="viewport"]')
+    const meta = getPageSize(doc.querySelector('meta[name="viewport"]')
         ?.getAttribute('content'))
-    if (meta) {
-        const props = Object.fromEntries(meta)
-        // A bitmap spine item is loaded as the browser's own image document,
-        // whose synthetic meta (`width=device-width, minimum-scale=0.1`) has no
-        // page size; only a numeric width and height describe a fixed page
-        if (parseFloat(props.width) > 0 && parseFloat(props.height) > 0) return props
-    }
+    if (meta) return meta
 
     // fallback to book's viewport
-    if (typeof viewport === 'string') return parseViewport(viewport)
-    if (viewport?.width && viewport.height) return viewport
+    if (typeof viewport === 'string') {
+        const size = getPageSize(viewport)
+        if (size) return size
+    } else if (viewport?.width && viewport.height) return viewport
 
     // if no viewport (possibly with image directly in spine), get image size
     const img = doc.querySelector('img')
     if (img) return { width: img.naturalWidth, height: img.naturalHeight }
+
+    // an SVG <image> without width and height is laid out at the image's own
+    // size, which is not known yet when the document's load event fires
+    const image = doc.querySelector('svg image')
+    const src = image?.getAttribute('href') ?? image?.getAttribute('xlink:href')
+    if (src) {
+        const { width, height } = await getImageSize(src)
+        if (width > 0 && height > 0) return { width, height }
+    }
 
     // just show *something*, i guess...
     console.warn(new Error('Missing viewport properties'))
@@ -628,12 +649,12 @@ export class FixedLayout extends HTMLElement {
 
         if (!src) return { blank: true, element, iframe }
         return new Promise(resolve => {
-            iframe.addEventListener('load', () => {
+            iframe.addEventListener('load', async () => {
                 const doc = iframe.contentDocument
                 this.#applyPanLock(doc)
                 iframe.dataset.sectionIndex = index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
-                const { width, height } = getViewport(doc, this.defaultViewport)
+                const { width, height } = await getViewport(doc, this.defaultViewport)
                 resolve({
                     element, iframe,
                     width: parseFloat(width),
@@ -1122,12 +1143,12 @@ export class FixedLayout extends HTMLElement {
 
         if (!src) return { blank: true, element, iframe }
         return new Promise(resolve => {
-            iframe.addEventListener('load', () => {
+            iframe.addEventListener('load', async () => {
                 const doc = iframe.contentDocument
                 this.#applyPanLock(doc)
                 iframe.dataset.sectionIndex = pageData.index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index: pageData.index } }))
-                const { width, height } = getViewport(doc, this.defaultViewport)
+                const { width, height } = await getViewport(doc, this.defaultViewport)
                 resolve({
                     element, iframe,
                     width: parseFloat(width),
