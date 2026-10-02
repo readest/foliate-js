@@ -692,20 +692,23 @@ export class FixedLayout extends HTMLElement {
         this.#portrait = portrait
         const blankWidth = left.width ?? right.width ?? 0
         const blankHeight = left.height ?? right.height ?? 0
+        // Fit to the client box: a page taller than the view gets a classic
+        // scrollbar, which takes its room from the border box.
+        const { clientWidth, clientHeight } = this
 
         let scale = typeof this.#zoom === 'number' && !isNaN(this.#zoom)
             ? this.#zoom
             : (this.#zoom === 'fit-width'
                 ? (portrait || this.#center
-                    ? width / (target.width ?? blankWidth)
-                    : width / ((left.width ?? blankWidth) + (right.width ?? blankWidth)))
+                    ? clientWidth / (target.width ?? blankWidth)
+                    : clientWidth / ((left.width ?? blankWidth) + (right.width ?? blankWidth)))
                 : (portrait || this.#center
                     ? Math.min(
-                        width / (target.width ?? blankWidth),
-                        height / (target.height ?? blankHeight))
+                        clientWidth / (target.width ?? blankWidth),
+                        clientHeight / (target.height ?? blankHeight))
                     : Math.min(
-                        width / ((left.width ?? blankWidth) + (right.width ?? blankWidth)),
-                        height / Math.max(
+                        clientWidth / ((left.width ?? blankWidth) + (right.width ?? blankWidth)),
+                        clientHeight / Math.max(
                             left.height ?? blankHeight,
                             right.height ?? blankHeight)))
             ) || 1
@@ -1278,7 +1281,9 @@ export class FixedLayout extends HTMLElement {
         pageData.state = 'idle'
     }
     #renderScrollMode() {
-        const { width: hostWidth, height: hostHeight } = this.getBoundingClientRect()
+        // Fit pages to the client box: a classic scrollbar along the strip takes
+        // room from the border box, and pages that fill it overflow sideways.
+        const { clientWidth: hostWidth, clientHeight: hostHeight } = this
         if (!(this.#scrollHorizontal ? hostHeight : hostWidth)) return
         // Scale the inter-page gap with the zoom so the committed layout matches
         // the pinch preview (which scales the whole container, gaps included).
@@ -1317,7 +1322,7 @@ export class FixedLayout extends HTMLElement {
         this.style.setProperty('--scroll-page-overlap', `${overlap}px`)
     }
     #renderScrollPage(pageData) {
-        const { width: hostWidth, height: hostHeight } = this.getBoundingClientRect()
+        const { clientWidth: hostWidth, clientHeight: hostHeight } = this
         if (!(this.#scrollHorizontal ? hostHeight : hostWidth) || !pageData.frame) return
         const { vpWidth: vw, vpHeight: vh, frame } = pageData
         const scale = this.#scrollHorizontal
