@@ -964,6 +964,24 @@ export const makePDF = async file => {
     }
     book.getTOCFragment = doc => doc.documentElement
     book.getCover = async () => renderPage(await pdf.getPage(1), true)
+    // Render a page to a small JPEG for thumbnail previews, with its longer
+    // edge scaled to `maxSize` pixels.
+    book.getPageThumbnail = async (index, maxSize) => {
+        const page = await pdf.getPage(index + 1)
+        const { width, height } = page.getViewport({ scale: 1 })
+        const viewport = page.getViewport({ scale: maxSize / Math.max(width, height) })
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.ceil(viewport.width)
+        canvas.height = Math.ceil(viewport.height)
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
+        // pdf.js shares page objects, so leave pages the reader holds alone
+        if (!pageCache.has(index)) page.cleanup()
+        return new Promise(resolve => canvas.toBlob(blob => {
+            canvas.width = 0
+            canvas.height = 0
+            resolve(blob)
+        }, 'image/jpeg', 0.8))
+    }
     book.destroy = () => {
         // Clean up all cached canvases and revoke blob URLs
         for (const [, entry] of cache) {
