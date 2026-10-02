@@ -973,9 +973,16 @@ export const makePDF = async file => {
         const canvas = document.createElement('canvas')
         canvas.width = Math.ceil(viewport.width)
         canvas.height = Math.ceil(viewport.height)
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
-        // pdf.js shares page objects, so leave pages the reader holds alone
-        if (!pageCache.has(index)) page.cleanup()
+        try {
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
+        } catch (e) {
+            canvas.width = 0
+            canvas.height = 0
+            throw e
+        } finally {
+            // pdf.js shares page objects, so leave pages the reader holds alone
+            if (!pageCache.has(index)) page.cleanup()
+        }
         return new Promise(resolve => canvas.toBlob(blob => {
             canvas.width = 0
             canvas.height = 0
