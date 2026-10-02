@@ -563,6 +563,22 @@ const applyPageColors = (canvas, matrix, imageRects) => {
     ctx.restore()
 }
 
+// Render one region of a page on its own, without page colors.
+const renderRegion = async (page, scale, [x0, y0, x1, y1]) => {
+    const x = Math.floor(x0)
+    const y = Math.floor(y0)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.ceil(x1) - x
+    canvas.height = Math.ceil(y1) - y
+    const viewport = page.getViewport({ scale, offsetX: -x, offsetY: -y })
+    try {
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
+        return await new Promise(resolve => canvas.toBlob(resolve))
+    } finally {
+        canvas.width = canvas.height = 0
+    }
+}
+
 // The operator list pdf.js is rendering for `renderTask`. PDFPageProxy keeps no
 // public handle on it, but it stays reachable through the page's intent states.
 const getRenderOperatorList = (page, renderTask) => {
@@ -640,8 +656,7 @@ const render = async (page, doc, zoom, pageColors) => {
     const renderTask = page.render({ canvasContext, viewport: renderViewport })
     activeRenderTasks.set(doc, renderTask)
     const colorMatrix = pageColors && getPageColorMatrix(pageColors)
-    const operatorList = colorMatrix && pageColors.keepImages
-        ? getRenderOperatorList(page, renderTask) : null
+    const operatorList = getRenderOperatorList(page, renderTask)
 
     try {
         await renderTask.promise
@@ -657,8 +672,8 @@ const render = async (page, doc, zoom, pageColors) => {
         }
     }
 
-    if (colorMatrix) applyPageColors(canvas, colorMatrix,
-        operatorList ? getImageRects(operatorList, renderViewport.transform) : [])
+    const imageRects = operatorList ? getImageRects(operatorList, renderViewport.transform) : []
+    if (colorMatrix) applyPageColors(canvas, colorMatrix, pageColors.keepImages ? imageRects : [])
 
     // Bail out if a newer render has started or iframe was removed
     if (renderGenerations.get(doc) !== generation || !doc.defaultView) {
@@ -683,6 +698,16 @@ const render = async (page, doc, zoom, pageColors) => {
         oldCanvas.height = 0
     }
     canvasElement.replaceChildren(doc.adoptNode(canvas))
+
+    // The page is one canvas under a text layer that covers all of it, so
+    // nothing marks where its images are. Let the reader find the one under a
+    // point and render it on its own to copy or save (readest #6558).
+    doc.getImageAt = (x, y) => {
+        const [dx, dy] = [x * renderDpr, y * renderDpr]
+        const rect = [...imageRects].reverse()
+            .find(([x0, y0, x1, y1]) => dx >= x0 && dx < x1 && dy >= y0 && dy < y1)
+        return rect ? () => renderRegion(page, renderScale, rect) : null
+    }
 
     // Clear text layer before re-rendering to prevent DOM accumulation
     const container = doc.querySelector('.textLayer')
