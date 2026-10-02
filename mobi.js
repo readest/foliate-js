@@ -675,6 +675,17 @@ function rawBytesToString(uint8Array) {
     return result
 }
 
+// MOBI6 image records carry no MIME type, so tell the format by its signature;
+// an untyped blob is saved as text by the webview (readest #6562).
+const getImageType = raw => {
+    const b = ArrayBuffer.isView(raw) ? raw : new Uint8Array(raw)
+    if (b[0] === 0xff && b[1] === 0xd8) return 'image/jpeg'
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png'
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif'
+    if (b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp'
+    return ''
+}
+
 class MOBI6 {
     parser = new DOMParser()
     serializer = new XMLSerializer()
@@ -796,7 +807,7 @@ class MOBI6 {
     async loadResource(index) {
         if (this.#resourceCache.has(index)) return this.#resourceCache.get(index)
         const raw = await this.mobi.loadResource(index)
-        const url = URL.createObjectURL(new Blob([raw]))
+        const url = URL.createObjectURL(new Blob([raw], { type: getImageType(raw) }))
         this.#resourceCache.set(index, url)
         return url
     }
@@ -1106,7 +1117,7 @@ class KF8 {
         const newData = await event.detail.data
         const newType = await event.detail.type
         const doc = newType === MIME.SVG ? this.parser.parseFromString(newData, newType) : null
-        return [new Blob([newData], { newType }),
+        return [new Blob([newData], { type: newType }),
             // SVG wrappers need to be inlined
             // as browsers don't allow external resources when loading SVG as an image
             doc?.getElementsByTagNameNS('http://www.w3.org/2000/svg', 'image')?.length
