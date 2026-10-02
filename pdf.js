@@ -232,6 +232,7 @@ export const setupPanningEvents = (doc) => {
     let scrollLeft = 0
     let scrollTop = 0
     let scrollParent = null
+    let isPointerSelecting = false
 
     const findScrollableParent = (element) => {
         let current = element
@@ -284,6 +285,7 @@ export const setupPanningEvents = (doc) => {
                 container.style.cursor = 'grabbing'
             }
         } else {
+            isPointerSelecting = true
             container.classList.add('selecting')
         }
     }
@@ -310,13 +312,59 @@ export const setupPanningEvents = (doc) => {
         }
     }
 
+    // A selection point in a gap between text spans hit-tests the bare text
+    // layer and snaps to the end of the page. `selecting` spreads
+    // `.endOfContent` over the gaps, and it is moved right next to the end of
+    // the selection that is moving, so a point on it holds the selection where
+    // it is (pdf.js's text_layer_builder does the same). Keep this for as long
+    // as there is a selection, not just while a pointer is down on the layer:
+    // Android drags its native selection handles without sending any pointer
+    // event to the page, and Chromium 148+ only spares mouse drags the jump.
+    let prevRange = null
+    const syncSelecting = () => {
+        const selection = doc.getSelection()
+        const active = isPointerSelecting || (!!selection && !selection.isCollapsed)
+        container.classList.toggle('selecting', active)
+        const end = container.querySelector('.endOfContent')
+        if (!end) return
+        if (!active || !selection?.rangeCount) {
+            prevRange = null
+            end.style.userSelect = ''
+            if (container.lastChild !== end) container.append(end)
+            return
+        }
+        const range = selection.getRangeAt(0)
+        const modifyStart = prevRange
+            && (range.compareBoundaryPoints(Range.END_TO_END, prevRange) === 0
+                || range.compareBoundaryPoints(Range.START_TO_END, prevRange) === 0)
+        let anchor = modifyStart ? range.startContainer : range.endContainer
+        if (anchor.nodeType === Node.TEXT_NODE) anchor = anchor.parentNode
+        // An end at the very start of a node belongs to the text before it.
+        if (!modifyStart && range.endOffset === 0) {
+            do {
+                while (anchor && anchor !== container && !anchor.previousSibling)
+                    anchor = anchor.parentNode
+                anchor = anchor === container ? null : anchor?.previousSibling
+            } while (anchor && !anchor.childNodes.length)
+        }
+        if (!anchor || anchor === end || anchor === container || !container.contains(anchor)) return
+        prevRange = range.cloneRange()
+        end.setAttribute('cfi-inert', '')
+        end.style.userSelect = 'text'
+        // Moving it is a DOM mutation of its own; skip one that changes nothing.
+        if (modifyStart ? end.nextSibling === anchor : end.previousSibling === anchor) return
+        anchor.parentNode.insertBefore(end, modifyStart ? anchor : anchor.nextSibling)
+    }
+    doc.addEventListener('selectionchange', syncSelecting)
+
     container.onpointerup = () => {
         if (isPanning) {
             isPanning = false
             scrollParent = null
             container.style.cursor = 'grab'
         } else {
-            container.classList.remove('selecting')
+            isPointerSelecting = false
+            syncSelecting()
         }
     }
 
