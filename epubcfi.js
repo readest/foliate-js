@@ -299,11 +299,27 @@ const nodeToParts = (node, offset, filter) => {
         .filter(x => x.index !== -1)
 }
 
+// nodeToParts keeps an offset only for text, so a boundary between an
+// element's children, (element, i), is written as the element and read back
+// as its start. As a range's end that drops everything before it: a selection
+// dragged past the last line of a PDF text layer ends after the layer's last
+// child and came back collapsed (readest/readest#6578). Move such an end into
+// the child before it.
+const endInsideChild = (node, offset) => {
+    while (isElementNode(node) && offset > 0) {
+        const child = node.childNodes[offset - 1]
+        if (!(isTextNode(child) || isElementNode(child)) || isInertNode(child)) break
+        node = child
+        offset = isTextNode(child) ? child.nodeValue.length : child.childNodes.length
+    }
+    return [node, offset]
+}
+
 export const fromRange = (range, filter) => {
-    const { startContainer, startOffset, endContainer, endOffset } = range
+    const { startContainer, startOffset } = range
     const start = nodeToParts(startContainer, startOffset, filter)
     if (range.collapsed) return toString([start])
-    const end = nodeToParts(endContainer, endOffset, filter)
+    const end = nodeToParts(...endInsideChild(range.endContainer, range.endOffset), filter)
     return buildRange([start], [end])
 }
 
