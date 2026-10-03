@@ -98,6 +98,19 @@ export const getExtractMapping = range => {
     }
 }
 
+// Move a note into the popup body. The element the note is extracted from
+// goes with it, and books often set the note's font on exactly that element
+// (e.g. `li.duokan-footnote-item { font-family: ... }`), so carry it over
+export const extractToBody = (doc, range) => {
+    const container = range.commonAncestorContainer
+    const el = container.nodeType === 1 ? container : container.parentElement
+    const { fontFamily } = doc.defaultView.getComputedStyle(el)
+    const frag = range.extractContents()
+    doc.body.replaceChildren()
+    doc.body.appendChild(frag)
+    doc.body.style.fontFamily = fontFamily
+}
+
 export class FootnoteHandler extends EventTarget {
     detectFootnotes = true
     #showFragment(book, { index, anchor, check }, href) {
@@ -163,9 +176,7 @@ export class FootnoteHandler extends EventTarget {
                             }
                         }
                         extract = getExtractMapping(range)
-                        const frag = range.extractContents()
-                        doc.body.replaceChildren()
-                        doc.body.appendChild(frag)
+                        extractToBody(doc, range)
                     } else {
                         // no anchor: the popup shows the whole pristine
                         // section, so the mapping is the identity over body
