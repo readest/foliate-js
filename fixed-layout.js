@@ -281,6 +281,8 @@ export class FixedLayout extends HTMLElement {
     // Horizontal offset of the vertical scroll strip while the pan lock holds
     // it (see #syncScrollPanLock); null while the host scrolls on x itself.
     #lockedPanX = null
+    // Pan handed in through `panX` before there was a page to apply it to.
+    #pendingPanX = null
     #isOverflowX = false
     #isOverflowY = false
     #preloadCache = new Map()
@@ -602,11 +604,44 @@ export class FixedLayout extends HTMLElement {
         if (locked) {
             this.#setLockedPanX(this.scrollLeft)
             this.scrollLeft = 0
+            this.#applyPendingPanX()
         } else {
             const x = this.#lockedPanX
             this.#clearLockedPanX()
             this.scrollLeft = x
         }
+    }
+    // Horizontal pan as a fraction of the page's horizontal overflow (0 = left
+    // edge, 1 = right edge), so the reader can store where a zoomed page was
+    // panned under the lock and restore it when the book is reopened. null when
+    // nothing overflows sideways, or in horizontal scroll flow, where x is the
+    // reading axis. Setting it before the first page renders defers it until
+    // there is one.
+    get panX() {
+        if (this.#scrollMode && this.#scrollHorizontal) return null
+        const max = this.#maxPanX()
+        if (!(max > 0)) return null
+        return (this.#lockedPanX ?? this.scrollLeft) / max
+    }
+    set panX(fraction) {
+        this.#pendingPanX = fraction
+        this.#applyPendingPanX()
+    }
+    #maxPanX() {
+        const width = this.#lockedPanX !== null
+            ? this.#scrollContainer.offsetWidth : this.scrollWidth
+        return width - this.clientWidth
+    }
+    #applyPendingPanX() {
+        if (this.#pendingPanX === null) return
+        if (this.#scrollMode ? !this.#scrollContainer?.offsetWidth : !this.#side) return
+        const fraction = this.#pendingPanX
+        this.#pendingPanX = null
+        if (this.#scrollMode && this.#scrollHorizontal) return
+        const max = this.#maxPanX()
+        if (!(max > 0)) return
+        if (this.#lockedPanX !== null) this.#setLockedPanX(fraction * max)
+        else this.scrollLeft = fraction * max
     }
     #setLockedPanX(x) {
         const max = Math.max(0, this.#scrollContainer.offsetWidth - this.clientWidth)
@@ -852,6 +887,7 @@ export class FixedLayout extends HTMLElement {
             }
             this.#pinchAnchor = null
         }
+        this.#applyPendingPanX()
         return renderPromises
     }
     async #showSpread({ left, right, center, side, spreadIndex }) {
@@ -1307,6 +1343,7 @@ export class FixedLayout extends HTMLElement {
         // Clamp the locked offset to the resized strip, as the browser would
         // clamp scrollLeft.
         if (this.#lockedPanX !== null) this.#setLockedPanX(this.#lockedPanX)
+        this.#applyPendingPanX()
         if (pinchAnchor) {
             this.#restorePinchAnchor(pinchAnchor)
             this.#pinchAnchor = null
