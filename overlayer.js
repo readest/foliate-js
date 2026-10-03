@@ -13,6 +13,41 @@ const pageOf = (root, { left, top, right, bottom }) => {
     return { left: x, top: y, right: x + root.width, bottom: y + root.height }
 }
 
+// An OCR text layer (scanned PDFs) boxes every word on its own, each a little
+// off its neighbours, so a highlight drew a box per word, with gaps and
+// stepped edges between them (readest/readest#6578). Fold consecutive rects
+// of a line into one strip: a rect joins the line when it overlaps it across
+// the line and sits close along it. A comma or a note number joins however
+// small it is; a rect over twice the line's size, like a tall inline image,
+// starts its own, and so does the far cell of a table row.
+const mergeLineRects = (rects, vertical) => {
+    const [start, end, crossStart, crossEnd] = vertical
+        ? ['top', 'bottom', 'left', 'right'] : ['left', 'right', 'top', 'bottom']
+    const size = r => Math.max(r[crossEnd] - r[crossStart], 1)
+    const merged = []
+    for (const rect of rects) {
+        const line = merged[merged.length - 1]
+        let sameLine = false
+        if (line && line.page?.left === rect.page?.left && line.page?.top === rect.page?.top) {
+            const big = Math.max(size(line), size(rect))
+            const gap = Math.max(line[start], rect[start]) - Math.min(line[end], rect[end])
+            sameLine = size(rect) < 2 * size(line) && gap > -big && gap < 2 * big
+                && Math.min(line[crossEnd], rect[crossEnd]) > Math.max(line[crossStart], rect[crossStart])
+        }
+        if (!sameLine) {
+            merged.push({ ...rect })
+            continue
+        }
+        line.left = Math.min(line.left, rect.left)
+        line.top = Math.min(line.top, rect.top)
+        line.right = Math.max(line.right, rect.right)
+        line.bottom = Math.max(line.bottom, rect.bottom)
+        line.width = line.right - line.left
+        line.height = line.bottom - line.top
+    }
+    return merged
+}
+
 export class Overlayer {
     #svg = createSVGElement('svg')
     #map = new Map()
@@ -277,9 +312,10 @@ export class Overlayer {
         g.style.opacity = 'var(--overlayer-highlight-opacity, .3)'
         g.style.mixBlendMode = 'var(--overlayer-highlight-blend-mode, normal)'
 
-        for (const [index, { left, top, height, width, page }] of rects.entries()) {
+        const lines = mergeLineRects(rects, vertical)
+        for (const [index, { left, top, height, width, page }] of lines.entries()) {
             const isFirst = index === 0
-            const isLast = index === rects.length - 1
+            const isLast = index === lines.length - 1
 
             let x, y, w, h
 
