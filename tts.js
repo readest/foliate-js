@@ -21,6 +21,12 @@ const getAlphabet = el => {
     return x ? x : el.parentElement ? getAlphabet(el.parentElement) : null
 }
 
+// A segment ending in one of these is merged into the next instead of ending a
+// sentence: titles, an initial or dotted capitals (J. R. R., U.S.), and labels
+// that precede a number. Only abbreviations that come before a capital or a
+// digit need listing; the segmenter never breaks before a lowercase word.
+const endsWithAbbreviation = /[\s.](?:Mrs?|Ms|Dr|Prof|Rev|St|Mt|Jr|Sr|No|Vol|Ch|Fig|pp?|[A-Z])\.\s*$/
+
 const getSegmenter = (lang, granularity = 'word') => {
     const segmenter = new Intl.Segmenter(lang || undefined, { granularity })
     const granularityIsWord = granularity === 'word'
@@ -34,7 +40,7 @@ const getSegmenter = (lang, granularity = 'word') => {
         for (let i = 0, j = 0; i < rawSegments.length; i++) {
             const current = rawSegments[i]
             const segment = ' ' + current.segment
-            const endsWithAbbr = /\s([A-Z]{1,2}[a-z]{0,5}|[a-z]{1,3})\.\s*$/.test(segment)
+            const endsWithAbbr = endsWithAbbreviation.test(segment)
             if (!endsWithAbbr || i >= (rawSegments.length-1)) {
                 const mergedSegment = {
                     index: rawSegments[j].index,
