@@ -880,11 +880,14 @@ class Resources {
                 href: resolveHref(href),
             }))
 
+        const coverMeta = $$$(opf, 'meta')
+            .find(filterAttribute('name', 'cover'))
+            ?.getAttribute('content')
         this.cover = this.getItemByProperty('cover-image')
-            // EPUB 2 compat
-            ?? this.getItemByID($$$(opf, 'meta')
-                .find(filterAttribute('name', 'cover'))
-                ?.getAttribute('content'))
+            // EPUB 2 compat; some producers put the image's href in `content`
+            // instead of its manifest id
+            ?? this.getItemByID(coverMeta)
+            ?? (coverMeta ? this.getItemByHref(resolveHref(coverMeta)) : null)
             ?? this.manifest.find(item => item.id === 'cover'
                 && item.mediaType.startsWith('image'))
             ?? this.manifest.find(item => item.href.includes('cover')
