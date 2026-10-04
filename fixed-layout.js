@@ -91,9 +91,39 @@ export const scrollGapToCss = (value) => {
     return Number.isFinite(n) && n >= 0 ? `${n}px` : null
 }
 
+// Where each scroll-mode page sits along the strip. Only the pages near the
+// viewport are in the DOM: one placeholder per page made every frame cost time
+// in proportion to the page count on WebKit, and a 2752-page PDF scrolled at a
+// few frames a second on iOS. The offsets are computed instead, the way a flex
+// column lays them out: a `gap` margin on both sides of every page, each page
+// after the first pulled `overlap` onto the one before it.
+export const layoutScrollPages = ({ sizes, gap, overlap }) => {
+    const starts = []
+    let pos = gap
+    for (const size of sizes) {
+        starts.push(pos)
+        pos += size + 2 * gap - overlap
+    }
+    return { starts, sizes, total: sizes.length ? pos - gap + overlap : 0 }
+}
+
+// Indices [from, to) of the pages overlapping the span [lo, hi) of the strip.
+export const findScrollPageRange = ({ starts, sizes }, lo, hi) => {
+    const first = test => {
+        let a = 0, b = starts.length
+        while (a < b) {
+            const mid = (a + b) >> 1
+            if (test(mid)) b = mid
+            else a = mid + 1
+        }
+        return a
+    }
+    return [first(i => starts[i] + sizes[i] > lo), first(i => starts[i] >= hi)]
+}
+
 // Decide which scroll-mode pages to begin loading and which to evict, given the
-// reader's current page and each page's load state. `visible` is set by the
-// IntersectionObserver (true while the page sits within the widened preload
+// reader's current page and each page's load state. `visible` is set by
+// #updateScrollWindow (true while the page sits within the widened preload
 // margin). Visible idle pages closest to the reader load first, bounded by how
 // many loads may run at once; loaded pages farthest from the reader are evicted
 // once over the in-memory cap, but a visible page is never torn out from under
@@ -302,7 +332,10 @@ export class FixedLayout extends HTMLElement {
     #scrollMode = false
     #scrollHorizontal = false
     #scrollPages = []
-    #scrollObserver = null
+    // Pages whose placeholder is in the DOM: the ones near the viewport, plus
+    // any still loading or loaded (detaching an iframe would unload it).
+    #scrollMounted = new Set()
+    #scrollLayout = layoutScrollPages({ sizes: [], gap: 0, overlap: 0 })
     #scrollContainer = null
     #scrollLoadGen = new Map()
     // Live rendered-canvas cap. Each PDF page canvas is sized to the on-screen
@@ -335,7 +368,7 @@ export class FixedLayout extends HTMLElement {
         const c = this.#scrollHorizontal
             ? hostRect.left + this.clientWidth / 2
             : hostRect.top + this.clientHeight / 2
-        for (const page of this.#scrollPages) {
+        for (const page of this.#scrollMounted) {
             const rect = page.el.getBoundingClientRect()
             const lo = this.#scrollHorizontal ? rect.left : rect.top
             const hi = this.#scrollHorizontal ? rect.right : rect.bottom
@@ -347,8 +380,8 @@ export class FixedLayout extends HTMLElement {
     }
     // Scroll so the captured page sits back at its pre-commit on-screen rect.
     #restorePinchAnchor(anchor) {
-        const page = this.#scrollPages.find(p => p.index === anchor.index)
-        if (!page) return
+        const page = this.#scrollPages[anchor.index]
+        if (!this.#scrollMounted.has(page)) return
         const rect = page.el.getBoundingClientRect()
         const maxTop = Math.max(0, this.scrollHeight - this.clientHeight)
         const maxLeft = Math.max(0, this.scrollWidth - this.clientWidth)
@@ -358,10 +391,11 @@ export class FixedLayout extends HTMLElement {
         else this.scrollLeft = clamp(this.scrollLeft + (rect.left - anchor.left), 0, maxLeft)
     }
     #getScrollModePageMetrics() {
+        const { starts, sizes } = this.#scrollLayout
         return this.#scrollPages.map(page => ({
             index: page.index,
-            start: this.#scrollHorizontal ? page.el.offsetLeft : page.el.offsetTop,
-            size: this.#scrollHorizontal ? page.el.offsetWidth : page.el.offsetHeight,
+            start: starts[page.index] ?? 0,
+            size: sizes[page.index] ?? 0,
         }))
     }
     #captureScrollModeAnchor() {
@@ -370,7 +404,7 @@ export class FixedLayout extends HTMLElement {
             ? this.#scrollCurrentIndex : this.#getScrollIndex()
         return captureScrollModeAnchor(
             this.#getScrollModePageMetrics(),
-            this.#scrollContentPos(),
+            this.#scrollProgression(),
             fallbackIndex,
         )
     }
@@ -388,8 +422,8 @@ export class FixedLayout extends HTMLElement {
         // exact spot the animation is already at — and #render()'s mandatory
         // initial ResizeObserver callback can land in the same tick as a page
         // turn requested right after open(), silently freezing it.
-        if (Math.abs(restoredPos - this.#scrollContentPos()) > 0.5) {
-            this.#setScrollContentPos(restoredPos)
+        if (Math.abs(restoredPos - this.#scrollProgression()) > 0.5) {
+            this.#setScrollProgression(restoredPos)
         }
         this.#scrollCurrentIndex = anchor.index
     }
@@ -401,29 +435,16 @@ export class FixedLayout extends HTMLElement {
     #scrollTotalLength() {
         return this.#scrollHorizontal ? this.scrollWidth : this.scrollHeight
     }
-    // Position of the viewport's leading edge in content coordinates (0 = the
-    // content's top/left edge). RTL horizontal scrolls into negative
-    // scrollLeft (direction: rtl container), so shift by the max offset to
-    // stay in the same coordinate space as offsetLeft page metrics.
-    #scrollContentPos() {
-        if (!this.#scrollHorizontal) return this.scrollTop
-        return this.rtl
-            ? this.scrollWidth - this.clientWidth + this.scrollLeft
-            : this.scrollLeft
-    }
-    #setScrollContentPos(pos) {
-        if (!this.#scrollHorizontal) {
-            this.scrollTop = pos
-            return
-        }
-        this.scrollLeft = this.rtl ? pos - (this.scrollWidth - this.clientWidth) : pos
-    }
-    // Distance read from the book start along the reading direction. Equals
-    // content position except for RTL horizontal, where reading starts at the
-    // right edge and progresses into negative scrollLeft.
+    // Distance read from the book start along the reading direction, the
+    // coordinate space of the page layout. RTL horizontal reading starts at
+    // the right edge and progresses into negative scrollLeft.
     #scrollProgression() {
         if (!this.#scrollHorizontal) return this.scrollTop
         return this.rtl ? -this.scrollLeft : this.scrollLeft
+    }
+    #setScrollProgression(pos) {
+        if (!this.#scrollHorizontal) this.scrollTop = pos
+        else this.scrollLeft = this.rtl ? -pos : pos
     }
     constructor() {
         super()
@@ -478,49 +499,36 @@ export class FixedLayout extends HTMLElement {
         :host([lock-pan-x][flow="scrolled"]:not([scroll-direction="horizontal"])) .scroll-container {
             translate: var(--locked-pan-x, 0px) 0;
         }
+        /* Sized by #layoutScrollPages to the whole strip, but at least the
+           viewport so unzoomed pages stay centered. */
         :host([flow="scrolled"]) .scroll-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
+            position: relative;
             min-height: 100%;
-            /* Grow to the widest (zoomed) page so the host can scroll across its
-               full width, but stay at least viewport-wide so unzoomed pages stay
-               centered. Without max-content the centered overflow is unreachable
-               (the flexbox centered-overflow scroll trap). */
-            width: max-content;
             min-width: 100%;
             background-color: var(--scroll-bg-color);
             background-opacity: var(--scroll-bg-opacity);
         }
+        /* Placed along the strip by #placeScrollPage and centered across it.
+           In Webtoon Mode each page overlaps the previous one to hide the
+           anti-aliased seam (readest#6484); later pages come later in the DOM,
+           so they paint on top. The pages are not clipped (no overflow:
+           hidden) because the clip of a box on a fractional device pixel is
+           itself anti-aliased and reopens the seam. */
         :host([flow="scrolled"]) .scroll-page {
-            position: relative;
-            flex-shrink: 0;
-            /* Scale the gap with the zoom so the committed layout matches the
-               pinch preview, whose transform scales the whole container (gaps
-               included). Without this the gap snaps back to a fixed px on
-               release and the pages shift. */
-            margin: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1)) 0;
-        }
-        /* Webtoon Mode: overlap each page onto the previous one to hide the
-           anti-aliased seam (readest#6484). The pages are not clipped
-           (no overflow: hidden) because the clip of a box on a fractional
-           device pixel is itself anti-aliased and reopens the seam. */
-        :host([flow="scrolled"]) .scroll-page + .scroll-page {
-            margin-top: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1) - var(--scroll-page-overlap, 0px));
+            position: absolute;
+            left: 0;
+            right: 0;
+            margin-inline: auto;
         }
         :host([flow="scrolled"]) .scroll-page iframe {
             pointer-events: none;
         }
-        :host([flow="scrolled"][scroll-direction="horizontal"]) .scroll-container {
-            flex-direction: row;
-            height: max-content;
-            min-height: 100%;
-        }
         :host([flow="scrolled"][scroll-direction="horizontal"]) .scroll-page {
-            margin: 0 calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1));
-        }
-        :host([flow="scrolled"][scroll-direction="horizontal"]) .scroll-page + .scroll-page {
-            margin-inline-start: calc(var(--scroll-page-gap, 4px) * var(--scroll-zoom, 1) - var(--scroll-page-overlap, 0px));
+            left: auto;
+            right: auto;
+            top: 0;
+            bottom: 0;
+            margin: auto 0;
         }`)
 
         this.#observer.observe(this)
@@ -551,15 +559,9 @@ export class FixedLayout extends HTMLElement {
                     this.#render()
                 }
                 break
-            case 'scroll-gap': {
-                const css = scrollGapToCss(value)
-                const anchor = this.#scrollMode ? this.#captureScrollModeAnchor() : null
-                if (css === null) this.style.removeProperty('--scroll-page-gap')
-                else this.style.setProperty('--scroll-page-gap', css)
-                this.#updateScrollPageOverlap()
-                if (anchor) this.#restoreScrollModeAnchor(anchor)
+            case 'scroll-gap':
+                if (this.#scrollContainer) this.#renderScrollMode()
                 break
-            }
             case 'lock-pan-x':
                 this.#applyPanLockToFrames()
                 this.#syncScrollPanLock()
@@ -1004,19 +1006,14 @@ export class FixedLayout extends HTMLElement {
             const el = document.createElement('div')
             el.className = 'scroll-page'
             el.dataset.index = i
-            this.#scrollContainer.append(el)
             return { el, index: i, section, state: 'idle', visible: false, frame: null, vpWidth: vw, vpHeight: vh }
         })
 
-        this.#renderScrollMode()
-
-        // Scroll to target position BEFORE setting up the observer
-        // so only pages near the target are observed as intersecting
-        if (currentIndex >= 0 && currentIndex < this.#scrollPages.length) {
-            this.#scrollPages[currentIndex].el.scrollIntoView(
-                this.#scrollHorizontal ? { inline: 'start', block: 'nearest' } : undefined)
+        // The first layout lands on the target page through the fallback of
+        // the scroll anchor, so only the pages around it are mounted.
+        if (currentIndex >= 0 && currentIndex < this.#scrollPages.length)
             this.#scrollCurrentIndex = currentIndex
-        }
+        this.#renderScrollMode()
         this.#syncScrollPanLock()
 
         this.addEventListener('scroll', this.#handleScrollEvent)
@@ -1025,25 +1022,79 @@ export class FixedLayout extends HTMLElement {
             // (no-op) native vertical scroll cannot also fire elastic overscroll.
             this.addEventListener('wheel', this.#handleScrollWheel, { passive: false })
         }
-
-        // Set up IntersectionObserver after scroll position is established.
-        // rootMargin '200%' marks pages within ~2 viewport heights above/below as
-        // visible, giving the ~400 ms-per-page render enough lead time to finish
-        // before the page scrolls into view. The observer only flags visibility;
-        // #scheduleScrollPages decides what to actually load (nearest first,
-        // bounded concurrency) and evict.
-        this.#scrollObserver = new IntersectionObserver(entries => {
-            for (const entry of entries) {
-                const index = parseInt(entry.target.dataset.index)
-                const pageData = this.#scrollPages[index]
-                if (pageData) pageData.visible = entry.isIntersecting
+    }
+    // Mount the pages within ~2 viewports of the viewport and flag them
+    // visible, giving the ~400 ms-per-page render enough lead time to finish
+    // before a page scrolls into view; unmount the rest unless they hold a
+    // frame. #scheduleScrollPages decides what to actually load (nearest
+    // first, bounded concurrency) and evict.
+    #updateScrollWindow() {
+        const view = this.#scrollViewLength()
+        const pos = this.#scrollProgression()
+        const [from, to] = findScrollPageRange(this.#scrollLayout, pos - 2 * view, pos + 3 * view)
+        let changed = false
+        for (const page of this.#scrollMounted) {
+            if (page.index >= from && page.index < to) continue
+            if (page.visible) changed = true
+            page.visible = false
+            if (page.state !== 'loading' && page.state !== 'loaded') {
+                page.el.remove()
+                this.#scrollMounted.delete(page)
             }
-            this.#scheduleScrollPages()
-        }, { root: this, rootMargin: this.#scrollHorizontal ? '0px 200%' : '200% 0px' })
-
-        for (const page of this.#scrollPages) {
-            this.#scrollObserver.observe(page.el)
         }
+        for (let i = from; i < to; i++) {
+            const page = this.#scrollPages[i]
+            if (!page.visible) changed = true
+            page.visible = true
+            if (!this.#scrollMounted.has(page)) this.#mountScrollPage(page)
+        }
+        if (changed) this.#scheduleScrollPages()
+    }
+    // Insert in index order: a later page paints over an earlier one where
+    // they overlap, and readers of `.scroll-page` expect strip order.
+    #mountScrollPage(page) {
+        let next = null
+        for (const other of this.#scrollMounted)
+            if (other.index > page.index && (!next || other.index < next.index)) next = other
+        this.#scrollContainer.insertBefore(page.el, next?.el ?? null)
+        this.#scrollMounted.add(page)
+        this.#placeScrollPage(page)
+    }
+    #placeScrollPage(page) {
+        const scale = this.#scrollPageScale(page)
+        const start = `${this.#scrollLayout.starts[page.index]}px`
+        Object.assign(page.el.style, {
+            width: `${page.vpWidth * scale}px`,
+            height: `${page.vpHeight * scale}px`,
+        })
+        if (this.#scrollHorizontal) page.el.style.insetInlineStart = start
+        else page.el.style.top = start
+    }
+    // Scale fitting a page to the strip's cross axis.
+    #scrollPageScale(page) {
+        return this.#scrollHorizontal
+            ? (this.clientHeight / page.vpHeight) * this.#scaleFactor
+            : (this.clientWidth / page.vpWidth) * this.#scaleFactor
+    }
+    // Recompute where every page sits, size the strip, and move the mounted
+    // pages into place. The gap scales with the zoom so the committed layout
+    // matches the pinch preview, whose transform scales the whole container,
+    // gaps included.
+    #layoutScrollPages() {
+        const horizontal = this.#scrollHorizontal
+        const sizes = this.#scrollPages.map(page =>
+            (horizontal ? page.vpWidth : page.vpHeight) * this.#scrollPageScale(page))
+        const gap = parseFloat(scrollGapToCss(this.getAttribute('scroll-gap')) ?? 4)
+        this.#scrollLayout = layoutScrollPages({
+            sizes,
+            gap: gap * this.#scaleFactor,
+            overlap: computeScrollPageOverlap({ gap, devicePixelRatio: window.devicePixelRatio || 1 }),
+        })
+        const total = `${this.#scrollLayout.total}px`
+        const cross = `${(horizontal ? this.clientHeight : this.clientWidth) * this.#scaleFactor}px`
+        this.#scrollContainer.style.width = horizontal ? total : cross
+        this.#scrollContainer.style.height = horizontal ? cross : total
+        for (const page of this.#scrollMounted) this.#placeScrollPage(page)
     }
     // Load the nearest visible idle pages and evict the farthest off-screen ones,
     // honouring the concurrency and in-memory caps. Re-run whenever visibility or
@@ -1071,6 +1122,7 @@ export class FixedLayout extends HTMLElement {
         // supported in this mode: a gesture spanning two page iframes can't be
         // owned by one document — keeping the iframes interactive is the
         // trade-off for native selection.)
+        this.#updateScrollWindow()
         this.#scrolling = true
         this.#setScrollIframeInteraction(false)
         if (this.#scrollIdleTimer) clearTimeout(this.#scrollIdleTimer)
@@ -1094,7 +1146,7 @@ export class FixedLayout extends HTMLElement {
     }
     #setScrollIframeInteraction(enabled) {
         const value = enabled ? 'auto' : ''
-        for (const page of this.#scrollPages) {
+        for (const page of this.#scrollMounted) {
             if (page.frame?.iframe) {
                 page.frame.iframe.style.pointerEvents = value
             }
@@ -1108,10 +1160,6 @@ export class FixedLayout extends HTMLElement {
             ? this.#scrollCurrentIndex : this.#getScrollIndex()
         this.removeEventListener('scroll', this.#handleScrollEvent)
         this.removeEventListener('wheel', this.#handleScrollWheel)
-        if (this.#scrollObserver) {
-            this.#scrollObserver.disconnect()
-            this.#scrollObserver = null
-        }
         if (this.#scrollIdleTimer) {
             clearTimeout(this.#scrollIdleTimer)
             this.#scrollIdleTimer = null
@@ -1121,6 +1169,7 @@ export class FixedLayout extends HTMLElement {
             this.#teardownScrollPage(page)
         }
         this.#scrollPages = []
+        this.#scrollMounted.clear()
         this.#scrollLoadGen.clear()
         this.#scrollLoadingCount = 0
         this.#scrollCurrentIndex = -1
@@ -1235,12 +1284,15 @@ export class FixedLayout extends HTMLElement {
             pageData.state = 'loaded'
             const scrollAnchor = this.#captureScrollModeAnchor()
             // Update dimensions from actual page viewport
-            if (frame.width && frame.height) {
+            if (frame.width && frame.height && (frame.width !== pageData.vpWidth
+                || frame.height !== pageData.vpHeight)) {
                 pageData.vpWidth = frame.width
                 pageData.vpHeight = frame.height
+                this.#layoutScrollPages()
             }
             this.#renderScrollPage(pageData)
             this.#restoreScrollModeAnchor(scrollAnchor)
+            this.#updateScrollWindow()
 
             // Make the page interactive right away when idle so text selection
             // and taps work without first scrolling. While scrolling, leave it
@@ -1315,27 +1367,20 @@ export class FixedLayout extends HTMLElement {
         }
         pageData.frame = null
         pageData.state = 'idle'
+        if (!pageData.visible && this.#scrollMounted.delete(pageData)) pageData.el.remove()
     }
     #renderScrollMode() {
         // Fit pages to the client box: a classic scrollbar along the strip takes
         // room from the border box, and pages that fill it overflow sideways.
         const { clientWidth: hostWidth, clientHeight: hostHeight } = this
-        if (!(this.#scrollHorizontal ? hostHeight : hostWidth)) return
-        // Scale the inter-page gap with the zoom so the committed layout matches
-        // the pinch preview (which scales the whole container, gaps included).
-        this.style.setProperty('--scroll-zoom', String(this.#scaleFactor))
-        this.#updateScrollPageOverlap()
+        if (!this.#scrollContainer || !(this.#scrollHorizontal ? hostHeight : hostWidth)) return
         // A pinch commit restores the viewport-centre anchor (both axes) so the
         // zoom lands exactly where the live preview showed it; every other
         // re-render keeps the reader's vertical position via the top anchor.
         const pinchAnchor = this.#pinchAnchor
         const scrollAnchor = pinchAnchor ? null : this.#captureScrollModeAnchor()
-        for (const page of this.#scrollPages) {
-            const scale = this.#scrollHorizontal
-                ? (hostHeight / page.vpHeight) * this.#scaleFactor
-                : (hostWidth / page.vpWidth) * this.#scaleFactor
-            page.el.style.width = `${page.vpWidth * scale}px`
-            page.el.style.height = `${page.vpHeight * scale}px`
+        this.#layoutScrollPages()
+        for (const page of this.#scrollMounted) {
             if (page.state === 'loaded' && page.frame) {
                 this.#renderScrollPage(page)
             }
@@ -1350,21 +1395,13 @@ export class FixedLayout extends HTMLElement {
         } else {
             this.#restoreScrollModeAnchor(scrollAnchor)
         }
-    }
-    #updateScrollPageOverlap() {
-        const overlap = computeScrollPageOverlap({
-            gap: parseFloat(this.getAttribute('scroll-gap')),
-            devicePixelRatio: window.devicePixelRatio || 1,
-        })
-        this.style.setProperty('--scroll-page-overlap', `${overlap}px`)
+        this.#updateScrollWindow()
     }
     #renderScrollPage(pageData) {
         const { clientWidth: hostWidth, clientHeight: hostHeight } = this
         if (!(this.#scrollHorizontal ? hostHeight : hostWidth) || !pageData.frame) return
         const { vpWidth: vw, vpHeight: vh, frame } = pageData
-        const scale = this.#scrollHorizontal
-            ? (hostHeight / vh) * this.#scaleFactor
-            : (hostWidth / vw) * this.#scaleFactor
+        const scale = this.#scrollPageScale(pageData)
 
         if (frame.onZoom) {
             const p = frame.onZoom({
@@ -1392,9 +1429,6 @@ export class FixedLayout extends HTMLElement {
             width: `${vw * scale}px`,
             height: `${vh * scale}px`,
         })
-        // Update placeholder to match actual page dimensions
-        pageData.el.style.width = `${vw * scale}px`
-        pageData.el.style.height = `${vh * scale}px`
 
         const overlayer = this.#overlayers.get(pageData.index)
         if (overlayer) {
@@ -1409,28 +1443,24 @@ export class FixedLayout extends HTMLElement {
             overlayer.redraw()
         }
     }
+    // The page under the middle of the viewport, or the one after the gap
+    // the middle falls in.
     #getScrollIndex() {
         if (!this.#scrollPages.length) return -1
-        const hostRect = this.getBoundingClientRect()
-        const mid = this.#scrollHorizontal
-            ? hostRect.left + hostRect.width / 2
-            : hostRect.top + hostRect.height / 2
-        for (const page of this.#scrollPages) {
-            const rect = page.el.getBoundingClientRect()
-            const lo = this.#scrollHorizontal ? rect.left : rect.top
-            const hi = this.#scrollHorizontal ? rect.right : rect.bottom
-            if (lo <= mid && hi >= mid) return page.index
+        const mid = this.#scrollProgression() + this.#scrollViewLength() / 2
+        const [index] = findScrollPageRange(this.#scrollLayout, mid, mid)
+        return Math.min(index, this.#scrollPages.length - 1)
+    }
+    #scrollToPage(index, behavior) {
+        const start = this.#scrollLayout.starts[index] ?? 0
+        if (behavior) this.scrollTo(this.#scrollHorizontal
+            ? { left: this.rtl ? -start : start, behavior }
+            : { top: start, behavior })
+        else {
+            this.#setScrollProgression(start)
+            this.#updateScrollWindow()
         }
-        let closest = 0, minDist = Infinity
-        for (const page of this.#scrollPages) {
-            const rect = page.el.getBoundingClientRect()
-            const center = this.#scrollHorizontal
-                ? rect.left + rect.width / 2
-                : rect.top + rect.height / 2
-            const dist = Math.abs(center - mid)
-            if (dist < minDist) { minDist = dist; closest = page.index }
-        }
-        return closest
+        this.#scrollCurrentIndex = index
     }
     #reportScrollLocation() {
         const index = this.#getScrollIndex()
@@ -1590,7 +1620,12 @@ export class FixedLayout extends HTMLElement {
     get pageColors() {
         return this.#pageColors
     }
+    // The reader assigns this on every page load; re-rendering for colors that
+    // did not change re-rendered every loaded page and rebuilt its overlayer.
     set pageColors(value) {
+        const old = this.#pageColors
+        if (old?.background === value?.background && old?.foreground === value?.foreground
+            && old?.keepImages === value?.keepImages) return
         this.#pageColors = value
         this.#render()
     }
@@ -1868,12 +1903,7 @@ export class FixedLayout extends HTMLElement {
     async goTo(target) {
         const resolved = await target
         if (this.#scrollMode) {
-            const page = this.#scrollPages[resolved.index]
-            if (page) {
-                page.el.scrollIntoView(
-                    this.#scrollHorizontal ? { inline: 'start', block: 'nearest' } : undefined)
-                this.#scrollCurrentIndex = resolved.index
-            }
+            if (this.#scrollPages[resolved.index]) this.#scrollToPage(resolved.index)
             return
         }
         const { book } = this
@@ -1911,20 +1941,12 @@ export class FixedLayout extends HTMLElement {
     nextSection() {
         if (!this.#scrollMode) return
         const currentIndex = this.#getScrollIndex()
-        const nextIndex = Math.min(currentIndex + 1, this.#scrollPages.length - 1)
-        this.#scrollPages[nextIndex]?.el.scrollIntoView(this.#scrollHorizontal
-            ? { behavior: 'smooth', inline: 'start', block: 'nearest' }
-            : { behavior: 'smooth' })
-        this.#scrollCurrentIndex = nextIndex
+        this.#scrollToPage(Math.min(currentIndex + 1, this.#scrollPages.length - 1), 'smooth')
     }
     prevSection() {
         if (!this.#scrollMode) return
         const currentIndex = this.#getScrollIndex()
-        const prevIndex = Math.max(currentIndex - 1, 0)
-        this.#scrollPages[prevIndex]?.el.scrollIntoView(this.#scrollHorizontal
-            ? { behavior: 'smooth', inline: 'start', block: 'nearest' }
-            : { behavior: 'smooth' })
-        this.#scrollCurrentIndex = prevIndex
+        this.#scrollToPage(Math.max(currentIndex - 1, 0), 'smooth')
     }
     async pan(dx, dy) {
         if (this.#scrollMode) {
@@ -2079,10 +2101,6 @@ export class FixedLayout extends HTMLElement {
         if (this.#scrollMode) {
             this.removeEventListener('scroll', this.#handleScrollEvent)
             this.removeEventListener('wheel', this.#handleScrollWheel)
-            if (this.#scrollObserver) {
-                this.#scrollObserver.disconnect()
-                this.#scrollObserver = null
-            }
             if (this.#scrollIdleTimer) {
                 clearTimeout(this.#scrollIdleTimer)
                 this.#scrollIdleTimer = null
@@ -2091,6 +2109,7 @@ export class FixedLayout extends HTMLElement {
                 this.#teardownScrollPage(page)
             }
             this.#scrollPages = []
+            this.#scrollMounted.clear()
             this.#scrollLoadGen.clear()
             this.#scrollLoadingCount = 0
             if (this.#scrollContainer) {
