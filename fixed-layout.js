@@ -1654,6 +1654,12 @@ export class FixedLayout extends HTMLElement {
                 >= this.#scrollTotalLength() - 2
         return this.#index >= this.#spreads.length - 1
     }
+    // The section on screen, as the paginator names its primary view: callers
+    // pick the document they act on from getContents() by it. Without it they
+    // fell back to the first frame, the left page of a two-page spread.
+    get primaryIndex() {
+        return this.index
+    }
     #reportLocation(reason) {
         this.dispatchEvent(new CustomEvent('relocate', { detail:
             { reason, range: null, index: this.index, fraction: 0, size: 1 } }))
@@ -1670,7 +1676,14 @@ export class FixedLayout extends HTMLElement {
     async goToSpread(index, side, reason) {
         if (index < 0 || index > this.#spreads.length - 1) return
         if (index === this.#index) {
+            // Moving to the other page of the spread on screen (a portrait view
+            // shows one at a time): the side has to change with the page, or
+            // `index` keeps naming the page left behind, and the move is a
+            // relocation like any other.
+            const moved = side != null && side !== this.#side
+            if (moved) this.#side = side
             this.#render(side)
+            if (moved) this.#reportLocation(reason)
             return
         }
         // The spread being left is the one the reader may still be touching: a
