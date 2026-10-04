@@ -1386,7 +1386,8 @@ ${doc.querySelector('parsererror').innerText}`)
         return this
     }
     async loadDocument(item) {
-        const str = await this.loadText(item.href)
+        // a spine item missing from the archive loads as an empty document
+        const str = await this.loadText(item.href) ?? ''
         return parseContentDocument(this.parser, str, item.mediaType).doc
     }
     getMediaOverlay() {
