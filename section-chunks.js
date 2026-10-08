@@ -23,15 +23,23 @@ const placeholder = (el, chunk) => VOID_ELEMENTS.has(el.localName)
     ? `<${el.localName} ${CHUNK_ATTRIBUTE}="${chunk}">`
     : `<${el.localName} ${CHUNK_ATTRIBUTE}="${chunk}"></${el.localName}>`
 
+const parse = html => new DOMParser().parseFromString(html, 'text/html')
+
+const topLevel = (doc, node) => {
+    let el = node?.nodeType === 1 ? node : node?.parentElement
+    while (el && el.parentElement !== doc.body) el = el.parentElement
+    return el
+}
+
 /**
  * Parse `html` the way an iframe's srcdoc does and cut its body into `count`
  * chunks of about equal size, between top-level children.
- * Returns `{ doc, chunks, chunkOf }`: the parsed full document (for resolving
- * anchors), the chunk documents as HTML strings, and the chunk of each
- * top-level element.
+ * Returns `{ count, chunkOf, chunk, locate }`: the chunk of each top-level
+ * element, the HTML of chunk `k` (built on demand), and the chunk holding the
+ * target of an anchor function. The parsed section itself is not kept.
  */
 export const splitSection = (html, count) => {
-    const doc = new DOMParser().parseFromString(html, 'text/html')
+    const doc = parse(html)
     const { body } = doc
     const nodes = Array.from(body.childNodes)
         .filter(node => node.nodeType === 1 || node.nodeType === 3)
@@ -48,33 +56,76 @@ export const splitSection = (html, count) => {
     }
     const chunkOf = []
     nodes.forEach((node, i) => { if (node.nodeType === 1) chunkOf.push(nodeChunk[i]) })
+    // Placeholders stand in for elements outside a chunk; text carries no
+    // element index and is dropped there
+    const holders = nodes.map((node, i) => node.nodeType === 1 ? placeholder(node, nodeChunk[i]) : '')
+
+    // The top-level element holding each id, for anchors resolved by id
+    const ids = new Map()
+    const elements = Array.from(body.children)
+    const indexOf = new Map(elements.map((el, i) => [el, i]))
+    for (const el of body.querySelectorAll('[id]'))
+        if (!ids.has(el.id)) ids.set(el.id, indexOf.get(topLevel(doc, el)))
 
     const style = doc.createElement('style')
     style.textContent = `[${CHUNK_ATTRIBUTE}] { display: none !important; }`
     doc.head.append(style)
     const prefix = `<!DOCTYPE html><html${attrs(doc.documentElement)}>`
         + `${doc.head.outerHTML}<body${attrs(body)}>`
-    style.remove()
     const suffix = '</body></html>'
 
-    const chunks = []
-    for (let chunk = 0; chunk < count; chunk++) {
-        const parts = [prefix]
-        nodes.forEach((node, i) => {
-            if (nodeChunk[i] === chunk) parts.push(markup[i])
-            // text outside the chunk carries no element index; drop it
-            else if (node.nodeType === 1) parts.push(placeholder(node, nodeChunk[i]))
-        })
-        parts.push(suffix)
-        chunks.push(parts.join(''))
+    const chunk = k => prefix
+        + nodes.map((_, i) => nodeChunk[i] === k ? markup[i] : holders[i]).join('')
+        + suffix
+
+    // Every top-level element as a placeholder: enough to tell which chunk an
+    // anchor lands in, at a fraction of the section's nodes
+    let skeleton
+    const getSkeleton = () => {
+        if (skeleton) return skeleton
+        skeleton = parse(chunk(-1))
+        skeleton.getElementById = id => skeleton.body.children[ids.get(id)] ?? null
+        return skeleton
     }
-    return { doc, chunks, chunkOf }
+    // The full section, parsed again only for anchors the skeleton can't place
+    // (such as a CFI into another chunk's element); memory may reclaim it
+    let full
+    const getFull = () => {
+        let doc = full?.deref()
+        if (!doc) full = new WeakRef(doc = parse(html))
+        return doc
+    }
+    const resolve = (doc, anchor) => {
+        let target
+        try { target = anchor(doc) } catch { return null }
+        if (typeof target === 'number') {
+            const k = Math.min(count - 1, Math.floor(target * count))
+            return { chunk: k, anchor: target * count - k }
+        }
+        const el = topLevel(doc, target?.startContainer ?? target)
+        return el ? { chunk: chunkOf[Array.prototype.indexOf.call(doc.body.children, el)] ?? 0 } : null
+    }
+    const locate = anchor => resolve(getSkeleton(), anchor)
+        ?? resolve(getFull(), anchor) ?? { chunk: 0 }
+
+    return { count, chunkOf, chunk, locate }
 }
 
-/** The chunk holding `node` of the full document from `splitSection`. */
-export const chunkOfNode = (doc, chunkOf, node) => {
-    let el = node?.nodeType === 1 ? node : node?.parentElement
-    while (el && el.parentElement !== doc.body) el = el.parentElement
-    if (!el) return 0
-    return chunkOf[Array.prototype.indexOf.call(doc.body.children, el)] ?? 0
+/**
+ * In a chunk document, the index among the body's children of the element
+ * where the next chunk (`direction` 1) starts or the previous one (-1) ends,
+ * for reading on past the chunk; -1 at either end of the section, and in a
+ * document that isn't a chunk.
+ */
+export const adjacentChunkElement = (doc, direction) => {
+    const children = doc.body?.children ?? []
+    const isPlaceholder = el => el.hasAttribute(CHUNK_ATTRIBUTE)
+    if (direction > 0) {
+        let last = children.length - 1
+        while (last >= 0 && isPlaceholder(children[last])) last--
+        return last >= 0 && last < children.length - 1 ? last + 1 : -1
+    }
+    let first = 0
+    while (first < children.length && isPlaceholder(children[first])) first++
+    return first > 0 && first < children.length ? first - 1 : -1
 }

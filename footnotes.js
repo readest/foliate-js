@@ -115,8 +115,10 @@ export class FootnoteHandler extends EventTarget {
     detectFootnotes = true
     #showFragment(book, { index, anchor, check }, href) {
         const view = document.createElement('foliate-view')
+        let loaded = false
         return new Promise((resolve, reject) => {
             view.addEventListener('load', e => {
+                loaded = true
                 try {
                     const { doc } = e.detail
                     const el = anchor(doc)
@@ -193,7 +195,12 @@ export class FootnoteHandler extends EventTarget {
             })
             view.open(book)
                 .then(() => this.dispatchEvent(new CustomEvent('before-render', { detail: { view } })))
-                .then(() => view.goTo(index))
+                // Go to the anchor, not just the section: a section too big
+                // to render whole is shown in chunks (section-chunks.js), and
+                // the anchor picks the one holding the note. The note is
+                // extracted on load, then shown from the top.
+                .then(() => view.renderer.goTo({
+                    index, anchor: doc => loaded ? 0 : anchor(doc) }))
                 .catch(reject)
         })
     }

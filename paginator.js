@@ -1,4 +1,4 @@
-import { splitSection, chunkOfNode } from './section-chunks.js'
+import { CHUNK_ATTRIBUTE, splitSection } from './section-chunks.js'
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -505,10 +505,27 @@ const getVisibleRange = (doc, start, end, mapRect) => {
         }
         return FILTER_SKIP
     }
-    const walker = doc.createTreeWalker(doc.body, filter, { acceptNode })
     const nodes = []
-    for (let node = walker.nextNode(); node; node = walker.nextNode())
-        nodes.push(node)
+    // A chunk of a huge section holds a run of its own top-level nodes between
+    // hidden placeholders (section-chunks.js), tens of thousands of them in a
+    // flat section; walk only that run
+    const isPlaceholder = node => node.nodeType === 1 && node.hasAttribute(CHUNK_ATTRIBUTE)
+    let first = doc.body.firstChild, last = doc.body.lastChild
+    while (first && isPlaceholder(first)) first = first.nextSibling
+    while (last && isPlaceholder(last)) last = last.previousSibling
+    for (let child = first; child; child = child.nextSibling) {
+        const type = child.nodeType
+        if (type === 1 || type === 3 || type === 4) {
+            const result = acceptNode(child)
+            if (result === FILTER_ACCEPT) nodes.push(child)
+            if (result !== FILTER_REJECT) {
+                const walker = doc.createTreeWalker(child, filter, { acceptNode })
+                for (let node = walker.nextNode(); node; node = walker.nextNode())
+                    nodes.push(node)
+            }
+        }
+        if (child === last) break
+    }
 
     // we're only interested in the first and last visible nodes
     const from = nodes[0] ?? doc.body
@@ -1956,7 +1973,7 @@ export class Paginator extends HTMLElement {
                 return {
                     ...section,
                     size: section.size / count,
-                    loadContent: async () => (await this.#splitSection(spine))?.chunks[chunk],
+                    loadContent: async () => (await this.#splitSection(spine))?.chunk(chunk),
                     // chunks share the section's resources; keep them loaded
                     unload: () => {},
                 }
@@ -2002,10 +2019,8 @@ export class Paginator extends HTMLElement {
         if (typeof anchor === 'function') {
             const split = await this.#splitSection(index)
             if (!split) return { ...target, index: unit }
-            let node
-            try { node = anchor(split.doc) } catch { /* resolves in no chunk */ }
-            const chunk = chunkOfNode(split.doc, split.chunkOf, node?.startContainer ?? node)
-            return { ...target, index: unit + chunk }
+            const { chunk, anchor: fraction } = split.locate(anchor)
+            return { ...target, index: unit + chunk, anchor: fraction ?? anchor }
         }
         // A Range or node from a rendered chunk: go to that chunk
         const doc = (anchor?.startContainer ?? anchor)?.ownerDocument
@@ -4221,11 +4236,23 @@ export class Paginator extends HTMLElement {
     getContents() {
         const contents = []
         for (const [index, view] of this.#sortedViews) {
-            if (view.document) contents.push({
+            if (!view.document) continue
+            const content = {
                 index: this.#spineOf(index),
                 overlayer: view.overlayer,
                 doc: view.document,
-            })
+            }
+            // Several chunks of one section can be rendered, and callers pick
+            // the section's document by spine index: list the primary chunk
+            // ahead of the others
+            if (index === this.#primaryIndex) {
+                const first = contents.findIndex(c => c.index === content.index)
+                if (first >= 0) {
+                    contents.splice(first, 0, content)
+                    continue
+                }
+            }
+            contents.push(content)
         }
         return contents
     }
