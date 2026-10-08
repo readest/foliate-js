@@ -128,9 +128,18 @@ export class Overlayer {
         if (ancestor.nodeType !== Node.ELEMENT_NODE
             && ancestor.nodeType !== Node.DOCUMENT_NODE) return [range]
         const doc = ancestor.ownerDocument ?? ancestor
+        // Comparing a node with the range costs as much as the node's index
+        // among its siblings, so walk only from the range's start to the first
+        // node past its end, not over every child of the common ancestor: in a
+        // flat document (a single-file book) that ancestor is <body>.
+        let past = false
         const walker = doc.createTreeWalker(ancestor,
             NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
                 acceptNode: node => {
+                    if (range.comparePoint(node, 0) > 0) {
+                        past = true
+                        return NodeFilter.FILTER_ACCEPT
+                    }
                     if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT
                     // Ruby annotations sit on their own line above (or beside)
                     // the base, so their rects would draw a second detached box
@@ -145,8 +154,18 @@ export class Overlayer {
                         ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
                 },
             })
+        const { startContainer, startOffset } = range
+        const start = startContainer.nodeType === Node.TEXT_NODE
+            || startContainer.nodeType === Node.CDATA_SECTION_NODE
+            ? startContainer : startContainer.childNodes[startOffset]
+        if (start && start !== ancestor && ancestor.contains(start)) {
+            // the node right before `start`, so that `start` comes next
+            let before = start.previousSibling
+            if (before) while (before.lastChild) before = before.lastChild
+            walker.currentNode = before ?? start.parentNode
+        }
         const splitRanges = []
-        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        for (let node = walker.nextNode(); node && !past; node = walker.nextNode()) {
             const subRange = doc.createRange()
             if (node.nodeType === Node.TEXT_NODE) {
                 subRange.selectNodeContents(node)
