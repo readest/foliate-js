@@ -481,6 +481,8 @@ const getVisibleRange = (doc, start, end, mapRect) => {
         // one yields a degenerate CFI and can crash `fromRange` when such a node
         // is the only child of its parent (content-less background sections).
         if (node.nodeType === 1 && node.hasAttribute?.('cfi-inert')) return FILTER_REJECT
+        // hidden placeholders of a chunk (section-chunks.js)
+        if (node.nodeType === 1 && node.hasAttribute(CHUNK_ATTRIBUTE)) return FILTER_REJECT
         if (node.nodeType === 1) {
             const { left, right } = mapRect(node.getBoundingClientRect())
             if (left === 0 && right === 0) return FILTER_REJECT
@@ -1516,6 +1518,7 @@ export class Paginator extends HTMLElement {
     #firstUnit = [] // spine index -> its first unit
     #bookSections = []
     #chunkCache = new Map() // spine index -> Promise<splitSection result>
+    #splits = new Map() // spine index -> splitSection result, once resolved
     #vertical = false
     #rtl = false
     #marginTop = 0
@@ -1960,6 +1963,8 @@ export class Paginator extends HTMLElement {
         this.#units = []
         this.#firstUnit = []
         this.#chunkCache.clear()
+        this.#splits.clear()
+        const splits = this.#splits
         this.sections = book.sections.flatMap((section, spine) => {
             this.#firstUnit[spine] = this.#units.length
             const count = section.size > CHUNK_THRESHOLD && section.loadContent
@@ -1976,6 +1981,10 @@ export class Paginator extends HTMLElement {
                     loadContent: async () => (await this.#splitSection(spine))?.chunk(chunk),
                     // chunks share the section's resources; keep them loaded
                     unload: () => {},
+                    // a chunk with nothing to show is skipped, once known
+                    get linear() {
+                        return splits.get(spine)?.isEmpty(chunk) ? 'no' : section.linear
+                    },
                 }
             })
         })
@@ -1998,6 +2007,7 @@ export class Paginator extends HTMLElement {
             split = Promise.resolve(this.#bookSections[spine].loadContent())
                 .then(html => html ? splitSection(html, count) : null)
                 .catch(e => (console.warn(e), null))
+                .then(result => (this.#splits.set(spine, result), result))
             this.#chunkCache.set(spine, split)
         }
         return split
@@ -2012,11 +2022,7 @@ export class Paginator extends HTMLElement {
         if (unit == null) return { ...target, index: -1 }
         const { count } = this.#units[unit]
         if (count === 1) return { ...target, index: unit }
-        if (typeof anchor === 'number') {
-            const chunk = Math.min(count - 1, Math.floor(anchor * count))
-            return { ...target, index: unit + chunk, anchor: anchor * count - chunk }
-        }
-        if (typeof anchor === 'function') {
+        if (typeof anchor === 'number' || typeof anchor === 'function') {
             const split = await this.#splitSection(index)
             if (!split) return { ...target, index: unit }
             const { chunk, anchor: fraction } = split.locate(anchor)
@@ -2616,10 +2622,10 @@ export class Paginator extends HTMLElement {
             const edgeIndex = dir < 0
                 ? sorted[0]?.[0] ?? this.#primaryIndex
                 : sorted[sorted.length - 1]?.[0] ?? this.#primaryIndex
-            return this.#goTo({
-                index: this.#adjacentIndex(dir, edgeIndex),
+            return this.#adjacentUnit(dir, edgeIndex).then(index => this.#goTo({
+                index,
                 anchor: dir < 0 ? () => 1 : () => 0,
-            })
+            }))
         }
         // Out of range — skip animation, go straight to adjacent section
         if (dir) {
@@ -3773,7 +3779,9 @@ export class Paginator extends HTMLElement {
         // Report a chunk's position as a position in its whole section
         const { spine, chunk, count } = this.#units[index] ?? {}
         if (count > 1) {
-            detail.fraction = (chunk + (detail.fraction ?? 0)) / count
+            const split = this.#splits.get(spine)
+            detail.fraction = split ? split.fraction(chunk, detail.fraction ?? 0)
+                : (chunk + (detail.fraction ?? 0)) / count
             if (detail.size != null) detail.size /= count
         }
         detail.index = spine ?? index
@@ -3862,6 +3870,8 @@ export class Paginator extends HTMLElement {
     // Load an adjacent section without changing primary index
     async #loadAdjacentSection(index) {
         if (this.#views.has(index) || !this.#canGoToIndex(index)) return
+        const unit = this.#units[index]
+        if (unit?.count > 1) await this.#splitSection(unit.spine)
         const section = this.sections[index]
         if (!section || section.linear === 'no') return
         // Detect a prepend: a section being inserted *above* every currently
@@ -4187,6 +4197,16 @@ export class Paginator extends HTMLElement {
         for (let index = fromIndex + dir; this.#canGoToIndex(index); index += dir)
             if (this.sections[index]?.linear !== 'no') return index
     }
+    // Which chunks of a section are empty is known once it is split
+    async #adjacentUnit(dir, fromIndex) {
+        const index = this.#adjacentIndex(dir, fromIndex)
+        const unit = this.#units[index]
+        if (unit?.count > 1 && !this.#splits.has(unit.spine)) {
+            await this.#splitSection(unit.spine)
+            return this.#adjacentIndex(dir, fromIndex)
+        }
+        return index
+    }
     async #turnPage(dir, distance) {
         if (this.#locked) return
         this.#locked = true
@@ -4202,7 +4222,7 @@ export class Paginator extends HTMLElement {
                 ? sorted[0]?.[0] ?? this.#primaryIndex
                 : sorted[sorted.length - 1]?.[0] ?? this.#primaryIndex
             await this.#goTo({
-                index: this.#adjacentIndex(dir, edgeIndex),
+                index: await this.#adjacentUnit(dir, edgeIndex),
                 anchor: prev ? () => 1 : () => 0,
             })
         }
@@ -4221,11 +4241,11 @@ export class Paginator extends HTMLElement {
         this.scrollBy(dx, dy)
         this.#locked = false
     }
-    prevSection() {
-        return this.#goToUnit(this.#adjacentIndex(-1))
+    async prevSection() {
+        return this.#goToUnit(await this.#adjacentUnit(-1))
     }
-    nextSection() {
-        return this.#goToUnit(this.#adjacentIndex(1))
+    async nextSection() {
+        return this.#goToUnit(await this.#adjacentUnit(1))
     }
     firstSection() {
         return this.#goToUnit(this.sections.findIndex(section => section.linear !== 'no'))
