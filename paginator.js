@@ -1737,8 +1737,11 @@ export class Paginator extends HTMLElement {
                 scrolledScrollRelocate()
                 // Backward preloading is handled eagerly in the (non-debounced)
                 // scroll listener below, mirroring the forward buffer.
-            } else if (!this.scrolled) {
-              this.#afterScroll('container-scroll')
+            } else if (!this.scrolled && !this.#stabilizing) {
+                // As in scrolled mode, a scroll that settles while a navigation
+                // renders its target is not the reader's position: detecting the
+                // primary view from it would trim the target as off screen
+                this.#afterScroll('container-scroll')
             }
         }, 250)
         this.#container.addEventListener('scroll', () => {
@@ -2370,6 +2373,8 @@ export class Paginator extends HTMLElement {
         if (this.#views.size === 0) return
         const primaryView = this.#primaryView
         if (!primaryView) return
+        // a resize can land while a navigation is still stabilizing
+        const stabilizing = this.#stabilizing
         this.#stabilizing = true
         const layout = this.#beforeRender({
             vertical: this.#vertical,
@@ -2382,7 +2387,7 @@ export class Paginator extends HTMLElement {
         // RAF deferral is only needed for initial display and mode switches
         // (handled by #display), not for resize re-renders.
         this.#scrollToAnchor(this.#anchor)
-        this.#stabilizing = false
+        this.#stabilizing = stabilizing
         this.dispatchEvent(new Event('stabilized'))
     }
     get scrolled() {
