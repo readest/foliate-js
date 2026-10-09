@@ -2,6 +2,7 @@ import * as CFI from './epubcfi.js'
 import { TOCProgress, SectionProgress, PageProgress } from './progress.js'
 import { Overlayer } from './overlayer.js'
 import { textWalker } from './text-walker.js'
+import { CHUNK_ATTRIBUTE } from './section-chunks.js'
 
 const SEARCH_PREFIX = 'foliate-search:'
 
@@ -391,7 +392,7 @@ export class View extends HTMLElement {
         if (value.startsWith(SEARCH_PREFIX)) {
             const cfi = value.replace(SEARCH_PREFIX, '')
             const { index, anchor } = await this.resolveNavigation(cfi)
-            const obj = this.#getOverlayer(index)
+            const obj = this.#getOverlayer(index, anchor)
             if (obj) {
                 const { overlayer, doc } = obj
                 if (remove) {
@@ -405,7 +406,7 @@ export class View extends HTMLElement {
         } else if (value.startsWith(NOTE_PREFIX)) {
             const cfi = value.replace(NOTE_PREFIX, '')
             const { index, anchor } = await this.resolveNavigation(cfi)
-            const obj = this.#getOverlayer(index)
+            const obj = this.#getOverlayer(index, anchor)
             if (obj) {
                 const { overlayer, doc } = obj
                 if (remove) {
@@ -421,7 +422,7 @@ export class View extends HTMLElement {
             return
         }
         const { index, anchor } = await this.resolveNavigation(value)
-        const obj = this.#getOverlayer(index)
+        const obj = this.#getOverlayer(index, anchor)
         if (obj) {
             const { overlayer, doc } = obj
             overlayer.remove(value)
@@ -439,9 +440,21 @@ export class View extends HTMLElement {
     deleteAnnotation(annotation) {
         return this.addAnnotation(annotation, true)
     }
-    #getOverlayer(index) {
-        return this.renderer.getContents()
-            .find(x => x.index === index && x.overlayer)
+    #getOverlayer(index, anchor) {
+        const candidates = this.renderer.getContents()
+            .filter(x => x.index === index && x.overlayer)
+        // A chunked section can have several chunks rendered at once; take the
+        // one holding the target rather than one of its placeholders
+        if (candidates.length > 1 && typeof anchor === 'function')
+            return candidates.find(({ doc }) => {
+                try {
+                    const target = anchor(doc)
+                    const node = target?.startContainer ?? target
+                    const el = node?.nodeType === 1 ? node : node?.parentElement
+                    return el && !el.closest(`[${CHUNK_ATTRIBUTE}]`)
+                } catch { return false }
+            }) ?? candidates[0]
+        return candidates[0]
     }
     #createOverlayer({ doc, index }) {
         const overlayer = new Overlayer(doc)
@@ -480,7 +493,7 @@ export class View extends HTMLElement {
         const resolved = await this.goTo(value)
         if (resolved) {
             const { index, anchor } = resolved
-            const { doc } =  this.#getOverlayer(index)
+            const { doc } =  this.#getOverlayer(index, anchor)
             const range = anchor(doc)
             this.#emit('show-annotation', { value, index, range })
         }

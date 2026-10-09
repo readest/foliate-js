@@ -27,10 +27,21 @@ const acceptNode = node => {
     return NodeFilter.FILTER_ACCEPT
 }
 
+// Where to start walking a range: at its start, unless that lies in a subtree
+// the filter rejects, which a walk from the root would never enter. Walking
+// from the root instead revisits every node before the range, once per range:
+// quadratic over the blocks of a flat document, such as a single-file book.
+const rangeStart = (range, root, filterFunc) => {
+    for (let node = range.startContainer; node && node !== root; node = node.parentNode)
+        if (node.nodeType === 1 && filterFunc(node) === NodeFilter.FILTER_REJECT) return root
+    return range.startContainer
+}
+
 export const textWalker = function* (x, func, filterFunc) {
     const root = x.commonAncestorContainer ?? x.body ?? x
     const walker = document.createTreeWalker(root, filter, { acceptNode: filterFunc || acceptNode })
     const walk = x.commonAncestorContainer ? walkRange : walkDocument
+    if (x.commonAncestorContainer) walker.currentNode = rangeStart(x, root, filterFunc || acceptNode)
     const nodes = walk(x, walker)
     const strs = nodes.map(node => node.nodeValue ?? '')
     const makeRange = (startIndex, startOffset, endIndex, endOffset) => {

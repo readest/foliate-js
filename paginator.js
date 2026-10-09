@@ -1,4 +1,11 @@
+import { CHUNK_ATTRIBUTE, splitSection } from './section-chunks.js'
+
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+// A section bigger than this is rendered as chunks of about CHUNK_SIZE bytes
+// (readest#1711): one huge document takes minutes to lay out and paint.
+const CHUNK_THRESHOLD = 512 * 1024
+const CHUNK_SIZE = 256 * 1024
 
 // A microtask (or rAF alone) resumes before paint. Give input and rendering a
 // turn between the style, host-load, and pagination phases of a chapter load.
@@ -474,6 +481,8 @@ const getVisibleRange = (doc, start, end, mapRect) => {
         // one yields a degenerate CFI and can crash `fromRange` when such a node
         // is the only child of its parent (content-less background sections).
         if (node.nodeType === 1 && node.hasAttribute?.('cfi-inert')) return FILTER_REJECT
+        // hidden placeholders of a chunk (section-chunks.js)
+        if (node.nodeType === 1 && node.hasAttribute(CHUNK_ATTRIBUTE)) return FILTER_REJECT
         if (node.nodeType === 1) {
             const { left, right } = mapRect(node.getBoundingClientRect())
             if (left === 0 && right === 0) return FILTER_REJECT
@@ -498,10 +507,27 @@ const getVisibleRange = (doc, start, end, mapRect) => {
         }
         return FILTER_SKIP
     }
-    const walker = doc.createTreeWalker(doc.body, filter, { acceptNode })
     const nodes = []
-    for (let node = walker.nextNode(); node; node = walker.nextNode())
-        nodes.push(node)
+    // A chunk of a huge section holds a run of its own top-level nodes between
+    // hidden placeholders (section-chunks.js), tens of thousands of them in a
+    // flat section; walk only that run
+    const isPlaceholder = node => node.nodeType === 1 && node.hasAttribute(CHUNK_ATTRIBUTE)
+    let first = doc.body.firstChild, last = doc.body.lastChild
+    while (first && isPlaceholder(first)) first = first.nextSibling
+    while (last && isPlaceholder(last)) last = last.previousSibling
+    for (let child = first; child; child = child.nextSibling) {
+        const type = child.nodeType
+        if (type === 1 || type === 3 || type === 4) {
+            const result = acceptNode(child)
+            if (result === FILTER_ACCEPT) nodes.push(child)
+            if (result !== FILTER_REJECT) {
+                const walker = doc.createTreeWalker(child, filter, { acceptNode })
+                for (let node = walker.nextNode(); node; node = walker.nextNode())
+                    nodes.push(node)
+            }
+        }
+        if (child === last) break
+    }
 
     // we're only interested in the first and last visible nodes
     const from = nodes[0] ?? doc.body
@@ -1486,6 +1512,13 @@ export class Paginator extends HTMLElement {
     #footer
     #views = new Map() // Map<sectionIndex, View>
     #primaryIndex = -1
+    // Internally `index` is a render unit: a whole section, or one chunk of a
+    // section too big to render whole. Spine indices only cross the public API.
+    #units = [] // Array<{ spine, chunk, count }>
+    #firstUnit = [] // spine index -> its first unit
+    #bookSections = []
+    #chunkCache = new Map() // spine index -> Promise<splitSection result>
+    #splits = new Map() // spine index -> splitSection result, once resolved
     #vertical = false
     #rtl = false
     #marginTop = 0
@@ -1704,8 +1737,11 @@ export class Paginator extends HTMLElement {
                 scrolledScrollRelocate()
                 // Backward preloading is handled eagerly in the (non-debounced)
                 // scroll listener below, mirroring the forward buffer.
-            } else if (!this.scrolled) {
-              this.#afterScroll('container-scroll')
+            } else if (!this.scrolled && !this.#stabilizing) {
+                // As in scrolled mode, a scroll that settles while a navigation
+                // renders its target is not the reader's position: detecting the
+                // primary view from it would trim the target as off screen
+                this.#afterScroll('container-scroll')
             }
         }, 250)
         this.#container.addEventListener('scroll', () => {
@@ -1866,7 +1902,7 @@ export class Paginator extends HTMLElement {
         return [...this.#views.entries()].sort(([a], [b]) => a - b)
     }
     get primaryIndex() {
-        return this.#primaryIndex
+        return this.#spineOf(this.#primaryIndex)
     }
     setAttribute(name, value) {
         // The scrolled-mode scroll handler is debounced, so #anchor and
@@ -1926,7 +1962,35 @@ export class Paginator extends HTMLElement {
     }
     open(book) {
         this.bookDir = book.dir
-        this.sections = book.sections
+        this.#bookSections = book.sections
+        this.#units = []
+        this.#firstUnit = []
+        this.#chunkCache.clear()
+        this.#splits.clear()
+        const splits = this.#splits
+        this.sections = book.sections.flatMap((section, spine) => {
+            this.#firstUnit[spine] = this.#units.length
+            const count = section.size > CHUNK_THRESHOLD && section.loadContent
+                ? Math.ceil(section.size / CHUNK_SIZE) : 1
+            if (count === 1) {
+                this.#units.push({ spine, chunk: 0, count })
+                return [section]
+            }
+            return Array.from({ length: count }, (_, chunk) => {
+                this.#units.push({ spine, chunk, count })
+                return {
+                    ...section,
+                    size: section.size / count,
+                    loadContent: async () => (await this.#splitSection(spine))?.chunk(chunk),
+                    // chunks share the section's resources; keep them loaded
+                    unload: () => {},
+                    // a chunk with nothing to show is skipped, once known
+                    get linear() {
+                        return splits.get(spine)?.isEmpty(chunk) ? 'no' : section.linear
+                    },
+                }
+            })
+        })
         book.transformTarget?.addEventListener('data', ({ detail }) => {
             if (detail.type !== 'text/css') return
             detail.data = Promise.resolve(detail.data).then(data => data
@@ -1938,6 +2002,40 @@ export class Paginator extends HTMLElement {
                 .replace(/break-(after|before|inside)\s*:\s*(avoid-)?page/gi, (_, x, y) =>
                     `break-${x}: ${y ?? ''}column`))
         })
+    }
+    #splitSection(spine) {
+        let split = this.#chunkCache.get(spine)
+        if (!split) {
+            const { count } = this.#units[this.#firstUnit[spine]]
+            split = Promise.resolve(this.#bookSections[spine].loadContent())
+                .then(html => html ? splitSection(html, count) : null)
+                .catch(e => (console.warn(e), null))
+                .then(result => (this.#splits.set(spine, result), result))
+            this.#chunkCache.set(spine, split)
+        }
+        return split
+    }
+    #spineOf(index) {
+        return this.#units[index]?.spine ?? index
+    }
+    // Map a public { index: spine, anchor } target to the unit holding it
+    async #toUnitTarget(target) {
+        const { index, anchor } = target
+        const unit = this.#firstUnit[index]
+        if (unit == null) return { ...target, index: -1 }
+        const { count } = this.#units[unit]
+        if (count === 1) return { ...target, index: unit }
+        if (typeof anchor === 'number' || typeof anchor === 'function') {
+            const split = await this.#splitSection(index)
+            if (!split) return { ...target, index: unit }
+            const { chunk, anchor: fraction } = split.locate(anchor)
+            return { ...target, index: unit + chunk, anchor: fraction ?? anchor }
+        }
+        // A Range or node from a rendered chunk: go to that chunk
+        const doc = (anchor?.startContainer ?? anchor)?.ownerDocument
+        for (const [i, view] of this.#views)
+            if (doc && view.document === doc) return { ...target, index: i }
+        return { ...target, index: unit }
     }
     #createView(index) {
         // Destroy existing view for this index if any
@@ -2275,6 +2373,8 @@ export class Paginator extends HTMLElement {
         if (this.#views.size === 0) return
         const primaryView = this.#primaryView
         if (!primaryView) return
+        // a resize can land while a navigation is still stabilizing
+        const stabilizing = this.#stabilizing
         this.#stabilizing = true
         const layout = this.#beforeRender({
             vertical: this.#vertical,
@@ -2287,7 +2387,7 @@ export class Paginator extends HTMLElement {
         // RAF deferral is only needed for initial display and mode switches
         // (handled by #display), not for resize re-renders.
         this.#scrollToAnchor(this.#anchor)
-        this.#stabilizing = false
+        this.#stabilizing = stabilizing
         this.dispatchEvent(new Event('stabilized'))
     }
     get scrolled() {
@@ -2527,10 +2627,10 @@ export class Paginator extends HTMLElement {
             const edgeIndex = dir < 0
                 ? sorted[0]?.[0] ?? this.#primaryIndex
                 : sorted[sorted.length - 1]?.[0] ?? this.#primaryIndex
-            return this.#goTo({
-                index: this.#adjacentIndex(dir, edgeIndex),
+            return this.#adjacentUnit(dir, edgeIndex).then(index => this.#goTo({
+                index,
                 anchor: dir < 0 ? () => 1 : () => 0,
-            })
+            }))
         }
         // Out of range — skip animation, go straight to adjacent section
         if (dir) {
@@ -3681,6 +3781,15 @@ export class Paginator extends HTMLElement {
         }
         // Update per-column backgrounds for the current scroll position
         if (!this.scrolled) this.#replaceBackground()
+        // Report a chunk's position as a position in its whole section
+        const { spine, chunk, count } = this.#units[index] ?? {}
+        if (count > 1) {
+            const split = this.#splits.get(spine)
+            detail.fraction = split ? split.fraction(chunk, detail.fraction ?? 0)
+                : (chunk + (detail.fraction ?? 0)) / count
+            if (detail.size != null) detail.size /= count
+        }
+        detail.index = spine ?? index
         this.dispatchEvent(new CustomEvent('relocate', { detail }))
     }
     async #display(promise) {
@@ -3722,7 +3831,7 @@ export class Paginator extends HTMLElement {
             }
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
-                    doc: view.document, index,
+                    doc: view.document, index: this.#spineOf(index),
                     attach: overlayer => view.overlayer = overlayer,
                 },
             }))
@@ -3766,6 +3875,8 @@ export class Paginator extends HTMLElement {
     // Load an adjacent section without changing primary index
     async #loadAdjacentSection(index) {
         if (this.#views.has(index) || !this.#canGoToIndex(index)) return
+        const unit = this.#units[index]
+        if (unit?.count > 1) await this.#splitSection(unit.spine)
         const section = this.sections[index]
         if (!section || section.linear === 'no') return
         // Detect a prepend: a section being inserted *above* every currently
@@ -3796,7 +3907,8 @@ export class Paginator extends HTMLElement {
                 this.#applyStyles(doc)
                 await yieldToFrame()
                 if (this.#views.get(index) !== view || view.document !== doc) return
-                this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
+                this.dispatchEvent(new CustomEvent('load',
+                    { detail: { doc, index: this.#spineOf(index) } }))
             }
             // Adjacent sections reuse the primary view's cached layout
             // — they must NOT call #beforeRender, which would modify
@@ -3845,7 +3957,7 @@ export class Paginator extends HTMLElement {
             }
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
-                    doc: view.document, index,
+                    doc: view.document, index: this.#spineOf(index),
                     attach: overlayer => view.overlayer = overlayer,
                 },
             }))
@@ -4023,7 +4135,8 @@ export class Paginator extends HTMLElement {
                 this.#applyStyles(detail.doc)
                 await yieldToFrame()
                 if (this.#views.get(index)?.document !== detail.doc) return
-                this.dispatchEvent(new CustomEvent('load', { detail }))
+                this.dispatchEvent(new CustomEvent('load',
+                    { detail: { ...detail, index: this.#spineOf(detail.index) } }))
             }
             await this.#display(Promise.resolve(section.load())
                 .then(async src => {
@@ -4038,8 +4151,12 @@ export class Paginator extends HTMLElement {
     }
     async goTo(target) {
         if (this.#locked) return
-        const resolved = await target
+        const resolved = await this.#toUnitTarget(await target)
         if (this.#canGoToIndex(resolved.index)) return this.#goTo(resolved)
+    }
+    async #goToUnit(index) {
+        if (this.#locked) return
+        if (this.#canGoToIndex(index)) return this.#goTo({ index })
     }
     #scrollPrev(distance) {
         if (this.#views.size === 0) return true
@@ -4085,6 +4202,16 @@ export class Paginator extends HTMLElement {
         for (let index = fromIndex + dir; this.#canGoToIndex(index); index += dir)
             if (this.sections[index]?.linear !== 'no') return index
     }
+    // Which chunks of a section are empty is known once it is split
+    async #adjacentUnit(dir, fromIndex) {
+        const index = this.#adjacentIndex(dir, fromIndex)
+        const unit = this.#units[index]
+        if (unit?.count > 1 && !this.#splits.has(unit.spine)) {
+            await this.#splitSection(unit.spine)
+            return this.#adjacentIndex(dir, fromIndex)
+        }
+        return index
+    }
     async #turnPage(dir, distance) {
         if (this.#locked) return
         this.#locked = true
@@ -4100,7 +4227,7 @@ export class Paginator extends HTMLElement {
                 ? sorted[0]?.[0] ?? this.#primaryIndex
                 : sorted[sorted.length - 1]?.[0] ?? this.#primaryIndex
             await this.#goTo({
-                index: this.#adjacentIndex(dir, edgeIndex),
+                index: await this.#adjacentUnit(dir, edgeIndex),
                 anchor: prev ? () => 1 : () => 0,
             })
         }
@@ -4119,28 +4246,38 @@ export class Paginator extends HTMLElement {
         this.scrollBy(dx, dy)
         this.#locked = false
     }
-    prevSection() {
-        return this.goTo({ index: this.#adjacentIndex(-1) })
+    async prevSection() {
+        return this.#goToUnit(await this.#adjacentUnit(-1))
     }
-    nextSection() {
-        return this.goTo({ index: this.#adjacentIndex(1) })
+    async nextSection() {
+        return this.#goToUnit(await this.#adjacentUnit(1))
     }
     firstSection() {
-        const index = this.sections.findIndex(section => section.linear !== 'no')
-        return this.goTo({ index })
+        return this.#goToUnit(this.sections.findIndex(section => section.linear !== 'no'))
     }
     lastSection() {
-        const index = this.sections.findLastIndex(section => section.linear !== 'no')
-        return this.goTo({ index })
+        return this.#goToUnit(this.sections.findLastIndex(section => section.linear !== 'no'))
     }
     getContents() {
         const contents = []
         for (const [index, view] of this.#sortedViews) {
-            if (view.document) contents.push({
-                index,
+            if (!view.document) continue
+            const content = {
+                index: this.#spineOf(index),
                 overlayer: view.overlayer,
                 doc: view.document,
-            })
+            }
+            // Several chunks of one section can be rendered, and callers pick
+            // the section's document by spine index: list the primary chunk
+            // ahead of the others
+            if (index === this.#primaryIndex) {
+                const first = contents.findIndex(c => c.index === content.index)
+                if (first >= 0) {
+                    contents.splice(first, 0, content)
+                    continue
+                }
+            }
+            contents.push(content)
         }
         return contents
     }

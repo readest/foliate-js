@@ -130,12 +130,17 @@ const fragmentToSSML = (fragment, nodeFilter, inherited) => {
     return ssml
 }
 
+// The marks go into a copy owned by a document of its own: a document updates
+// every one of its live ranges on each mutation, and a section can hold a
+// range for each of its thousands of sentences (a read-aloud timeline does)
+let markDocument
 const getFragmentWithMarks = (range, textWalker, nodeFilter, granularity) => {
     const lang = getLang(range.commonAncestorContainer)
     const alphabet = getAlphabet(range.commonAncestorContainer)
 
     const segmenter = getSegmenter(lang, granularity)
-    const fragment = range.cloneContents()
+    markDocument ??= document.implementation.createHTMLDocument('')
+    const fragment = markDocument.importNode(range.cloneContents(), true)
 
     // we need ranges on both the original document (for highlighting)
     // and the document fragment (for inserting marks)
@@ -258,9 +263,15 @@ function* getBlocks(doc, nodeFilter) {
         if (blockTags.has(name)) {
             if (last) {
                 last.setEndBefore(node)
-                if (!rangeIsEmpty(last)) yield last
+                if (!rangeIsEmpty(last)) {
+                    yield last
+                    last = null
+                }
             }
-            last = doc.createRange()
+            // Reuse the range of an empty block: a document updates every
+            // live range on each mutation, and a single-file book (or a chunk
+            // of one, with its placeholders) can have thousands of them
+            last ??= doc.createRange()
             last.setStart(node, 0)
             sawBlock = true
         }
