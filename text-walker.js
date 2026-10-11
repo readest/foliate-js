@@ -1,6 +1,29 @@
+// A walk from the ancestor never enters a rejected subtree; a range starting
+// inside one keeps that walk (rare, so its cost does not matter).
+const insideRejected = (node, walker) => {
+    const { filter, root } = walker
+    const accept = n => typeof filter === 'function' ? filter(n) : filter?.acceptNode(n)
+    for (let n = node; n && n !== root; n = n.parentNode)
+        if (accept(n) === NodeFilter.FILTER_REJECT) return true
+    return false
+}
+
 const walkRange = (range, walker) => {
     const nodes = []
-    for (let node = walker.currentNode; node; node = walker.nextNode()) {
+    // Blocks of a long chapter share one ancestor: start at the range instead
+    // of the ancestor's first node, or every block walks the chapter before it.
+    // Starting from the containing element keeps the filter in charge of
+    // which nodes count, and nodes before the range start are skipped below.
+    let node = walker.currentNode
+    const { startContainer } = range
+    const anchor = startContainer.nodeType === Node.ELEMENT_NODE
+        ? startContainer : startContainer.parentNode
+    if (anchor && anchor !== walker.root && walker.root.contains(anchor)
+        && !insideRejected(anchor, walker)) {
+        walker.currentNode = anchor
+        node = walker.nextNode()
+    }
+    for (; node; node = walker.nextNode()) {
         const compare = range.comparePoint(node, 0)
         if (compare === 0) nodes.push(node)
         else if (compare > 0) break
