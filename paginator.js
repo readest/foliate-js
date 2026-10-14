@@ -1991,17 +1991,24 @@ export class Paginator extends HTMLElement {
                 }
             })
         })
-        book.transformTarget?.addEventListener('data', ({ detail }) => {
-            if (detail.type !== 'text/css') return
-            detail.data = Promise.resolve(detail.data).then(data => data
-                // unprefix as most of the props are (only) supported unprefixed
-                .replace(/([{\s;])-epub-/gi, '$1')
-                // `page-break-*` unsupported in columns; replace with `column-break-*`
-                .replace(/page-break-(after|before|inside)\s*:/gi, (_, x) =>
-                    `-webkit-column-break-${x}:`)
-                .replace(/break-(after|before|inside)\s*:\s*(avoid-)?page/gi, (_, x, y) =>
-                    `break-${x}: ${y ?? ''}column`))
-        })
+        // The book outlives this paginator (a reader may cache it for the next
+        // open), so the listener is removed in `destroy()`; left on, it would keep
+        // the destroyed paginator and its iframes alive
+        this.#transformTarget?.removeEventListener('data', this.#transformCSS)
+        this.#transformTarget = book.transformTarget
+        this.#transformTarget?.addEventListener('data', this.#transformCSS)
+    }
+    #transformTarget
+    #transformCSS = ({ detail }) => {
+        if (detail.type !== 'text/css') return
+        detail.data = Promise.resolve(detail.data).then(data => data
+            // unprefix as most of the props are (only) supported unprefixed
+            .replace(/([{\s;])-epub-/gi, '$1')
+            // `page-break-*` unsupported in columns; replace with `column-break-*`
+            .replace(/page-break-(after|before|inside)\s*:/gi, (_, x) =>
+                `-webkit-column-break-${x}:`)
+            .replace(/break-(after|before|inside)\s*:\s*(avoid-)?page/gi, (_, x, y) =>
+                `break-${x}: ${y ?? ''}column`))
     }
     #splitSection(spine) {
         let split = this.#chunkCache.get(spine)
@@ -4337,6 +4344,8 @@ export class Paginator extends HTMLElement {
         this.#observer.unobserve(this)
         this.#destroyAllViews()
         this.#mediaQuery.removeEventListener('change', this.#mediaQueryListener)
+        this.#transformTarget?.removeEventListener('data', this.#transformCSS)
+        this.#transformTarget = null
     }
 }
 
