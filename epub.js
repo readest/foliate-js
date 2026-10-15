@@ -858,6 +858,9 @@ class Resources {
             .map(item => {
                 item.href = resolveHref(item.href)
                 item.properties = item.properties?.split(/\s/)
+                // media types are case-insensitive and may carry parameters;
+                // everything downstream compares the bare lowercase type
+                item.mediaType = item.mediaType?.split(';')[0].trim().toLowerCase()
                 return item
             })
         this.manifestById = new Map(this.manifest.map(item => [item.id, item]))
