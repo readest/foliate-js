@@ -140,6 +140,8 @@ const decodeURIPath = path => {
 }
 
 const resolveURL = (url, relativeTo) => {
+    // a link out of the book keeps its query, which only paths in the book drop
+    if (isExternal(url)) return url
     try {
         if (isExternal(relativeTo)) return new URL(url, relativeTo)
         // the base needs to be a valid URL, so set a base URL and then remove it
