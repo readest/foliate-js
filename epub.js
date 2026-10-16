@@ -1284,6 +1284,15 @@ export class EPUB {
 ${doc.querySelector('parsererror').innerText}`)
         return doc
     }
+    // for optional files: one that fails to parse is skipped, not fatal
+    async #loadOptionalXML(uri) {
+        try {
+            return await this.#loadXML(uri)
+        } catch (e) {
+            console.warn(e)
+            return null
+        }
+    }
     async init() {
         const $container = await this.#loadXML('META-INF/container.xml')
         if (!$container) throw new Error('Failed to load container file')
@@ -1377,8 +1386,8 @@ ${doc.querySelector('parsererror').innerText}`)
         this.media = media
         this.dir = this.resources.pageProgressionDirection
         const displayOptions = getDisplayOptions(
-            await this.#loadXML('META-INF/com.apple.ibooks.display-options.xml')
-            ?? await this.#loadXML('META-INF/com.kobobooks.display-options.xml'))
+            await this.#loadOptionalXML('META-INF/com.apple.ibooks.display-options.xml')
+            ?? await this.#loadOptionalXML('META-INF/com.kobobooks.display-options.xml'))
         if (displayOptions) {
             if (displayOptions.fixedLayout === 'true')
                 this.rendition.layout ??= 'pre-paginated'
