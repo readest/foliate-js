@@ -36,6 +36,13 @@ export const fontsReady = doc => {
     })
 }
 
+// A text field outside the book, such as a note typed while Read Aloud turns
+// the page, keeps its focus when a navigation ends
+const isTypingOutside = () => {
+    const el = document.activeElement
+    return !!el && (el.isContentEditable || el.localName === 'textarea' || el.localName === 'input')
+}
+
 const debounce = (f, wait, immediate) => {
     let timeout
     return (...args) => {
@@ -3549,7 +3556,7 @@ export class Paginator extends HTMLElement {
                 : this.#scrollToPage(this.#getPagesBeforeView(this.#primaryIndex), reason)
             await this.#scrollToRect(rect, reason)
             // focus the element when navigating with keyboard or screen reader
-            if (reason === 'navigation') {
+            if (reason === 'navigation' && !isTypingOutside()) {
                 let node = anchor.focus ? anchor : undefined
                 if (!node && anchor.startContainer) {
                     node = anchor.startContainer
@@ -3864,7 +3871,7 @@ export class Paginator extends HTMLElement {
         const resolvedAnchor = (typeof anchor === 'function'
             ? anchor(primaryView.document) : anchor) ?? 0
         await this.scrollToAnchor(resolvedAnchor, select)
-        if (hasFocus) this.focusView()
+        if (hasFocus && !isTypingOutside()) this.focusView()
         // Reveal content now that primary section is positioned
         this.#container.style.opacity = '1'
         this.#rendered = true
@@ -4114,7 +4121,7 @@ export class Paginator extends HTMLElement {
             await this.scrollToAnchor(resolvedAnchor, select)
             if (this.scrolled) await loadPrev()
             if (blank) this.#container.style.opacity = '1'
-            if (hasFocus) this.focusView()
+            if (hasFocus && !isTypingOutside()) this.focusView()
             // Load remaining adjacent sections progressively;
             // keep #stabilizing true until fill completes
             this.#fillPromise = this.#fillVisibleArea()
