@@ -879,8 +879,8 @@ export class FixedLayout extends HTMLElement {
         // the zoom doesn't jump (matters most when the page was scrolled within
         // an overflowing zoom). See pinchEnd.
         if (this.#pinchAnchor) {
-            const frame = this.#center ?? this.#left ?? this.#right
-            if (frame?.element) {
+            const frame = this.#shownFrames()[0]
+            if (frame) {
                 const b = frame.element.getBoundingClientRect()
                 const maxTop = Math.max(0, this.scrollHeight - this.clientHeight)
                 const maxLeft = Math.max(0, this.scrollWidth - this.clientWidth)
@@ -2029,14 +2029,29 @@ export class FixedLayout extends HTMLElement {
             }
             return
         }
-        const frames = this.#center
-            ? [this.#center]
-            : [this.#left, this.#right]
-        for (const frame of frames) {
-            if (!frame?.element || frame.element.style.visibility === 'hidden') continue
-            frame.element.style.transform = `scale(${ratio})`
-            frame.element.style.transformOrigin = 'center'
+        const elements = this.#shownFrames()
+            .map(frame => frame.element)
+            .filter(element => element.style.visibility !== 'hidden')
+        if (!elements.length) return
+        // Scale the shown pages as one spread around its centre, which is how
+        // the committed zoom lays them out. Scaling each page around its own
+        // centre pulled the two pages of a spread apart, and the release
+        // jumped sideways (readest#6941). Offsets ignore the transform, so the
+        // origin holds still across moves.
+        const left = Math.min(...elements.map(el => el.offsetLeft))
+        const top = Math.min(...elements.map(el => el.offsetTop))
+        const right = Math.max(...elements.map(el => el.offsetLeft + el.offsetWidth))
+        const bottom = Math.max(...elements.map(el => el.offsetTop + el.offsetHeight))
+        for (const element of elements) {
+            element.style.transform = `scale(${ratio})`
+            element.style.transformOrigin = `${(left + right) / 2 - element.offsetLeft}px ${(top + bottom) / 2 - element.offsetTop}px`
         }
+    }
+    // The paginated pages on screen. Portrait shows one page of a spread and
+    // hides the other with display: none, which has no rect to anchor on.
+    #shownFrames() {
+        const frames = this.#center ? [this.#center] : [this.#left, this.#right]
+        return frames.filter(frame => frame?.element?.offsetWidth)
     }
     pinchEnd() {
         if (this.#scrollMode) {
@@ -2055,8 +2070,8 @@ export class FixedLayout extends HTMLElement {
         // Paginated: snapshot the spread's on-screen rect from the still-scaled
         // preview so the committed zoom (#render) can scroll it back to the same
         // spot instead of re-centring and jumping.
-        const shown = this.#center ?? this.#left ?? this.#right
-        if (shown?.element) {
+        const shown = this.#shownFrames()[0]
+        if (shown) {
             const b = shown.element.getBoundingClientRect()
             this.#pinchAnchor = { top: b.top, left: b.left }
         }
