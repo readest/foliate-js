@@ -643,15 +643,25 @@ const render = async (page, doc, zoom, pageColors) => {
     // the canvas must be in the `PDFDocument`'s `ownerDocument`
     // (`globalThis.document` by default); that's where the fonts are loaded
     const canvas = document.createElement('canvas')
-    canvas.height = renderViewport.height
-    canvas.width = renderViewport.width
-    // The CSS box is the un-truncated display size, so the (integer-truncated)
-    // over-sampled bitmap is scaled by the browser to fill the page box exactly.
-    // Pinning the box to the display viewport (rather than letting the truncated
-    // bitmap drive layout) also keeps the left page flush to the spine of a
-    // two-page spread instead of exposing a one-pixel white seam (#4587).
-    canvas.style.width = `${displayViewport.width}px`
-    canvas.style.height = `${displayViewport.height}px`
+    // The CSS box must cover the whole page box, so the left page of a two-page
+    // spread stays flush to the spine instead of exposing a one-pixel white seam
+    // (#4587). At the full device pixel ratio the bitmap is rounded UP to whole
+    // device pixels and the box sized to match, so it maps 1:1 onto the screen:
+    // a box a fraction of a pixel off the bitmap makes the browser resample it,
+    // which blurs glyph edges at Windows scales such as 125% and 150% (readest
+    // #6928). A clamped render dpr can't map 1:1, so its integer-truncated bitmap
+    // is scaled to the un-truncated display size.
+    if (renderDpr === devicePixelRatio) {
+        canvas.width = Math.ceil(renderViewport.width - 1e-3)
+        canvas.height = Math.ceil(renderViewport.height - 1e-3)
+        canvas.style.width = `${canvas.width / renderDpr}px`
+        canvas.style.height = `${canvas.height / renderDpr}px`
+    } else {
+        canvas.width = renderViewport.width
+        canvas.height = renderViewport.height
+        canvas.style.width = `${displayViewport.width}px`
+        canvas.style.height = `${displayViewport.height}px`
+    }
     const canvasContext = canvas.getContext('2d')
     const renderTask = page.render({ canvasContext, viewport: renderViewport })
     activeRenderTasks.set(doc, renderTask)
