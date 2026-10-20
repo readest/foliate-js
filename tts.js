@@ -159,12 +159,61 @@ const getFragmentWithMarks = (range, textWalker, nodeFilter, granularity) => {
 
 const rangeIsEmpty = range => !range.toString().trim()
 
+// A line-end hyphen of a PDF text layer, set aside so that the word it breaks
+// is read whole. An element, not a text node, so it survives the copy that
+// receives the marks.
+const LINE_HYPHEN = 'foliate-line-hyphen'
+// Scripts set without spaces between words, and their punctuation
+const NO_SPACE = '[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}\\u3000-\\u303F\\uFF00-\\uFFEF]'
+const noSpaceAtEnd = new RegExp(`${NO_SPACE}$`, 'u')
+const noSpaceAtStart = new RegExp(`^${NO_SPACE}`, 'u')
+
+const skipLineHyphens = nodeFilter => nodeFilter && (node =>
+    node.nodeType === 1 && node.localName === LINE_HYPHEN
+        ? NodeFilter.FILTER_REJECT : nodeFilter(node))
+
+// pdf.js ends each printed line with a <br> and no space, and the <br> is not
+// read (#3771), so the last word of a line ran into the first of the next.
+// Join each wrap for reading: with a space, or without the hyphen of a word
+// hyphenated across the break when the next line goes on in lowercase
+// (explanator-ily), keeping it before a capital (Javier-Castellanos). The
+// space is a text node of its own beside the <br>, where it doesn't render.
+const joinPDFLines = (doc, textLayer) => {
+    const walker = doc.createTreeWalker(textLayer, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT)
+    const wraps = []
+    let last = null, br = null
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.nodeType === 1) {
+            if (node.localName === 'br') br = last ? { br: node, before: last } : null
+            continue
+        }
+        if (!node.nodeValue) continue
+        if (br) wraps.push({ ...br, after: node })
+        br = null
+        last = node
+    }
+    for (const { br, before, after } of wraps) {
+        const a = before.nodeValue, b = after.nodeValue
+        if (/\s$/.test(a) || /^\s/.test(b) || before.parentNode.localName === LINE_HYPHEN) continue
+        if (/[-‐]$/.test(a) && /^\p{Ll}/u.test(b)) {
+            const hyphen = doc.createElement(LINE_HYPHEN)
+            before.splitText(a.length - 1)
+            before.nextSibling.replaceWith(hyphen)
+            hyphen.textContent = a.slice(-1)
+            continue
+        }
+        if (/[-‐­]$/.test(a) || noSpaceAtEnd.test(a) || noSpaceAtStart.test(b)) continue
+        br.before(doc.createTextNode(' '))
+    }
+}
+
 // For PDF text layers, split content into sentence-level blocks so TTS
 // reads one sentence at a time instead of the whole page in one block.
 // Text nodes are split at sentence boundaries so that every block range
 // aligns with node edges — this prevents the text walker from including
 // text outside the sentence in word marks.
 function* getPDFSentenceBlocks(doc, textLayer) {
+    joinPDFLines(doc, textLayer)
     const collectNodes = () => {
         const w = doc.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT)
         const res = []
@@ -293,6 +342,7 @@ function* getBlocks(doc, nodeFilter) {
 // for the same granularity, so callers (e.g. a playback timeline) can
 // correlate the enumeration with live marks and use each range with from().
 export function* getSentences(doc, textWalker, nodeFilter, granularity = 'sentence') {
+    nodeFilter = skipLineHyphens(nodeFilter)
     let blockIndex = 0
     for (const range of getBlocks(doc, nodeFilter)) {
         const lang = getLang(range.commonAncestorContainer)
@@ -369,6 +419,7 @@ export class TTS {
     #lastMark
     #serializer = new XMLSerializer()
     constructor(doc, textWalker, nodeFilter, highlight, granularity) {
+        nodeFilter = skipLineHyphens(nodeFilter)
         this.doc = doc
         this.highlight = highlight
         this.#list = new ListIterator(getBlocks(doc, nodeFilter), range => {
