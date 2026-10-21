@@ -3791,27 +3791,6 @@ export class Paginator extends HTMLElement {
             const localColumn = localPage * this.columnCount
             detail.fraction = textPages > 0 ? Math.max(0, Math.min(1, localColumn / textPages)) : 0
             detail.size = textPages > 0 ? this.columnCount / textPages : 1
-            // The measured column index and count within the section: what a
-            // host needs for a chapter-local page readout, advancing exactly
-            // once per page turn, unlike the byte-weighted `fraction` above.
-            // 0-based, column units. For a section rendered as chunks, compose
-            // the rendered chunks of the section: pages of rendered chunks
-            // before the current one plus the current chunk-local column, and
-            // the sum of rendered chunks' counts, which grows as later chunks
-            // render. Undefined in scrolled mode (no pages there).
-            detail.sectionPage = localColumn
-            detail.sectionPages = textPages
-            if (this.#units[index]?.count > 1) {
-                const unitSpine = this.#units[index].spine
-                let before = 0, total = 0
-                for (const [unitIndex, view] of this.#sortedViews) {
-                    if (this.#units[unitIndex]?.spine !== unitSpine) continue
-                    total += view.contentPages
-                    if (unitIndex < index) before += view.contentPages
-                }
-                detail.sectionPage = before + localColumn
-                detail.sectionPages = total
-            }
             if (reason === 'container-scroll' && localPage === 0) return
         }
         // Update per-column backgrounds for the current scroll position
