@@ -290,6 +290,13 @@ export const setupPanningEvents = (doc) => {
         }
     }
 
+    // The browser still runs a panning drag's default action, which selects
+    // text from where the drag started (readest #6959). A page with nothing
+    // to scroll doesn't pan, so a drag there still selects.
+    doc.addEventListener('selectstart', (e) => {
+        if (isPanning && scrollParent && scrollParent !== window) e.preventDefault()
+    })
+
     container.onpointermove = (e) => {
         if (isPanning && scrollParent) {
             e.preventDefault()
