@@ -227,10 +227,8 @@ export const setupPanningEvents = (doc) => {
     if (!container) return
 
     let isPanning = false
-    let startX = 0
-    let startY = 0
-    let scrollLeft = 0
-    let scrollTop = 0
+    let lastX = 0
+    let lastY = 0
     let scrollParent = null
     let isPointerSelecting = false
 
@@ -269,19 +267,16 @@ export const setupPanningEvents = (doc) => {
 
         if (!hasTextUnderneath && !hasTextSelection) {
             isPanning = true
-            startX = e.screenX
-            startY = e.screenY
+            lastX = e.screenX
+            lastY = e.screenY
 
             const iframe = doc.defaultView?.frameElement
             if (iframe) {
                 scrollParent = findScrollableParent(iframe)
-                if (scrollParent === window) {
-                    scrollLeft = window.scrollX || window.pageXOffset
-                    scrollTop = window.scrollY || window.pageYOffset
-                } else {
-                    scrollLeft = scrollParent.scrollLeft
-                    scrollTop = scrollParent.scrollTop
-                }
+                // The page is drawn a frame behind the pointer, so a quick drag
+                // near its edge can run past it for a moment; keep the pointer
+                // until the drag ends (readest #7009).
+                container.setPointerCapture(e.pointerId)
                 container.style.cursor = 'grabbing'
             }
         } else {
@@ -301,8 +296,13 @@ export const setupPanningEvents = (doc) => {
         if (isPanning && scrollParent) {
             e.preventDefault()
 
-            const dx = e.screenX - startX
-            const dy = e.screenY - startY
+            // Move by the pointer's step, not by its distance from the start
+            // of the drag, so a drag past the end of the document pans back as
+            // soon as it turns (readest #7009).
+            const dx = e.screenX - lastX
+            const dy = e.screenY - lastY
+            lastX = e.screenX
+            lastY = e.screenY
             // Panning a zoomed page is a script write, not native scrolling, so
             // `touch-action` cannot constrain it. The renderer mirrors the
             // horizontal pan lock onto this document's root element (#5976);
@@ -311,10 +311,10 @@ export const setupPanningEvents = (doc) => {
             const lockX = doc.documentElement.style.touchAction === 'pan-y'
 
             if (scrollParent === window) {
-                window.scrollTo(lockX ? window.scrollX : scrollLeft - dx, scrollTop - dy)
+                window.scrollBy(lockX ? 0 : -dx, -dy)
             } else {
-                if (!lockX) scrollParent.scrollLeft = scrollLeft - dx
-                scrollParent.scrollTop = scrollTop - dy
+                if (!lockX) scrollParent.scrollLeft -= dx
+                scrollParent.scrollTop -= dy
             }
         }
     }
@@ -375,7 +375,8 @@ export const setupPanningEvents = (doc) => {
         }
     }
 
-    container.onpointerleave = () => {
+    // Also ends a pan the browser takes over or cancels.
+    container.onlostpointercapture = () => {
         if (isPanning) {
             isPanning = false
             scrollParent = null
