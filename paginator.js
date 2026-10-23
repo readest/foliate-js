@@ -4349,6 +4349,7 @@ export class Paginator extends HTMLElement {
                 index: this.#spineOf(index),
                 overlayer: view.overlayer,
                 doc: view.document,
+                contentPages: view.contentPages,
             }
             // Several chunks of one section can be rendered, and callers pick
             // the section's document by spine index: list the primary chunk
