@@ -1654,6 +1654,28 @@ export class FixedLayout extends HTMLElement {
                 >= this.#scrollTotalLength() - 2
         return this.#index >= this.#spreads.length - 1
     }
+    // Names the page next()/prev() would show, as the paginator does. A
+    // portrait view shows one side of a spread at a time, so the side is part
+    // of the key there.
+    getPageTurnKey(delta = 0) {
+        const spreads = this.#spreads
+        if (this.#scrollMode || !spreads?.[this.#index] || Math.abs(delta) > 1) return null
+        const key = (index, side) => this.#portrait && !spreads[index].center
+            ? `${index}:${side}` : `${index}`
+        if (!delta) return key(this.#index, this.#side)
+        // next() first reveals the hidden page of a portrait spread.
+        const toward = delta > 0 !== this.rtl ? 'right' : 'left'
+        const frame = toward === 'left' ? this.#left : this.#right
+        if (this.#portrait && !this.#center && this.#side !== toward && frame && !frame.blank)
+            return key(this.#index, toward)
+        const index = this.#index + delta
+        const spread = spreads[index]
+        if (!spread) return null
+        // goToSpread lands on the near side, or the only side a blank leaves.
+        const side = spread.center ? 'center' : !spread.left ? 'right' : !spread.right ? 'left'
+            : toward === 'left' ? 'right' : 'left'
+        return key(index, side)
+    }
     // The section on screen, as the paginator names its primary view: callers
     // pick the document they act on from getContents() by it. Without it they
     // fell back to the first frame, the left page of a two-page spread.
