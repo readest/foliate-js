@@ -1533,6 +1533,8 @@ export class Paginator extends HTMLElement {
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
     #justAnchored = false
     #locked = false // while true, prevent any further navigation
+    #pagePreview = null
+    #cancelPagePreview = null
     #styles
     #styleMap = new WeakMap()
     #mediaQuery = matchMedia('(prefers-color-scheme: dark)')
@@ -1739,6 +1741,7 @@ export class Paginator extends HTMLElement {
         // periodic mid-scroll relocate below; null when no run is in progress.
         let scrollBurstStart = null
         const debouncedScroll = debounce(() => {
+            if (this.#pagePreview) return
             scrollBurstStart = null
             if (this.scrolled && !this.#isAnimating) {
                 scrolledScrollRelocate()
@@ -1752,6 +1755,7 @@ export class Paginator extends HTMLElement {
             }
         }, 250)
         this.#container.addEventListener('scroll', () => {
+            if (this.#pagePreview) return
             if (!this.#isAnimating) this.dispatchEvent(new Event('scroll'))
             // Keep the per-view backgrounds glued to the content while a swipe
             // drag scrolls the container (no animation runs then). During the
@@ -2384,6 +2388,8 @@ export class Paginator extends HTMLElement {
         return layout
     }
     render() {
+        // Restore the real viewport before reflow anchors it at a new size.
+        this.#cancelPagePreview?.()
         if (this.#views.size === 0) return
         const primaryView = this.#primaryView
         if (!primaryView) return
@@ -4055,6 +4061,7 @@ export class Paginator extends HTMLElement {
         return index >= 0 && index <= this.sections.length - 1
     }
     async #goTo({ index, anchor, select }) {
+        if (this.#pagePreview) await this.#pagePreview
         const section = this.sections[index]
         if (!section) return
         // Check if the target section has a different writing-mode.
@@ -4164,6 +4171,7 @@ export class Paginator extends HTMLElement {
         }
     }
     async goTo(target) {
+        if (this.#pagePreview) await this.#pagePreview
         if (this.#locked) return
         const resolved = await this.#toUnitTarget(await target)
         if (this.#canGoToIndex(resolved.index)) return this.#goTo(resolved)
@@ -4227,6 +4235,8 @@ export class Paginator extends HTMLElement {
         return index
     }
     async #turnPage(dir, distance) {
+        const nativeCommit = this.hasAttribute('data-native-paper-commit')
+        if (this.#pagePreview) await this.#pagePreview
         if (this.#locked) return
         this.#locked = true
         const prev = dir === -1
@@ -4245,11 +4255,70 @@ export class Paginator extends HTMLElement {
                 anchor: prev ? () => 1 : () => 0,
             })
         }
-        if (shouldGo || !this.hasAttribute('animated')) await wait(100)
+        if (!nativeCommit && (shouldGo || !this.hasAttribute('animated'))) await wait(100)
         this.#locked = false
     }
     async prev(distance) {
         return await this.#turnPage(-1, distance)
+    }
+    // Stable within one layout, including when loaded views are prepended.
+    // A preview never calls #afterScroll: reading progress/history stay put.
+    getPageTurnKey(delta = 0) {
+        if (this.scrolled || this.#vertical || !this.size) return null
+        const offset = (this.#renderedPage + delta) * this.size
+        if (offset < 0 || offset >= this.#renderedViewSize - 1) return null
+        for (const [index, view] of this.#sortedViews) {
+            const start = this.#getViewOffset(index)
+            const end = start + view.element.getBoundingClientRect()[this.sideProp]
+            if (offset >= start - 1 && offset < end - 1)
+                return `${index}:${Math.round((offset - start) / this.size)}`
+        }
+        return null
+    }
+    async previewPage(forward, capture, signal) {
+        if (signal?.aborted || this.#pagePreview || this.#locked || this.#stabilizing || this.#touchScrolled) return null
+        const delta = forward ? 1 : -1
+        const key = this.getPageTurnKey(delta)
+        if (!key) return null // unloaded sections use normal navigation
+        let release
+        this.#pagePreview = new Promise(resolve => { release = resolve })
+        this.#locked = true
+        const position = this.containerPosition
+        let restored = false
+        let cancelled = false
+        const aborted = Symbol('preview-aborted')
+        let stopCapture
+        const interrupted = new Promise(resolve => { stopCapture = resolve })
+        const restore = () => {
+            if (restored) return
+            restored = true
+            this.containerPosition = position
+            this.#replaceBackground()
+        }
+        const cancel = () => { cancelled = true; restore(); stopCapture(aborted) }
+        this.#cancelPagePreview = cancel
+        signal?.addEventListener('abort', cancel, { once: true })
+        const paint = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        try {
+            const page = this.#renderedPage + delta
+            this.containerPosition = this.size * (this.#rtl ? -page : page)
+            this.#replaceBackground()
+            await paint()
+            if (signal?.aborted || cancelled) return null
+            // Encoding may continue off thread after contact. It must not hold
+            // the viewport/navigation lock; the caller discards its late pixels.
+            const value = await Promise.race([capture(), interrupted])
+            return value === aborted ? null : { key, value }
+        } finally {
+            signal?.removeEventListener('abort', cancel)
+            restore()
+            // Drain the restoring scroll event before re-enabling relocation.
+            await paint()
+            this.#pagePreview = null
+            this.#cancelPagePreview = null
+            this.#locked = false
+            release()
+        }
     }
     async next(distance) {
         return await this.#turnPage(1, distance)
