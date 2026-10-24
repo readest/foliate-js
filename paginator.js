@@ -4183,8 +4183,21 @@ export class Paginator extends HTMLElement {
     #scrollPrev(distance) {
         if (this.#views.size === 0) return true
         if (this.scrolled) {
-            if (this.#renderedStart > 0) return this.#scrollTo(
-                Math.max(0, this.#renderedStart - (distance ?? this.size)), null, true)
+            // A nonzero start offset is not always scrollable away: an RTL
+            // scroller clamps at its own origin, and a section restored from a
+            // saved CFI can come to rest a few pixels into its own strip. The
+            // rewind then only eats those pixels: the page looks still, the tap
+            // is spent, and the turn never crosses at the section boundary
+            // because #scrollTo resolves without a value on every path.
+            // Report a rewind that moved far less than a page as "could not
+            // move" so #turnPage crosses into the previous section instead.
+            if (this.#renderedStart > 0) {
+                const start = this.#renderedStart
+                const step = distance ?? this.size
+                return this.#scrollTo(
+                    Math.max(0, start - step), null, true)
+                    .then(() => start - this.#renderedStart < step / 10 && !this.atStart)
+            }
             return !this.atStart
         }
         if (this.atStart) return
