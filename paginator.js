@@ -1535,6 +1535,8 @@ export class Paginator extends HTMLElement {
     #rtl = false
     #marginTop = 0
     #marginBottom = 0
+    #marginLeft = 0
+    #marginRight = 0
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
     #justAnchored = false
     #locked = false // while true, prevent any further navigation
@@ -2283,6 +2285,8 @@ export class Paginator extends HTMLElement {
         const marginLeft = parseFloat(style.getPropertyValue('--_margin-left'))
         this.#marginTop = marginTop
         this.#marginBottom = marginBottom
+        this.#marginLeft = marginLeft
+        this.#marginRight = marginRight
 
         // Compute the column count from the host (Paginator) size rather than
         // the #container size. The container width depends on --_column-count
@@ -3303,12 +3307,21 @@ export class Paginator extends HTMLElement {
     #getRectMapper(view) {
         if (this.scrolled) {
             const size = view ? view.element.getBoundingClientRect()[this.sideProp] : this.#renderedViewSize
-            const marginTop = this.#marginTop
-            const marginBottom = this.#marginBottom
+            // Vertical text stacks its columns along the block axis, so the
+            // distance from a section's start is measured against the
+            // block-end padding — the right-hand page margin, which is what
+            // `scrolled()` writes into `padding-right`. Subtracting the
+            // inline-axis margin top/bottom there (the horizontal branch's
+            // fudge, where the page's top margin really does sit above the
+            // text) left every fragment jump about
+            // `marginRight - marginTop` px into the section: the reader opened
+            // a chapter from the table of contents a few dozen pixels in, and
+            // the first page turn back only undid that residue instead of
+            // reaching the previous chapter.
             return this.#vertical
                 ? ({ left, right }) =>
-                    ({ left: size - right - marginTop, right: size - left - marginBottom })
-                : ({ top, bottom }) => ({ left: top - marginTop, right: bottom - marginBottom })
+                    ({ left: size - right - this.#marginRight, right: size - left - this.#marginLeft })
+                : ({ top, bottom }) => ({ left: top - this.#marginTop, right: bottom - this.#marginBottom })
         }
         // For RTL the mapper mirrors a rect within the iframe-local
         // coordinate space of the *target view* (each view is a separate
@@ -3340,7 +3353,13 @@ export class Paginator extends HTMLElement {
         if (this.scrolled) {
             // rect is in iframe-local coordinates; add view offset
             // to convert to container scroll coordinates
-            const localOffset = this.#getRectMapper()(rect).left - 3
+            // The `- 3` keeps a hairline of the previous column from peeking
+            // in at the edge, but at a section start it would leave a 3px
+            // residue that `#scrollPrev` reads as "there is still something to
+            // rewind": the first turn back at a chapter head would spend
+            // itself on those 3px instead of crossing into the previous
+            // section. Clamp at the origin.
+            const localOffset = Math.max(0, this.#getRectMapper()(rect).left - 3)
             const viewOffset = this.#getViewOffset(this.#primaryIndex)
             return this.#scrollTo(viewOffset + localOffset, reason)
         }
