@@ -106,9 +106,16 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
         }
         return as.length - bs.length
     }
+    // Match extensions case-insensitively (001.JPG), and skip the resource
+    // forks a Finder-made zip carries (__MACOSX/._001.jpg) and other dotfiles.
+    const isPage = name => {
+        if (name.startsWith('__MACOSX/')) return false
+        const base = name.split('/').pop().toLowerCase()
+        return !base.startsWith('.') && exts.some(ext => base.endsWith(ext))
+    }
     const files = entries
         .map(entry => entry.filename)
-        .filter(name => exts.some(ext => name.endsWith(ext)))
+        .filter(isPage)
         .sort(comparePaths)
     if (!files.length) throw new Error('No supported image files in archive')
 
