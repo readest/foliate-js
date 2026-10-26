@@ -59,7 +59,8 @@ const isTextish = node => node?.nodeType === 3 || node?.nodeType === 4
 
 // Describe how an extracted fragment maps back onto the pristine section
 // document, so a CFI computed against the mutated popup document (whose body
-// is replaced with the fragment) can be translated into one that resolves in
+// is replaced with the fragment, inside `depth` copies of the elements it came
+// from) can be translated into one that resolves in
 // the original document, and vice versa. Only ranges with element-aligned
 // boundaries in a single container element are supported (which covers every
 // range built below except resolved CFI ranges); anything else returns null.
@@ -67,7 +68,7 @@ const isTextish = node => node?.nodeType === 3 || node?.nodeType === 4
 // The mapping works because a CFI child step's index depends only on the
 // number of preceding *element* siblings (elements take even indices, text
 // chunks the odd indices between them), so moving a contiguous, chunk-aligned
-// run of children into an empty body shifts every first-level index by a
+// run of children into an empty element shifts every first-level index by a
 // constant `delta` and leaves all deeper steps untouched.
 export const getExtractMapping = range => {
     try {
@@ -87,6 +88,9 @@ export const getExtractMapping = range => {
         return {
             // collapsed CFI (document part only) of the container element
             containerCfi: CFI.fromRange(collapsed),
+            // how many element copies the popup body wraps the fragment in
+            // (see extractToBody), each the only child of the one above
+            depth: getNoteAncestors(container.ownerDocument, container).length,
             delta,
             // first/last first-level indices (in original-document terms)
             // covered by the extracted range, for reverse mapping
@@ -98,17 +102,43 @@ export const getExtractMapping = range => {
     }
 }
 
-// Move a note into the popup body. The element the note is extracted from
-// goes with it, and books often set the note's font on exactly that element
-// (e.g. `li.duokan-footnote-item { font-family: ... }`), so carry it over
+// Placement a note's own elements can't keep in the popup: books hide them in
+// the text (`display: none`), float them into the margin as side notes or size
+// them as a share of the page.
+const noteBoxReset = {
+    'display': 'block', 'visibility': 'visible', 'position': 'static',
+    'float': 'none', 'margin': '0', 'width': 'auto', 'height': 'auto',
+    'min-width': '0', 'min-height': '0', 'max-width': 'none', 'max-height': 'none',
+}
+
+const getNoteAncestors = (doc, node) => {
+    const ancestors = []
+    for (let el = node.nodeType === 1 ? node : node.parentElement;
+        el && el !== doc.body; el = el.parentElement) ancestors.unshift(el)
+    return ancestors
+}
+
+// Move a note into the popup body. Books style a note through the elements it
+// sits in (`aside.note p.pinyin`, a smaller size or a font set on the note
+// element), so the note goes in inside shallow copies of them, from the body
+// down, with only their placement reset
 export const extractToBody = (doc, range) => {
-    const container = range.commonAncestorContainer
-    const el = container.nodeType === 1 ? container : container.parentElement
-    const { fontFamily } = doc.defaultView.getComputedStyle(el)
+    const ancestors = getNoteAncestors(doc, range.commonAncestorContainer)
     const frag = range.extractContents()
     doc.body.replaceChildren()
-    doc.body.appendChild(frag)
-    doc.body.style.fontFamily = fontFamily
+    let parent = doc.body
+    for (const el of ancestors) {
+        const copy = el.cloneNode(false)
+        copy.removeAttribute('hidden')
+        for (const [name, value] of Object.entries(noteBoxReset))
+            copy.style?.setProperty(name, value, 'important')
+        // its items lose their markers, so the indent kept for them goes too
+        if (copy.matches('ol, ul'))
+            copy.style?.setProperty('padding-inline-start', '0', 'important')
+        parent.appendChild(copy)
+        parent = copy
+    }
+    parent.appendChild(frag)
 }
 
 export class FootnoteHandler extends EventTarget {
