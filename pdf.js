@@ -442,6 +442,139 @@ const getRenderDpr = (page, zoom) => {
     return Math.max(1, dpr)
 }
 
+// The part of the page on screen, in the page document's CSS px, or null: the
+// frame's box clipped by the window and by every ancestor that clips overflow
+// (the fixed-layout host scrolls a zoomed page). Preloaded spreads are hidden.
+const CLIPS = ['auto', 'scroll', 'hidden', 'clip']
+const getVisibleRect = doc => {
+    const frame = doc.defaultView?.frameElement
+    const win = frame?.ownerDocument.defaultView
+    if (!win || win.getComputedStyle(frame).visibility === 'hidden') return null
+    const box = frame.getBoundingClientRect()
+    // Mid-pinch the frame is scaled by a transform; the re-render comes next.
+    if (Math.abs(box.width - frame.offsetWidth) > 1) return null
+    let [left, top, right, bottom] = [Math.max(0, box.left), Math.max(0, box.top),
+        Math.min(win.innerWidth, box.right), Math.min(win.innerHeight, box.bottom)]
+    for (let el = frame.parentElement ?? frame.parentNode?.host; el;
+        el = el.parentElement ?? el.parentNode?.host) {
+        const { overflowX, overflowY } = win.getComputedStyle(el)
+        const r = el.getBoundingClientRect()
+        if (CLIPS.includes(overflowX)) [left, right] = [Math.max(left, r.left), Math.min(right, r.right)]
+        if (CLIPS.includes(overflowY)) [top, bottom] = [Math.max(top, r.top), Math.min(bottom, r.bottom)]
+    }
+    if (right <= left || bottom <= top) return null
+    return { box, left, top, right, bottom }
+}
+
+// The full-page bitmap is held to the mobile memory budget, so it is coarser
+// than the screen on a phone (dpr 3, clamped to 2) or a tablet (over the pixel
+// budget), more so the further the reader zooms in (readest #7100). Each page
+// also gets a "detail" canvas over just the part that is on screen, drawn at
+// the full device pixel ratio, like the pdf.js viewer's detail view. Its size
+// is bounded by the screen, whatever the zoom, and it is dropped once the page
+// leaves the screen.
+const detailSources = new Map()
+const details = new WeakMap()
+const scrollWatched = new WeakSet()
+let detailTimer = null
+
+// Readest blends PDF canvases into the theme (`mix-blend-mode`), which would
+// let the coarse page show through the detail, so the page is cut away under it.
+const clipBase = (doc, hole) => {
+    const base = doc.querySelector('#canvas canvas')
+    if (!base) return
+    if (!hole) return base.style.removeProperty('clip-path')
+    const [l, t, r, b] = hole.map(v => `${v}px`)
+    base.style.clipPath = `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${l} ${t}, ${r} ${t}, ${r} ${b}, ${l} ${b}, ${l} ${t})`
+}
+
+const dropDetail = doc => {
+    const detail = details.get(doc)
+    if (!detail) return
+    detail.task?.cancel()
+    detail.canvas.remove()
+    detail.canvas.width = detail.canvas.height = 0
+    details.delete(doc)
+    clipBase(doc, null)
+}
+
+const updateDetail = async doc => {
+    const source = detailSources.get(doc)
+    const visible = source && getVisibleRect(doc)
+    if (!visible) return dropDetail(doc)
+    const { page, zoom, renderDpr, colorMatrix, imageRects } = source
+    const dpr = devicePixelRatio
+    // Whole device pixels on screen, so the bitmap maps 1:1 onto them.
+    const { box } = visible
+    const x0 = Math.floor(visible.left * dpr), x1 = Math.ceil(visible.right * dpr)
+    const y0 = Math.floor(visible.top * dpr), y1 = Math.ceil(visible.bottom * dpr)
+    const key = [x0, y0, x1, y1, box.left, box.top].join()
+    const old = details.get(doc)
+    if (old?.key === key && old.source === source) return
+    dropDetail(doc)
+
+    const left = x0 / dpr - box.left, top = y0 / dpr - box.top
+    const canvas = document.createElement('canvas')
+    canvas.width = x1 - x0
+    canvas.height = y1 - y0
+    Object.assign(canvas.style, {
+        position: 'absolute',
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${canvas.width / dpr}px`,
+        height: `${canvas.height / dpr}px`,
+        pointerEvents: 'none',
+    })
+    const viewport = page.getViewport({ scale: zoom * dpr,
+        offsetX: -left * dpr, offsetY: -top * dpr })
+    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport })
+    const detail = { key, source, canvas, task }
+    details.set(doc, detail)
+    try {
+        await task.promise
+    } catch {
+        if (details.get(doc) === detail) details.delete(doc)
+        canvas.width = canvas.height = 0
+        return
+    }
+    if (details.get(doc) !== detail) return
+    detail.task = null
+    if (colorMatrix) {
+        const k = dpr / renderDpr
+        applyPageColors(canvas, colorMatrix, imageRects.map(([a, b, c, d]) =>
+            [a * k - left * dpr, b * k - top * dpr, c * k - left * dpr, d * k - top * dpr]))
+    }
+    doc.querySelector('#canvas')?.append(canvas)
+    clipBase(doc, [left, top, left + canvas.width / dpr, top + canvas.height / dpr])
+}
+
+const updateDetails = () => {
+    detailTimer = null
+    for (const doc of detailSources.keys())
+        if (doc.defaultView) updateDetail(doc)
+        else detailSources.delete(doc)
+}
+
+const scheduleDetails = () => {
+    clearTimeout(detailTimer)
+    detailTimer = setTimeout(updateDetails, 150)
+}
+
+const setDetailSource = (doc, source) => {
+    dropDetail(doc)
+    if (source.renderDpr >= devicePixelRatio) detailSources.delete(doc)
+    else detailSources.set(doc, source)
+    // Follow the reader panning or scrolling a zoomed page.
+    const frame = doc.defaultView?.frameElement
+    for (let el = frame?.parentElement ?? frame?.parentNode?.host; el;
+        el = el.parentElement ?? el.parentNode?.host) {
+        if (scrollWatched.has(el)) continue
+        scrollWatched.add(el)
+        el.addEventListener('scroll', scheduleDetails, { passive: true })
+    }
+    scheduleDetails()
+}
+
 // Rec. 709 luma weights
 const LUMA = [0.2126, 0.7152, 0.0722]
 
@@ -542,6 +675,10 @@ const getImageRects = ({ fnArray, argsArray }, baseTransform) => {
 // page, or a scanned book would stay white in a dark theme.
 const MAX_KEPT_IMAGE_COVERAGE = 0.5
 
+const getKeptImageRects = (imageRects, width, height) => imageRects.filter(([x0, y0, x1, y1]) =>
+    (x1 - x0) * (y1 - y0) < width * height * MAX_KEPT_IMAGE_COVERAGE)
+
+// Theme the canvas, except where `imageRects` (canvas pixels) say images are.
 const applyPageColors = (canvas, matrix, imageRects) => {
     const { width, height } = canvas
     // Round inward: an edge pixel the image only partly covers is blended with
@@ -550,7 +687,7 @@ const applyPageColors = (canvas, matrix, imageRects) => {
         const x = Math.max(0, Math.ceil(x0))
         const y = Math.max(0, Math.ceil(y0))
         return [x, y, Math.min(width, Math.floor(x1)) - x, Math.min(height, Math.floor(y1)) - y]
-    }).filter(([, , w, h]) => w > 0 && h > 0 && w * h < width * height * MAX_KEPT_IMAGE_COVERAGE)
+    }).filter(([, , w, h]) => w > 0 && h > 0)
         .map(([x, y, w, h]) => {
             const copy = document.createElement('canvas')
             copy.width = w
@@ -608,7 +745,8 @@ const render = async (page, doc, zoom, pageColors) => {
     const signature = [zoom, pageColors?.background, pageColors?.foreground,
         pageColors?.keepImages, getFontScale(doc)].join('|')
     const rendered = renderedFor.get(doc)
-    if (rendered?.page === page && rendered.signature === signature) return
+    // A page turn or resize can bring the page on screen without changing it.
+    if (rendered?.page === page && rendered.signature === signature) return scheduleDetails()
 
     // Increment generation to invalidate any in-progress render for this doc
     const generation = (renderGenerations.get(doc) || 0) + 1
@@ -691,7 +829,9 @@ const render = async (page, doc, zoom, pageColors) => {
     }
 
     const imageRects = operatorList ? getImageRects(operatorList, renderViewport.transform) : []
-    if (colorMatrix) applyPageColors(canvas, colorMatrix, pageColors.keepImages ? imageRects : [])
+    const keptImageRects = colorMatrix && pageColors.keepImages
+        ? getKeptImageRects(imageRects, canvas.width, canvas.height) : []
+    if (colorMatrix) applyPageColors(canvas, colorMatrix, keptImageRects)
 
     // Bail out if a newer render has started or iframe was removed
     if (renderGenerations.get(doc) !== generation || !doc.defaultView) {
@@ -716,6 +856,7 @@ const render = async (page, doc, zoom, pageColors) => {
         oldCanvas.height = 0
     }
     canvasElement.replaceChildren(doc.adoptNode(canvas))
+    setDetailSource(doc, { page, zoom, renderDpr, colorMatrix, imageRects: keptImageRects })
 
     // The page is one canvas under a text layer that covers all of it, so
     // nothing marks where its images are. Let the reader find the one under a
