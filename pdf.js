@@ -472,8 +472,10 @@ const getVisibleRect = doc => {
 // also gets a "detail" canvas over just the part that is on screen, drawn at
 // the full device pixel ratio, like the pdf.js viewer's detail view. Its size
 // is bounded by the screen, whatever the zoom, and it is dropped once the page
-// leaves the screen.
-const detailSources = new Map()
+// leaves the screen. Documents are held weakly: once a reader closes, nothing
+// renders or scrolls to prune them, and each still holds its page's bitmap.
+const detailDocs = new Set()
+const detailSources = new WeakMap()
 const details = new WeakMap()
 const scrollWatched = new WeakSet()
 let detailTimer = null
@@ -500,7 +502,8 @@ const dropDetail = doc => {
 
 const updateDetail = async doc => {
     const source = detailSources.get(doc)
-    const visible = source && getVisibleRect(doc)
+    // Where the page bitmap already matches the screen, there is nothing to add.
+    const visible = source?.renderDpr < devicePixelRatio && getVisibleRect(doc)
     if (!visible) return dropDetail(doc)
     const { page, zoom, renderDpr, colorMatrix, imageRects } = source
     const dpr = devicePixelRatio
@@ -550,9 +553,11 @@ const updateDetail = async doc => {
 
 const updateDetails = () => {
     detailTimer = null
-    for (const doc of detailSources.keys())
-        if (doc.defaultView) updateDetail(doc)
-        else detailSources.delete(doc)
+    for (const ref of detailDocs) {
+        const doc = ref.deref()
+        if (doc?.defaultView) updateDetail(doc)
+        else detailDocs.delete(ref)
+    }
 }
 
 const scheduleDetails = () => {
@@ -562,8 +567,8 @@ const scheduleDetails = () => {
 
 const setDetailSource = (doc, source) => {
     dropDetail(doc)
-    if (source.renderDpr >= devicePixelRatio) detailSources.delete(doc)
-    else detailSources.set(doc, source)
+    if (!detailSources.has(doc)) detailDocs.add(new WeakRef(doc))
+    detailSources.set(doc, source)
     // Follow the reader panning or scrolling a zoomed page.
     const frame = doc.defaultView?.frameElement
     for (let el = frame?.parentElement ?? frame?.parentNode?.host; el;
