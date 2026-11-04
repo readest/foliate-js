@@ -317,6 +317,30 @@ export class Overlayer {
         }
         return g
     }
+    // A dashed line along the same edge as `underline`. The stroke is set as a
+    // style, not an attribute, so `color` may be a CSS variable.
+    static dashedUnderline(rects, options = {}) {
+        const { color = 'red', width: strokeWidth = 1, padding = 0, writingMode,
+            opacity = 1, dash = [strokeWidth * 2, strokeWidth * 2] } = options
+        const g = createSVGElement('g')
+        g.style.stroke = color
+        g.setAttribute('stroke-opacity', opacity)
+        g.setAttribute('stroke-width', strokeWidth)
+        g.setAttribute('stroke-dasharray', dash.join(' '))
+        const vertical = writingMode === 'vertical-rl' || writingMode === 'vertical-lr'
+        for (const { left, right, top, bottom } of rects) {
+            const el = createSVGElement('line')
+            const [x1, y1, x2, y2] = vertical
+                ? [right + padding, top, right + padding, bottom]
+                : [left, bottom + padding, right, bottom + padding]
+            el.setAttribute('x1', x1)
+            el.setAttribute('y1', y1)
+            el.setAttribute('x2', x2)
+            el.setAttribute('y2', y2)
+            g.append(el)
+        }
+        return g
+    }
     static highlight(rects, options = {}) {
         const {
             color = 'red',
