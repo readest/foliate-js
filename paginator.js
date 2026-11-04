@@ -1653,6 +1653,11 @@ export class Paginator extends HTMLElement {
         #container.vertical {
             flex-direction: column;
         }
+        /* Pads the views out to whole pages; see #padLastPage(). */
+        :host(:not([flow="scrolled"])) #container::after {
+            content: '';
+            flex: 0 0 var(--_last-page-padding, 0px);
+        }
         /* Apple WebKit (iOS/macOS) composites large, persistent layers without
            the ~1s Blink freeze Android Chromium hits at high DPR (the reason
            these promotion hints were dropped and rafAnimateScroll was added).
@@ -2066,6 +2071,7 @@ export class Paginator extends HTMLElement {
         const view = new View({
             container: this,
             onExpand: () => {
+                this.#padLastPage()
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
                 if (this.#filling || this.#stabilizing || this.scrolled) return
@@ -2110,6 +2116,7 @@ export class Paginator extends HTMLElement {
         view.destroy()
         this.#container.removeChild(view.element)
         this.#views.delete(index)
+        this.#padLastPage()
         this.sections[index]?.unload?.()
     }
     #destroyAllViews() {
@@ -2491,7 +2498,18 @@ export class Paginator extends HTMLElement {
         return Math.floor(((this.#renderedStart + this.#renderedEnd) / 2) / this.size)
     }
     get #renderedPages() {
-        return Math.round(this.#renderedViewSize / this.size)
+        // A partial last page is a page. The tolerance absorbs layout-unit
+        // rounding, which can leave a half page a hair under half (readest#7303).
+        return Math.ceil(this.#renderedViewSize / this.size - 0.01)
+    }
+    // Sections are sized by columns so the next one can start beside the
+    // previous one's end, which leaves the book's last section ending partway
+    // into a page. Pad the views to whole pages, or the browser clamps the
+    // turn to the last page short of it (readest#7303).
+    #padLastPage() {
+        const padding = this.scrolled || !this.size ? 0
+            : this.#renderedPages * this.size - this.#renderedViewSize
+        this.#container.style.setProperty('--_last-page-padding', `${Math.max(0, padding)}px`)
     }
     set containerPosition(newVal) {
         this.#container[this.scrollProp] = newVal
