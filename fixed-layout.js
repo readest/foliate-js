@@ -332,7 +332,8 @@ export class FixedLayout extends HTMLElement {
     #scrollMode = false
     #scrollHorizontal = false
     #scrollPages = []
-    // The latest view.select() (see #select).
+    // The latest navigation: a select still waiting for its page goes ahead
+    // only while it is the latest (see #select).
     #selectToken = null
     // Pages whose placeholder is in the DOM: the ones near the viewport, plus
     // any still loading or loaded (detaching an iframe would unload it).
@@ -1948,6 +1949,7 @@ export class FixedLayout extends HTMLElement {
         // TODO
     }
     async goTo(target) {
+        const token = this.#selectToken = {}
         const resolved = await target
         // view.select() of a CFI selects its range; of a page number (KOSync)
         // it only goes to the page.
@@ -1964,14 +1966,13 @@ export class FixedLayout extends HTMLElement {
             const { index, side } = this.getSpreadOf(section)
             await this.goToSpread(index, side)
         }
-        if (select) await this.#select(resolved)
+        if (select) await this.#select(resolved, token)
     }
     // Select the target on its page, as the paginator does for view.select(),
     // and report it as a 'selection' relocation. A scrolled page loads only as
     // it nears the view and a PDF page renders its text layer after loading,
-    // so wait for both; a newer select supersedes this one meanwhile.
-    async #select({ index, anchor }) {
-        const token = this.#selectToken = {}
+    // so wait for both. Any navigation meanwhile supersedes this select.
+    async #select({ index, anchor }, token) {
         const doc = await this.#renderedDoc(index)
         if (!doc || token !== this.#selectToken) return
         const range = anchor(doc)
@@ -2000,6 +2001,7 @@ export class FixedLayout extends HTMLElement {
         }
     }
     async next(distance) {
+        this.#selectToken = null
         if (this.#scrollMode) {
             if (this.#scrollHorizontal) {
                 const d = distance || this.clientWidth
@@ -2013,6 +2015,7 @@ export class FixedLayout extends HTMLElement {
         if (!s) return this.goToSpread(this.#index + 1, this.rtl ? 'right' : 'left', 'page')
     }
     async prev(distance) {
+        this.#selectToken = null
         if (this.#scrollMode) {
             if (this.#scrollHorizontal) {
                 const d = distance || this.clientWidth
@@ -2026,11 +2029,13 @@ export class FixedLayout extends HTMLElement {
         if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
     }
     nextSection() {
+        this.#selectToken = null
         if (!this.#scrollMode) return
         const currentIndex = this.#getScrollIndex()
         this.#scrollToPage(Math.min(currentIndex + 1, this.#scrollPages.length - 1), 'smooth')
     }
     prevSection() {
+        this.#selectToken = null
         if (!this.#scrollMode) return
         const currentIndex = this.#getScrollIndex()
         this.#scrollToPage(Math.max(currentIndex - 1, 0), 'smooth')
