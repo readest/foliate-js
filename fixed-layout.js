@@ -332,6 +332,8 @@ export class FixedLayout extends HTMLElement {
     #scrollMode = false
     #scrollHorizontal = false
     #scrollPages = []
+    // The latest view.select() (see #select).
+    #selectToken = null
     // Pages whose placeholder is in the DOM: the ones near the viewport, plus
     // any still loading or loaded (detaching an iframe would unload it).
     #scrollMounted = new Set()
@@ -925,6 +927,10 @@ export class FixedLayout extends HTMLElement {
             }
         }
 
+        // Scroll mode began while the page loaded (a flow switch as the book
+        // opens): its strip is the view now, and the sweep below would hide it.
+        if (this.#scrollMode) return
+
         this.#side = center ? 'center' : this.#left?.blank ? 'right'
             : this.#right?.blank ? 'left' : side
         const visibleFrames = center
@@ -1409,7 +1415,13 @@ export class FixedLayout extends HTMLElement {
                 scale,
                 pageColors: this.#pageColors,
             })
-            if (p?.then) p.then(() => this.#refreshOverlayerForFrame(frame))
+            if (p?.then) {
+                // A render that finds the page already drawn returns at once,
+                // so wait on every render begun: the text layer is in place
+                // once they all settle.
+                frame.rendered = Promise.all([frame.rendered, p])
+                p.then(() => this.#refreshOverlayerForFrame(frame))
+            }
             Object.assign(frame.iframe.style, {
                 width: `${vw * scale}px`,
                 height: `${vh * scale}px`,
@@ -1937,15 +1949,55 @@ export class FixedLayout extends HTMLElement {
     }
     async goTo(target) {
         const resolved = await target
+        // view.select() of a CFI selects its range; of a page number (KOSync)
+        // it only goes to the page.
+        const select = resolved.select && typeof resolved.anchor === 'function'
         if (this.#scrollMode) {
-            if (this.#scrollPages[resolved.index]) this.#scrollToPage(resolved.index)
-            return
+            const page = this.#scrollPages[resolved.index]
+            // A selection scrolls itself into view, so a page already loaded
+            // isn't jumped back to its top first.
+            if (page && !(select && page.frame)) this.#scrollToPage(resolved.index)
+        } else {
+            const { book } = this
+            const section = book.sections[resolved.index]
+            if (!section) return
+            const { index, side } = this.getSpreadOf(section)
+            await this.goToSpread(index, side)
         }
-        const { book } = this
-        const section = book.sections[resolved.index]
-        if (!section) return
-        const { index, side } = this.getSpreadOf(section)
-        await this.goToSpread(index, side)
+        if (select) await this.#select(resolved)
+    }
+    // Select the target on its page, as the paginator does for view.select(),
+    // and report it as a 'selection' relocation. A scrolled page loads only as
+    // it nears the view and a PDF page renders its text layer after loading,
+    // so wait for both; a newer select supersedes this one meanwhile.
+    async #select({ index, anchor }) {
+        const token = this.#selectToken = {}
+        const doc = await this.#renderedDoc(index)
+        if (!doc || token !== this.#selectToken) return
+        const range = anchor(doc)
+        const sel = doc.getSelection()
+        sel.removeAllRanges()
+        sel.addRange(range)
+        // Centre the match when it was off screen, as browser find does, and
+        // leave the view alone when it was already showing.
+        const el = range.startContainer.parentElement
+        const { scrollTop, scrollLeft } = this
+        el?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+        if (this.scrollTop !== scrollTop || this.scrollLeft !== scrollLeft)
+            el?.scrollIntoView({ block: 'center', inline: 'center' })
+        this.dispatchEvent(new CustomEvent('relocate', { detail:
+            { reason: 'selection', range: null, index, fraction: 0, size: 1 } }))
+    }
+    async #renderedDoc(index) {
+        if (!this.#scrollMode) return this.getContents().find(c => c.index === index)?.doc
+        for (let tries = 0; tries < 100; tries++) {
+            const frame = this.#scrollPages[index]?.frame
+            if (frame) {
+                await frame.rendered
+                return frame.iframe.contentDocument
+            }
+            await new Promise(resolve => setTimeout(resolve, 50))
+        }
     }
     async next(distance) {
         if (this.#scrollMode) {
