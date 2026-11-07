@@ -1871,11 +1871,6 @@ export class FixedLayout extends HTMLElement {
         this.#pageTurn = null
         for (const animation of turn.animations) animation.cancel()
         this.#restorePageTurnStyles(turn)
-        for (const frame of turn.incoming) {
-            Object.assign(frame.element.style, {
-                position: 'absolute', display: 'none', visibility: 'hidden', pointerEvents: 'none',
-            })
-        }
         this.scrollLeft = turn.scrollLeft
         this.scrollTop = turn.scrollTop
     }
