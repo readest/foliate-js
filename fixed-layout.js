@@ -1850,7 +1850,7 @@ export class FixedLayout extends HTMLElement {
         }
         for (const frame of turn.incoming) {
             Object.assign(frame.element.style, {
-                position: 'relative', left: '', top: '', visibility: 'visible', pointerEvents: 'auto',
+                position: 'relative', left: '', top: '', display: 'block', visibility: 'visible', pointerEvents: 'auto',
             })
         }
         const first = turn.incoming.find(frame => !frame.blank)
