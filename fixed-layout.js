@@ -810,7 +810,9 @@ export class FixedLayout extends HTMLElement {
                 // layers after a turn, or a cached layer edge shows as a line.
                 backgroundColor: onZoom ? this.#pageColors.background || '#ffffff' : element.style.backgroundColor,
                 flexShrink: '0',
-                display: centerInBox ? 'flex' : 'block',
+                // Preparing a portrait sibling must preserve its hidden layout state.
+                display: preview && element.style.display === 'none'
+                    ? 'none' : centerInBox ? 'flex' : 'block',
                 marginBlock: centerInBox ? undefined : 'auto',
                 alignItems: centerInBox ? 'center' : undefined,
                 justifyContent: centerInBox ? 'center' : undefined,
