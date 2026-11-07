@@ -735,7 +735,7 @@ export class FixedLayout extends HTMLElement {
         const left = frames.left ?? {}, center = frames.center
         const right = center ?? frames.right ?? {}
         const shown = preview ? this.#shownFrames() : []
-        const scaleFactor = preview ? 1 : this.#scaleFactor
+        const scaleFactor = preview ? this.#pageTurnScaleFactor : this.#scaleFactor
         const target = side === 'left' ? left : right
         const { width, height } = this.getBoundingClientRect()
         if (!preview) this.#layoutBox = { width, height }
@@ -1710,6 +1710,9 @@ export class FixedLayout extends HTMLElement {
         if (!this.#pageTurn) this.#syncTurnLayout()
         return !!(await this.#preparePageTurn(forward))
     }
+    get #pageTurnScaleFactor() {
+        return this.#zoom === 'fit-page' ? Math.min(1, this.#scaleFactor) : 1
+    }
     async #preparePageTurn(forward) {
         const key = this.getPageTurnKey(forward ? 1 : -1)
         if (!key || this.#scrollMode || this.#destroyed) return false
@@ -1720,8 +1723,9 @@ export class FixedLayout extends HTMLElement {
         const side = explicitSide ?? (frames.center ? 'center'
             : frames.left?.blank ? 'right' : frames.right?.blank ? 'left'
                 : forward !== this.rtl ? 'left' : 'right')
+        const scaleFactor = this.#pageTurnScaleFactor
         await Promise.all(this.#render(side, true, frames))
-        return { key, index, side, frames }
+        return { key, index, side, frames, scaleFactor }
     }
     async beginPageTurn(forward) {
         if (this.#pageTurn || this.#scrollMode) return false
@@ -1840,17 +1844,17 @@ export class FixedLayout extends HTMLElement {
         this.#left = turn.frames.left
         this.#right = turn.frames.right
         this.#center = turn.frames.center
-        this.#scaleFactor = 1
-        this.setAttribute('scale-factor', '100')
+        this.#scaleFactor = turn.scaleFactor
+        this.setAttribute('scale-factor', String(turn.scaleFactor * 100))
         this.#restorePageTurnStyles(turn)
         for (const frame of turn.outgoing) {
-            if (!turn.incoming.includes(frame)) Object.assign(frame.element.style, {
-                position: 'absolute', visibility: 'hidden', display: 'none', pointerEvents: 'none',
-            })
+            if (!turn.incoming.includes(frame)) frame.element.style.display = 'none'
         }
         for (const frame of turn.incoming) {
             Object.assign(frame.element.style, {
-                position: 'relative', left: '', top: '', display: 'block', visibility: 'visible', pointerEvents: 'auto',
+                position: 'relative', left: '', top: '',
+                display: frame.onZoom && turn.scaleFactor < 1 ? 'flex' : 'block',
+                visibility: 'visible', pointerEvents: 'auto',
             })
         }
         const first = turn.incoming.find(frame => !frame.blank)
