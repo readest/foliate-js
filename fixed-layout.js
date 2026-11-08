@@ -1850,10 +1850,11 @@ export class FixedLayout extends HTMLElement {
         for (const frame of turn.outgoing) {
             if (!turn.incoming.includes(frame)) frame.element.style.display = 'none'
         }
-        for (const frame of turn.incoming) {
+        for (const frame of Object.values(turn.frames)) {
             Object.assign(frame.element.style, {
                 position: 'relative', left: '', top: '',
-                display: frame.onZoom && turn.scaleFactor < 1 ? 'flex' : 'block',
+                display: turn.incoming.includes(frame)
+                    ? frame.onZoom && turn.scaleFactor < 1 ? 'flex' : 'block' : 'none',
                 visibility: 'visible', pointerEvents: 'auto',
             })
         }
