@@ -1847,8 +1847,11 @@ export class FixedLayout extends HTMLElement {
         this.#scaleFactor = turn.scaleFactor
         this.setAttribute('scale-factor', String(turn.scaleFactor * 100))
         this.#restorePageTurnStyles(turn)
-        for (const frame of turn.outgoing) {
-            if (!turn.incoming.includes(frame)) frame.element.style.display = 'none'
+        const activeElements = Object.values(turn.frames).map(frame => frame.element)
+        for (const element of this.#root.children) {
+            if (!activeElements.includes(element)) Object.assign(element.style, {
+                position: 'absolute', display: 'none', visibility: 'hidden', pointerEvents: 'none',
+            })
         }
         for (const frame of Object.values(turn.frames)) {
             Object.assign(frame.element.style, {
