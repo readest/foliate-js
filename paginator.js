@@ -1547,6 +1547,9 @@ export class Paginator extends HTMLElement {
     // the primary view: the container's debounced scroll listener then has
     // nothing left to do at that position.
     #relocatedAt = null
+    // The reason of a page turn's relocate that waits for the turned page to
+    // paint (#scrollTo); #flushRelocate runs it early when needed.
+    #pendingRelocate = null
     // What #paintPaginatedBackground last painted, to skip painting it again.
     #paintedBackground = null
     #scrollLocked = false
@@ -1947,6 +1950,7 @@ export class Paginator extends HTMLElement {
         super.setAttribute(name, value)
     }
     #flushScrolledState() {
+        this.#flushRelocate()
         if (this.#views.size > 1) this.#detectPrimaryView()
         const result = this.#getVisibleRange()
         if (result?.range && !result.range.collapsed) this.#anchor = result.range
@@ -2088,8 +2092,10 @@ export class Paginator extends HTMLElement {
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
                 if (this.#filling || this.#stabilizing || this.scrolled) return
-                if (this.#primaryIndex === index)
+                if (this.#primaryIndex === index) {
+                    this.#flushRelocate()
                     this.#scrollToAnchor(this.#anchor)
+                }
             },
         })
         this.#views.set(index, view)
@@ -2418,6 +2424,7 @@ export class Paginator extends HTMLElement {
         // Restore the real viewport before reflow anchors it at a new size.
         this.#cancelPagePreview?.()
         if (this.#views.size === 0) return
+        this.#flushRelocate()
         const primaryView = this.#primaryView
         if (!primaryView) return
         // a resize can land while a navigation is still stabilizing
@@ -3385,6 +3392,7 @@ export class Paginator extends HTMLElement {
         return this.#scrollToPage(Math.floor(containerOffset / this.size + 0.01), reason)
     }
     async #scrollTo(offset, reason, smooth) {
+        this.#flushRelocate()
         const { size } = this
         // Near-equality, not exact: on fractional device-pixel-ratio screens
         // (e.g. 2.75) the container scroll rests a sub-pixel off the page
@@ -3513,8 +3521,28 @@ export class Paginator extends HTMLElement {
             if (this.#vertical && !this.scrolled) this.#settleDrag(true)
             this.containerPosition = offset
             this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+            if (reason === 'page' && !this.scrolled) {
+                // Show the turned page before measuring it: the visible
+                // range, its CFI and the host's relocate handlers change
+                // nothing on it. The container's scroll event must not
+                // measure it meanwhile.
+                this.#replaceBackground()
+                this.#relocatedAt = this.containerPosition
+                this.#pendingRelocate = reason
+                await yieldToFrame()
+                this.#flushRelocate()
+                return
+            }
             this.#afterScroll(reason)
         }
+    }
+    // Runs a page turn's relocate now if it is still waiting for the turned
+    // page to paint: what re-anchors or scrolls next needs its anchor.
+    #flushRelocate() {
+        const reason = this.#pendingRelocate
+        if (reason == null) return
+        this.#pendingRelocate = null
+        this.#afterScroll(reason)
     }
     // Turn the page with a View Transitions snapshot (readest#555): the live
     // content jumps to the destination inside the transition callback, then
@@ -3581,6 +3609,7 @@ export class Paginator extends HTMLElement {
         return this.#scrollToAnchor(anchor, select ? 'selection' : 'navigation', smooth)
     }
     async #scrollToAnchor(anchor, reason = 'anchor', smooth = false) {
+        this.#flushRelocate()
         this.#anchor = anchor
         const rects = uncollapse(anchor)?.getClientRects?.()
         // if anchor is an element or a range
@@ -4076,7 +4105,10 @@ export class Paginator extends HTMLElement {
                 await this.#loadAdjacentSection(nextIdx)
                 if (!this.#views.has(nextIdx)) break
             }
-            if (reanchor) this.#scrollToAnchor(this.#anchor)
+            if (reanchor) {
+                this.#flushRelocate()
+                this.#scrollToAnchor(this.#anchor)
+            }
         } finally {
             this.#filling = false
             // Emit stabilized so post-layout processing (e.g. warichu)
