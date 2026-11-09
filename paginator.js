@@ -2080,6 +2080,9 @@ export class Paginator extends HTMLElement {
             container: this,
             onExpand: () => {
                 this.#padLastPage()
+                // The primary view reflowed: what the last relocate measured
+                // may no longer be on the page.
+                if (this.#primaryIndex === index) this.#relocatedAt = null
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
                 if (this.#filling || this.#stabilizing || this.scrolled) return
