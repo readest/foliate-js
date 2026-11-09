@@ -454,8 +454,12 @@ const getVisibleRect = doc => {
     const box = frame.getBoundingClientRect()
     // Mid-pinch the frame is scaled by a transform; the re-render comes next.
     if (Math.abs(box.width - frame.offsetWidth) > 1) return null
+    // innerWidth/innerHeight are rounded to whole CSS px; at a fractional dpr
+    // (1080 px / 2.75) that would leave a coarse strip at the screen edge.
+    const vv = win.visualViewport
     let [left, top, right, bottom] = [Math.max(0, box.left), Math.max(0, box.top),
-        Math.min(win.innerWidth, box.right), Math.min(win.innerHeight, box.bottom)]
+        Math.min(vv?.width ?? win.innerWidth, box.right),
+        Math.min(vv?.height ?? win.innerHeight, box.bottom)]
     for (let el = frame.parentElement ?? frame.parentNode?.host; el;
         el = el.parentElement ?? el.parentNode?.host) {
         const { overflowX, overflowY } = win.getComputedStyle(el)
