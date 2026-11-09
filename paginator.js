@@ -2015,6 +2015,8 @@ export class Paginator extends HTMLElement {
     // A scroll that landed on a view still loading, with nothing to report
     // there yet: `{ reason }`, relocated once that view renders.
     #pendingRelocate = null
+    // What #paintPaginatedBackground last painted, to skip painting it again.
+    #paintedBackground = null
     #scrollLocked = false
     #subpixelOffset = 0
     #isAnimating = false
@@ -2784,15 +2786,21 @@ export class Paginator extends HTMLElement {
     // instead of one flat colour flashing across the viewport. Only writes layout
     // (no reads), so it is safe to run every animation frame.
     #paintPaginatedBackground(ctx, atPosition) {
+        const scrollPos = Math.abs(atPosition ?? this.#renderedStart)
+        const segments = computeBackgroundSegments(
+            ctx.views, scrollPos, ctx.bgSize, ctx.inset, ctx.containerSize)
+        // A page turn paints the backgrounds several times (as it scrolls, from
+        // the scroll event, as it relocates); rebuilding the same segments is
+        // a change to the page all the same.
+        const painted = JSON.stringify([ctx.hasTexture, ctx.fallbackBg, this.#vertical, segments])
+        if (painted === this.#paintedBackground) return
+        this.#paintedBackground = painted
         // Reset any inline backgrounds left over from a previous mode so the
         // host's texture isn't occluded after toggling.
         this.#background.style.background = ''
         for (const [, view] of this.#sortedViews) {
             view.element.style.background = ''
         }
-        const scrollPos = Math.abs(atPosition ?? this.#renderedStart)
-        const segments = computeBackgroundSegments(
-            ctx.views, scrollPos, ctx.bgSize, ctx.inset, ctx.containerSize)
 
         this.#background.innerHTML = ''
         this.#background.style.display = ''
@@ -2831,6 +2839,7 @@ export class Paginator extends HTMLElement {
             // so it scrolls with the content. The static #background provides
             // the fallback color for margins and gaps between views.
             const { fallbackBg, hasTexture, resolveBackground } = this.#readBackgroundStyle(doc)
+            this.#paintedBackground = null
             this.#background.style.background = ''
             this.#background.innerHTML = ''
             this.#background.style.display = ''
