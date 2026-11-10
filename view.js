@@ -228,6 +228,7 @@ export class View extends HTMLElement {
     #pageProgress
     #cfiProgress
     #searchResults = new Map()
+    #overlayerListeners = new WeakMap()
     #cursorAutohider = new CursorAutohider(this, () =>
         this.hasAttribute('autohide-cursor'))
     isFixedLayout = false
@@ -458,12 +459,18 @@ export class View extends HTMLElement {
     }
     #createOverlayer({ doc, index }) {
         const overlayer = new Overlayer(doc)
+        // A refreshed page gets a new overlayer: drop the old one's listeners,
+        // or a highlight deleted since still answers clicks.
+        this.#overlayerListeners.get(doc)?.abort()
+        const listeners = new AbortController()
+        this.#overlayerListeners.set(doc, listeners)
+        const { signal } = listeners
         doc.addEventListener('click', e => {
             const [value, range, rect] = overlayer.hitTest(e)
             if (value && !value.startsWith(SEARCH_PREFIX)) {
                 this.#emit('show-annotation', { value, index, range, rect })
             }
-        }, false)
+        }, { signal })
 
         let lastHitTestTime = 0
         const THROTTLE_MS = 200
@@ -480,7 +487,7 @@ export class View extends HTMLElement {
             } else {
                 doc.body.style.cursor = ''
             }
-        })
+        }, { signal })
 
         const list = this.#searchResults.get(index)
         if (list) for (const item of list) this.addAnnotation(item)
