@@ -12,6 +12,11 @@ const CHUNK_SIZE = 256 * 1024
 const yieldToFrame = () => document.hidden ? wait(0)
     : new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)))
 
+// Loading a section in the background waits until no page has turned for
+// this long: each of its steps can run for a second on a Kindle, and a tap
+// that comes in meanwhile waits for it.
+const TURN_IDLE_MS = 1000
+
 // WebKit before Safari 17 (iOS <= 16) resolves the `document.fonts.ready`
 // promise synchronously while purging still-loading `@font-face`s during a
 // style resolver rebuild (CSSFontFaceSet::purge). Script execution is
@@ -1577,6 +1582,10 @@ export class Paginator extends HTMLElement {
     #bgAnimContext = null
     #filling = false // true while #fillVisibleArea is running
     #fillPromise = null // tracks in-progress #fillVisibleArea for awaiting
+    #lastTurn = -Infinity // when the last page turn or preview started
+    #turnWaiting = false // a page turn waits for #fillPromise
+    #hurry = null // resolves when a page turn starts waiting for #fillPromise
+    #wakeIdle = null
     #stabilizing = false // true while #display is stabilizing layout
     #rendered = false // true after first #display completes
     #lastLayout = null // cached layout from the last #beforeRender call
@@ -1799,7 +1808,7 @@ export class Paginator extends HTMLElement {
                         const nextIdx = this.#adjacentIndex(1, lastIndex)
                         if (nextIdx != null && !this.#views.has(nextIdx) && this.#isSameDirection(nextIdx)) {
                             this.#filling = true
-                            this.#loadAdjacentSection(nextIdx)
+                            this.#fillPromise = this.#loadAdjacentSection(nextIdx, { preload: true })
                                 .finally(() => {
                                     this.#filling = false
                                     this.dispatchEvent(new Event('stabilized'))
@@ -1826,7 +1835,7 @@ export class Paginator extends HTMLElement {
                         const prevIdx = this.#adjacentIndex(-1, firstIndex)
                         if (prevIdx != null && !this.#views.has(prevIdx) && this.#isSameDirection(prevIdx)) {
                             this.#filling = true
-                            this.#loadAdjacentSection(prevIdx)
+                            this.#fillPromise = this.#loadAdjacentSection(prevIdx, { preload: true })
                                 .finally(() => {
                                     this.#filling = false
                                     this.dispatchEvent(new Event('stabilized'))
@@ -3801,7 +3810,7 @@ export class Paginator extends HTMLElement {
                 if (nextIdx == null) break
                 // Stop preloading at writing-mode boundaries
                 if (!this.#isSameDirection(nextIdx)) break
-                await this.#loadAdjacentSection(nextIdx)
+                await this.#loadAdjacentSection(nextIdx, { preload: true })
                 if (!this.#views.has(nextIdx)) break
             }
             // Wait a frame so ResizeObserver callbacks fire while
@@ -3964,18 +3973,36 @@ export class Paginator extends HTMLElement {
             { reanchor: !this.scrolled })
         this.#fillPromise.then(() => { this.#stabilizing = false })
     }
-    // Load an adjacent section without changing primary index. A preload
-    // starts once the frame on screen is painted, and lets input in between
-    // preparing the section and building its view: where nothing a load
-    // awaits yields to the event loop (Readest Lite), the host's content
-    // transforms and the document build run as one task, up to a second on a
-    // Kindle, and the page turn that started it waited for it to paint. A
-    // section the reader's position needs (`needed`) loads right away.
-    async #loadAdjacentSection(index, { needed = false } = {}) {
-        if (this.#views.has(index) || !this.#canGoToIndex(index)) return
-        if (!needed) {
+    // A background load's next step waits for the frame on screen to be
+    // painted and for page turns and previews to stop, unless a turn waits
+    // for the load.
+    async #whenIdle() {
+        await yieldToFrame()
+        for (let left; !this.#turnWaiting && (this.#pagePreview
+            || (left = this.#lastTurn + TURN_IDLE_MS - performance.now()) > 0);) {
+            this.#hurry ??= new Promise(resolve => { this.#wakeIdle = resolve })
+            await Promise.race([this.#pagePreview ?? wait(left), this.#hurry])
             await yieldToFrame()
-            if (this.#views.has(index)) return
+        }
+    }
+    // Load an adjacent section without changing primary index. It starts
+    // once the frame on screen is painted, and lets input in between preparing
+    // the section and building its view: where nothing a load awaits yields to
+    // the event loop (Readest Lite), the host's content transforms and the
+    // document build each run as one task, up to a second on a Kindle, and a
+    // page turn that came in waited for them. A preload for the pages ahead
+    // (`preload`) also waits each time until no page has turned for
+    // TURN_IDLE_MS. A section the reader's position needs (`needed`) loads
+    // right away.
+    async #loadAdjacentSection(index, { needed = false, preload = false } = {}) {
+        if (this.#views.has(index) || !this.#canGoToIndex(index)) return
+        // A navigation while it waited may have moved away from the section
+        const wanted = () => !this.#views.has(index)
+            && [-1, 1].some(dir => this.#views.has(this.#adjacentIndex(dir, index)))
+        const pause = () => preload ? this.#whenIdle() : yieldToFrame()
+        if (!needed) {
+            await pause()
+            if (!wanted()) return
         }
         const unit = this.#units[index]
         if (unit?.count > 1) await this.#splitSection(unit.spine)
@@ -3985,8 +4012,11 @@ export class Paginator extends HTMLElement {
             const src = await section.load()
             const data = await section.loadContent?.()
             if (!needed) {
-                await yieldToFrame()
-                if (this.#views.has(index)) return
+                await pause()
+                if (!wanted()) {
+                    section.unload?.()
+                    return
+                }
             }
             // Detect a prepend: a section being inserted *above* every currently
             // loaded view in scrolled mode. The browser suppresses scroll
@@ -4324,6 +4354,7 @@ export class Paginator extends HTMLElement {
         return index
     }
     async #turnPage(dir, distance) {
+        this.#lastTurn = performance.now()
         const nativeCommit = this.hasAttribute('data-native-paper-commit')
         if (this.#pagePreview) await this.#pagePreview
         if (this.#locked) return
@@ -4333,9 +4364,17 @@ export class Paginator extends HTMLElement {
         let shouldGo = await scroll()
         if (shouldGo && this.#fillPromise) {
             // Wait for any in-progress background pre-loading to complete —
-            // it may already be loading the section we need. Then try the
-            // turn again: the next page may be loaded by then.
-            await this.#fillPromise
+            // it may already be loading the section we need; a load held back
+            // for the page turns goes on now. Then try the turn again: the
+            // next page may be loaded by then.
+            this.#turnWaiting = true
+            this.#wakeIdle?.()
+            this.#hurry = this.#wakeIdle = null
+            try {
+                await this.#fillPromise
+            } finally {
+                this.#turnWaiting = false
+            }
             shouldGo = await scroll()
         }
         if (shouldGo) {
@@ -4370,6 +4409,7 @@ export class Paginator extends HTMLElement {
     }
     async previewPage(forward, capture, signal) {
         if (signal?.aborted || this.#pagePreview || this.#locked || this.#stabilizing || this.#touchScrolled) return null
+        this.#lastTurn = performance.now()
         const delta = forward ? 1 : -1
         const key = this.getPageTurnKey(delta)
         if (!key) return null // unloaded sections use normal navigation
