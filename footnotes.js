@@ -28,6 +28,17 @@ const isFootnoteReference = a => {
     }
 }
 
+export const isFootnoteBacklink = a => {
+    if (!a) return false
+    const types = getTypes(a)
+    const roles = getRoles(a)
+    if (types.has('backlink') || roles.has('doc-backlink')) return true
+    if (a.classList?.contains?.('backlink') || a.classList?.contains?.('footnote-backref') || a.classList?.contains?.('reversefootnote')) return true
+    const text = a.textContent?.trim() ?? ''
+    return /^[（(［\[【〔〈〖]?\s*(?:(?:本文|解説|上)[へに]?)?(?:戻る|もどる|back|return|jump back)\s*[）)］\]】〕〉〗]?$/i.test(text)
+        || /^[\^↩↑←⏎]$/.test(text)
+}
+
 const getReferencedType = el => {
     const types = getTypes(el)
     const roles = getRoles(el)
@@ -183,7 +194,8 @@ export class FootnoteHandler extends EventTarget {
                             range.setStartBefore(el)
                             let next = el.nextElementSibling
                             while (next) {
-                                if (next.querySelector('a')) break
+                                const anchors = Array.from(next.querySelectorAll('a'))
+                                if (anchors.length > 0 && !anchors.every(isFootnoteBacklink)) break
                                 next = next.nextElementSibling
                             }
                             if (next) {
