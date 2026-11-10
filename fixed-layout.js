@@ -714,7 +714,8 @@ export class FixedLayout extends HTMLElement {
             }
         })
     }
-    #render(side = this.#side, pageTurn = false, preview = null) {
+    #render(side = this.#side, pageTurn = false, preview = null,
+        scaleFactor = preview ? this.#pageTurnScaleFactor : this.#scaleFactor) {
         if (this.#pageTurn && !preview) {
             const box = this.getBoundingClientRect(), before = this.#pageTurn.box
             if (box.width === before.width && box.height === before.height) return []
@@ -735,7 +736,6 @@ export class FixedLayout extends HTMLElement {
         const left = frames.left ?? {}, center = frames.center
         const right = center ?? frames.right ?? {}
         const shown = preview ? this.#shownFrames() : []
-        const scaleFactor = preview ? this.#pageTurnScaleFactor : this.#scaleFactor
         const target = side === 'left' ? left : right
         const { width, height } = this.getBoundingClientRect()
         if (!preview) this.#layoutBox = { width, height }
@@ -1995,7 +1995,9 @@ export class FixedLayout extends HTMLElement {
                     const frames = await this.#loadSpreadFrames(targetIndex)
                     if (isStale() || !frames) return this.#preloadNextSpreads()
                     const side = frames.center ? 'center' : frames.left?.blank ? 'right' : 'left'
-                    await Promise.all(this.#render(side, false, frames))
+                    // Draw at the zoom a tap turn keeps; a swipe turn while
+                    // zoomed in lands at fit-page and draws again.
+                    await Promise.all(this.#render(side, false, frames, this.#scaleFactor))
                 } catch {
                     this.#prerenderedSpreads.delete(cacheKey)
                 } finally {
