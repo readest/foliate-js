@@ -212,6 +212,7 @@ let annotationLayerBuilderCSS = null
 
 // Track active render tasks per iframe document to cancel superseded renders
 const activeRenderTasks = new WeakMap()
+const pendingPageRenders = new WeakMap()
 // Generation counter per document to detect stale renders after async gaps
 const renderGenerations = new WeakMap()
 // What each document was last rendered for, so an identical re-render can be
@@ -453,8 +454,12 @@ const getVisibleRect = doc => {
     const box = frame.getBoundingClientRect()
     // Mid-pinch the frame is scaled by a transform; the re-render comes next.
     if (Math.abs(box.width - frame.offsetWidth) > 1) return null
+    // innerWidth/innerHeight are rounded to whole CSS px; at a fractional dpr
+    // (1080 px / 2.75) that would leave a coarse strip at the screen edge.
+    const vv = win.visualViewport
     let [left, top, right, bottom] = [Math.max(0, box.left), Math.max(0, box.top),
-        Math.min(win.innerWidth, box.right), Math.min(win.innerHeight, box.bottom)]
+        Math.min(vv?.width ?? win.innerWidth, box.right),
+        Math.min(vv?.height ?? win.innerHeight, box.bottom)]
     for (let el = frame.parentElement ?? frame.parentNode?.host; el;
         el = el.parentElement ?? el.parentNode?.host) {
         const { overflowX, overflowY } = win.getComputedStyle(el)
@@ -479,6 +484,8 @@ const detailSources = new WeakMap()
 const details = new WeakMap()
 const scrollWatched = new WeakSet()
 let detailTimer = null
+const isPageTurning = doc => doc.defaultView?.frameElement?.parentElement
+    ?.hasAttribute('data-page-turn-view')
 
 // Readest blends PDF canvases into the theme (`mix-blend-mode`), which would
 // let the coarse page show through the detail, so the page is cut away under it.
@@ -501,6 +508,9 @@ const dropDetail = doc => {
 }
 
 const updateDetail = async doc => {
+    // A retained turn moves the existing canvases. Re-cropping the detail to
+    // the moving viewport cuts a new edge into the page and exposes a seam.
+    if (isPageTurning(doc)) return
     const source = detailSources.get(doc)
     // Where the page bitmap already matches the screen, there is nothing to add.
     const visible = source?.renderDpr < devicePixelRatio && getVisibleRect(doc)
@@ -541,6 +551,7 @@ const updateDetail = async doc => {
         return
     }
     if (details.get(doc) !== detail) return
+    if (isPageTurning(doc)) return dropDetail(doc)
     detail.task = null
     if (colorMatrix) {
         const k = dpr / renderDpr
@@ -567,10 +578,24 @@ const scheduleDetails = () => {
 
 const setDetailSource = (doc, source) => {
     dropDetail(doc)
-    if (!detailSources.has(doc)) detailDocs.add(new WeakRef(doc))
+    const frame = doc.defaultView?.frameElement
+    if (!detailSources.has(doc)) {
+        const ref = new WeakRef(doc)
+        detailDocs.add(ref)
+        // Keep a ready detail fixed during the gesture, cancel pending work,
+        // and refresh after either landing or cancellation without a scroll.
+        if (frame?.parentElement) new MutationObserver(() => {
+            const doc = ref.deref()
+            if (!doc) return
+            if (isPageTurning(doc)) {
+                if (details.get(doc)?.task) dropDetail(doc)
+            } else scheduleDetails()
+        }).observe(frame.parentElement, {
+            attributes: true, attributeFilter: ['data-page-turn-view'],
+        })
+    }
     detailSources.set(doc, source)
     // Follow the reader panning or scrolling a zoomed page.
-    const frame = doc.defaultView?.frameElement
     for (let el = frame?.parentElement ?? frame?.parentNode?.host; el;
         el = el.parentElement ?? el.parentNode?.host) {
         if (scrollWatched.has(el)) continue
@@ -975,7 +1000,19 @@ const renderPage = async (page, getImageBlob) => {
         <div class="annotationLayer"></div>
     `
     const src = URL.createObjectURL(new Blob([data], { type: 'text/html' }))
-    const onZoom = ({ doc, scale, pageColors }) => render(page, doc, scale, pageColors)
+    const onZoom = ({ doc, scale, pageColors }) => {
+        if (!doc) return
+        // A duplicate render can be skipped while its first bitmap/text layer
+        // is still drawing. Its caller must await that work too before exposing
+        // the page or capturing it for a turn.
+        const previous = pendingPageRenders.get(doc)
+        const current = render(page, doc, scale, pageColors)
+        const ready = Promise.all([previous, current]).then(() => {})
+        pendingPageRenders.set(doc, ready)
+        return ready.finally(() => {
+            if (pendingPageRenders.get(doc) === ready) pendingPageRenders.delete(doc)
+        })
+    }
     return { src, data, onZoom }
 }
 
