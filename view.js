@@ -585,11 +585,11 @@ export class View extends HTMLElement {
             console.error(`Could not get ${target}`)
         }
     }
-    async prev(distance) {
-        await this.renderer.prev(distance)
+    async prev(distance, options) {
+        await this.renderer.prev(distance, options)
     }
-    async next(distance) {
-        await this.renderer.next(distance)
+    async next(distance, options) {
+        await this.renderer.next(distance, options)
     }
     async pan(dx, dy) {
         await this.renderer.pan(dx, dy)

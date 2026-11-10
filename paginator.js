@@ -1538,6 +1538,9 @@ export class Paginator extends HTMLElement {
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
     #justAnchored = false
     #locked = false // while true, prevent any further navigation
+    #turn = 0 // counts page turns: the latest one holds #locked
+    #turnAt = 0 // when the latest turn started
+    #turnShown = false // the page the latest turn scrolled to is on screen
     #pagePreview = null
     #cancelPagePreview = null
     #styles
@@ -3538,8 +3541,13 @@ export class Paginator extends HTMLElement {
                 this.#replaceBackground()
                 this.#relocatedAt = this.containerPosition
                 this.#pendingRelocate = reason
+                const turn = this.#turn
+                requestAnimationFrame(() => {
+                    if (turn === this.#turn) this.#turnShown = true
+                })
                 await yieldToFrame()
-                this.#flushRelocate()
+                // A turn that came in since sends its own relocate
+                if (turn === this.#turn) this.#flushRelocate()
                 return
             }
             this.#afterScroll(reason)
@@ -4353,12 +4361,24 @@ export class Paginator extends HTMLElement {
         }
         return index
     }
-    async #turnPage(dir, distance) {
+    // A tap or key (`discrete`) may turn again once the page the last turn
+    // scrolled to is on screen, at most every 100 ms: the relocate handlers
+    // and the work they queue held the lock for over a second on a Kindle,
+    // and dropped the taps that came in meanwhile. A relocate the last turn
+    // has not sent yet is dropped. A wheel turn waits for the lock.
+    async #turnPage(dir, distance, { discrete = false } = {}) {
         this.#lastTurn = performance.now()
         const nativeCommit = this.hasAttribute('data-native-paper-commit')
         if (this.#pagePreview) await this.#pagePreview
-        if (this.#locked) return
+        if (this.#locked) {
+            if (!discrete || !this.#turnShown
+                || performance.now() - this.#turnAt < 100) return
+            this.#pendingRelocate = null
+        }
         this.#locked = true
+        const turn = ++this.#turn
+        this.#turnAt = performance.now()
+        this.#turnShown = false
         const prev = dir === -1
         const scroll = () => prev ? this.#scrollPrev(distance) : this.#scrollNext(distance)
         let shouldGo = await scroll()
@@ -4388,10 +4408,10 @@ export class Paginator extends HTMLElement {
             })
         }
         if (!nativeCommit && (shouldGo || !this.hasAttribute('animated'))) await wait(100)
-        this.#locked = false
+        if (turn === this.#turn) this.#locked = false
     }
-    async prev(distance) {
-        return await this.#turnPage(-1, distance)
+    async prev(distance, options) {
+        return await this.#turnPage(-1, distance, options)
     }
     // Stable within one layout, including when loaded views are prepended.
     // A preview never calls #afterScroll: reading progress/history stay put.
@@ -4416,6 +4436,7 @@ export class Paginator extends HTMLElement {
         let release
         this.#pagePreview = new Promise(resolve => { release = resolve })
         this.#locked = true
+        this.#turnShown = false
         const position = this.containerPosition
         let restored = false
         let cancelled = false
@@ -4453,8 +4474,8 @@ export class Paginator extends HTMLElement {
             release()
         }
     }
-    async next(distance) {
-        return await this.#turnPage(1, distance)
+    async next(distance, options) {
+        return await this.#turnPage(1, distance, options)
     }
     async pan(dx, dy) {
         if (this.#locked) return
