@@ -39,6 +39,49 @@ export const isFootnoteBacklink = a => {
         || /^[\^↩↑←⏎]$/.test(text)
 }
 
+const FOOTNOTE_START_RE =
+    /^\s*(?:[（(［\[【〔〈〖]?\s*(?:[＊*※†‡]\s*[0-9０-９]*|(?:[a-zA-Z]{1,2}|(?:訳|原|編)?[注註](?:釈)?|Notes?)\s*[0-9０-９]+|[①-⑳㉑-㊿]|[0-9０-９]+)\s*[）)］\]】〕〉〗]?[.、．\s　])/
+
+export const isNextFootnote = (next, el) => {
+    if (!next) return false
+    if (next.matches?.('li, aside, dt')) return true
+    const role = next.getAttribute?.('role') ?? ''
+    if (/\bdoc-(?:footnote|endnote|biblioentry)\b/.test(role)) return true
+    const epubType = next.getAttribute?.('epub:type') ?? ''
+    if (/\b(?:footnote|endnote|rearnote)\b/.test(epubType)) return true
+    if (next.id) {
+        if (!el?.id || (!next.id.startsWith(el.id) && !el.id.startsWith(next.id))) return true
+    }
+    if (next.querySelector?.('a[id], a[name]')) return true
+    if (FOOTNOTE_START_RE.test(next.textContent ?? '')) return true
+    const anchors = Array.from(next.querySelectorAll?.('a') ?? [])
+    if (anchors.length > 0 && !anchors.every(isFootnoteBacklink)) return true
+    const elBacklink = el?.querySelector?.('a[href]')
+    const nextBacklink = next.querySelector?.('a[href]')
+    if (elBacklink && nextBacklink) {
+        const elHref = elBacklink.getAttribute('href')
+        const nextHref = nextBacklink.getAttribute('href')
+        if (elHref && nextHref && elHref !== nextHref) return true
+    }
+    return false
+}
+
+export const getFootnoteRange = (doc, el) => {
+    const range = doc.createRange()
+    range.setStartBefore(el)
+    let next = el.nextElementSibling
+    while (next) {
+        if (isNextFootnote(next, el)) break
+        next = next.nextElementSibling
+    }
+    if (next) {
+        range.setEndBefore(next)
+    } else {
+        range.setEndAfter(el.parentNode.lastChild)
+    }
+    return range
+}
+
 const getReferencedType = el => {
     const types = getTypes(el)
     const roles = getRoles(el)
@@ -190,19 +233,7 @@ export class FootnoteHandler extends EventTarget {
                             range = doc.createRange()
                             range.selectNodeContents(el.closest('.note'))
                         } else if (el.querySelector('a')) {
-                            range = doc.createRange()
-                            range.setStartBefore(el)
-                            let next = el.nextElementSibling
-                            while (next) {
-                                const anchors = Array.from(next.querySelectorAll('a'))
-                                if (anchors.length > 0 && !anchors.every(isFootnoteBacklink)) break
-                                next = next.nextElementSibling
-                            }
-                            if (next) {
-                                range.setEndBefore(next)
-                            } else {
-                                range.setEndAfter(el.parentNode.lastChild)
-                            }
+                            range = getFootnoteRange(doc, el)
                             if (check && el.children.length > 3) {
                                 reject(new Error('Failed to locate footnote content'))
                                 return
