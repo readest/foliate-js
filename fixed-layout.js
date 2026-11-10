@@ -918,7 +918,7 @@ export class FixedLayout extends HTMLElement {
         if (!preview) this.#applyPendingPanX()
         return renderPromises
     }
-    async #loadSpreadFrames(index) {
+    async #loadSpreadFrames(index, preload = false) {
         const key = `spread-${index}`
         const cached = this.#prerenderedSpreads.get(key)
         if (cached) return cached
@@ -932,7 +932,7 @@ export class FixedLayout extends HTMLElement {
                     index: this.book.sections.indexOf(section), src: await section?.load?.(),
                 }
             }
-            this.#regroup()
+            if (this.#regroup(preload) === false) return null
             if (this.#destroyed || this.#spreads[index] !== spread) return null
             const frames = {}
             for (const [side, input] of Object.entries(inputs))
@@ -1609,7 +1609,8 @@ export class FixedLayout extends HTMLElement {
     // marks itself `pageSpread: 'center'`. Regroup from the first spread that
     // changed; the spreads before it keep their objects and cached frames, so
     // a spread object still at its index is still current.
-    #regroup() {
+    // Returns false when it leaves the grouping alone (see keepShown).
+    #regroup(keepShown = false) {
         const old = this.#spreads
         this.#spread(this.spread)
         const same = (a, b) => a && b
@@ -1620,19 +1621,37 @@ export class FixedLayout extends HTMLElement {
             this.#spreads = old
             return
         }
-        this.#spreads = [...old.slice(0, from), ...this.#spreads.slice(from)]
-        const isRegrouped = key => Number(/^spread-(\d+)$/.exec(key)?.[1] ?? -1) >= from
-        // The spread on screen can be among the stale ones, and it has to
-        // outlive the turn that leaves it (readest#6239). So nothing is removed
-        // here: the frames move out of reach of the new indices, and the trim
-        // evicts them by age.
+        const spreads = [...old.slice(0, from), ...this.#spreads.slice(from)]
+        // A spread that survives intact (a wide page before it only shifted
+        // it) keeps its frames at its new index. A backward preload can shift
+        // the spread on screen this way, so #index follows it too.
+        const newIndexOf = index => index < from ? index
+            : spreads.findIndex((spread, i) => i >= from && same(spread, old[index]))
+        const shown = this.#index >= from ? newIndexOf(this.#index) : this.#index
+        // A preload must not split the spread on screen: no index would name
+        // the pages shown. Leave the grouping to the navigation that loads it.
+        if (keepShown && this.#index >= 0 && shown < 0) {
+            this.#spreads = old
+            return false
+        }
+        this.#spreads = spreads
+        if (shown >= 0) this.#index = shown
+        // Any other spread on screen has to outlive the turn that leaves it
+        // (readest#6239). So nothing is removed here: the frames move out of
+        // reach of the new indices, and the trim evicts them by age.
+        const moved = []
         for (const key of [...this.#prerenderedSpreads.keys()]) {
-            if (!isRegrouped(key)) continue
-            const staleKey = `stale-${++this.#staleSpreads}`
-            this.#prerenderedSpreads.set(staleKey, this.#prerenderedSpreads.get(key))
-            this.#spreadAccessTime.set(staleKey, this.#spreadAccessTime.get(key) ?? 0)
+            const index = Number(/^spread-(\d+)$/.exec(key)?.[1] ?? -1)
+            if (index < from) continue
+            moved.push([newIndexOf(index), this.#prerenderedSpreads.get(key),
+                this.#spreadAccessTime.get(key) ?? 0])
             this.#prerenderedSpreads.delete(key)
             this.#spreadAccessTime.delete(key)
+        }
+        for (const [index, frames, time] of moved) {
+            const key = index >= 0 ? `spread-${index}` : `stale-${++this.#staleSpreads}`
+            this.#prerenderedSpreads.set(key, frames)
+            this.#spreadAccessTime.set(key, time)
         }
     }
     // After a regroup, go where the page a turn aimed at now sits: the page on
@@ -1713,19 +1732,34 @@ export class FixedLayout extends HTMLElement {
     get #pageTurnScaleFactor() {
         return this.#zoom === 'fit-page' ? Math.min(1, this.#scaleFactor) : 1
     }
-    async #preparePageTurn(forward) {
+    async #preparePageTurn(forward, turn) {
         const key = this.getPageTurnKey(forward ? 1 : -1)
         if (!key || this.#scrollMode || this.#destroyed) return false
         const [indexText, explicitSide] = key.split(':')
-        const index = Number(indexText)
+        return this.#prepareTurnTo(forward, Number(indexText), explicitSide, turn)
+    }
+    async #prepareTurnTo(forward, index, explicitSide, turn) {
+        // Pin the destination while it loads and draws: a preload finishing
+        // meanwhile trims the cache, and must not detach these frames.
+        if (turn) turn.index = index
+        const spread = this.#spreads[index]
         const frames = await this.#loadSpreadFrames(index)
-        if (!frames) return this.#preparePageTurn(forward)
+        if (!frames) {
+            if (this.#destroyed) return false
+            // The load regrouped the spreads: turn to where the page it aimed
+            // at now sits, as #goToPageOf does for navigation.
+            const near = explicitSide ?? (forward !== this.rtl ? 'left' : 'right')
+            const target = this.getSpreadOf(spread.center ?? spread[near] ?? spread.left ?? spread.right)
+            if (!target) return false
+            const portrait = this.#portrait && !this.#spreads[target.index].center
+            return this.#prepareTurnTo(forward, target.index, portrait ? target.side : undefined, turn)
+        }
         const side = explicitSide ?? (frames.center ? 'center'
             : frames.left?.blank ? 'right' : frames.right?.blank ? 'left'
                 : forward !== this.rtl ? 'left' : 'right')
         const scaleFactor = this.#pageTurnScaleFactor
         await Promise.all(this.#render(side, true, frames))
-        return { key, index, side, frames, scaleFactor }
+        return { index, side, frames, scaleFactor }
     }
     async beginPageTurn(forward) {
         if (this.#pageTurn || this.#scrollMode) return false
@@ -1738,7 +1772,7 @@ export class FixedLayout extends HTMLElement {
         }
         this.#pageTurn = turn
         try {
-            const prepared = await this.#preparePageTurn(forward)
+            const prepared = await this.#preparePageTurn(forward, turn)
             await Promise.all(turn.outgoing.map(frame => frame.rendered))
             if (this.#pageTurn !== turn) return false
             if (!prepared) { this.cancelPageTurn(); return false }
@@ -1839,6 +1873,9 @@ export class FixedLayout extends HTMLElement {
         this.movePageTurn(1)
         for (const animation of turn.animations) animation.cancel()
         turn.committing = true
+        // As goToSpread does: the spread being left outranks the preloads made
+        // while it was shown, so the trim keeps it for a turn back.
+        this.#touchSpread(`spread-${this.#index}`)
         this.#index = turn.index
         this.#side = turn.side
         this.#left = turn.frames.left
@@ -1868,6 +1905,9 @@ export class FixedLayout extends HTMLElement {
         this.scrollLeft = 0
         this.scrollTop = 0
         this.#pageTurn = null
+        // A portrait turn shows one page of the spread; its sibling is shown
+        // later without #showSpread, so it needs its overlayer now.
+        for (const frame of Object.values(turn.frames)) this.#ensureOverlayerForFrame(frame)
         this.#touchSpread(`spread-${turn.index}`)
         this.#reportLocation('page')
         this.#preloadNextSpreads()
@@ -1992,8 +2032,9 @@ export class FixedLayout extends HTMLElement {
             this.#activePreloads++
             Promise.resolve().then(async () => {
                 try {
-                    const frames = await this.#loadSpreadFrames(targetIndex)
-                    if (isStale() || !frames) return this.#preloadNextSpreads()
+                    const frames = await this.#loadSpreadFrames(targetIndex, true)
+                    if (isStale()) return this.#preloadNextSpreads()
+                    if (!frames) return
                     const side = frames.center ? 'center' : frames.left?.blank ? 'right' : 'left'
                     // Draw at the zoom a tap turn keeps; a swipe turn while
                     // zoomed in lands at fit-page and draws again.
