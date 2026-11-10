@@ -4849,7 +4849,7 @@ export class Paginator extends HTMLElement {
                 if (firstIndex != null) {
                     const prevIdx = this.#adjacentIndex(-1, firstIndex)
                     if (prevIdx != null && this.#isSameDirection(prevIdx)) {
-                        await this.#loadAdjacentSection(prevIdx)
+                        await this.#loadAdjacentSection(prevIdx, { needed: true })
                     }
                 }
             }
@@ -4873,9 +4873,19 @@ export class Paginator extends HTMLElement {
             { reanchor: !this.scrolled })
         this.#fillPromise.then(() => { this.#stabilizing = false })
     }
-    // Load an adjacent section without changing primary index
-    async #loadAdjacentSection(index) {
+    // Load an adjacent section without changing primary index. A preload
+    // starts once the frame on screen is painted, and lets input in between
+    // preparing the section and building its view: where nothing a load
+    // awaits yields to the event loop (Readest Lite), the host's content
+    // transforms and the document build run as one task, up to a second on a
+    // Kindle, and the page turn that started it waited for it to paint. A
+    // section the reader's position needs (`needed`) loads right away.
+    async #loadAdjacentSection(index, { needed = false } = {}) {
         if (this.#views.has(index) || !this.#canGoToIndex(index)) return
+        if (!needed) {
+            await yieldToFrame()
+            if (this.#views.has(index)) return
+        }
         const unit = this.#units[index]
         if (unit?.count > 1) await this.#splitSection(unit.spine)
         const section = this.sections[index]
@@ -4884,6 +4894,10 @@ export class Paginator extends HTMLElement {
         try {
             const src = await section.load()
             const data = await section.loadContent?.()
+            if (!needed) {
+                await yieldToFrame()
+                if (this.#views.has(index)) return
+            }
             // A jump while the section loaded can leave it apart from the
             // views now loaded. Joined on anyway, it would hide the sections
             // between them (readest/readest#7883).
@@ -5157,7 +5171,7 @@ export class Paginator extends HTMLElement {
                 if (firstIndex == null) return
                 const prevIdx = this.#adjacentIndex(-1, firstIndex)
                 if (prevIdx != null && this.#isSameDirection(prevIdx))
-                    await this.#loadAdjacentSection(prevIdx)
+                    await this.#loadAdjacentSection(prevIdx, { needed: true })
             }
             if (!this.scrolled) await loadPrev()
             if (count !== this.#goToCount) return
