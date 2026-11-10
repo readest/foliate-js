@@ -4329,12 +4329,16 @@ export class Paginator extends HTMLElement {
         if (this.#locked) return
         this.#locked = true
         const prev = dir === -1
-        const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
-        if (shouldGo) {
+        const scroll = () => prev ? this.#scrollPrev(distance) : this.#scrollNext(distance)
+        let shouldGo = await scroll()
+        if (shouldGo && this.#fillPromise) {
             // Wait for any in-progress background pre-loading to complete —
-            // it may already be loading the section we need, so awaiting
-            // it lets #goTo reuse the view instead of loading from scratch
-            if (this.#fillPromise) await this.#fillPromise
+            // it may already be loading the section we need. Then try the
+            // turn again: the next page may be loaded by then.
+            await this.#fillPromise
+            shouldGo = await scroll()
+        }
+        if (shouldGo) {
             const sorted = this.#sortedViews
             const edgeIndex = prev
                 ? sorted[0]?.[0] ?? this.#primaryIndex
