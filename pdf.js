@@ -683,12 +683,39 @@ const MAX_KEPT_IMAGE_COVERAGE = 0.5
 const getKeptImageRects = (imageRects, width, height) => imageRects.filter(([x0, y0, x1, y1]) =>
     (x1 - x0) * (y1 - y0) < width * height * MAX_KEPT_IMAGE_COVERAGE)
 
+// Images that meet edge to edge, such as a scan stored as a stack of strips,
+// are joined into one: rounded inward one by one, the pixel row or column
+// where two of them meet would be themed as if it were paper.
+const joinAdjacentRects = rects => {
+    const near = (a, b) => Math.abs(a - b) < 0.5
+    const join = (a, b) => {
+        if (near(a[0], b[0]) && near(a[2], b[2]) && a[1] <= b[3] + 0.5 && b[1] <= a[3] + 0.5)
+            return [Math.max(a[0], b[0]), Math.min(a[1], b[1]), Math.min(a[2], b[2]), Math.max(a[3], b[3])]
+        if (near(a[1], b[1]) && near(a[3], b[3]) && a[0] <= b[2] + 0.5 && b[0] <= a[2] + 0.5)
+            return [Math.min(a[0], b[0]), Math.max(a[1], b[1]), Math.max(a[2], b[2]), Math.min(a[3], b[3])]
+        return null
+    }
+    const joined = [...rects]
+    for (let i = 0; i < joined.length; i++) {
+        for (let j = 0; j < joined.length; j++) {
+            const rect = i !== j && join(joined[i], joined[j])
+            if (!rect) continue
+            joined[i] = rect
+            joined.splice(j, 1)
+            // Compare the joined rect with every other one again.
+            i = -1
+            break
+        }
+    }
+    return joined
+}
+
 // Theme the canvas, except where `imageRects` (canvas pixels) say images are.
 const applyPageColors = (canvas, matrix, imageRects) => {
     const { width, height } = canvas
     // Round inward: an edge pixel the image only partly covers is blended with
     // the paper, and keeping it would outline the image in the paper color.
-    const kept = imageRects.map(([x0, y0, x1, y1]) => {
+    const kept = joinAdjacentRects(imageRects).map(([x0, y0, x1, y1]) => {
         const x = Math.max(0, Math.ceil(x0))
         const y = Math.max(0, Math.ceil(y0))
         return [x, y, Math.min(width, Math.floor(x1)) - x, Math.min(height, Math.floor(y1)) - y]
