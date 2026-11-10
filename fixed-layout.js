@@ -918,7 +918,7 @@ export class FixedLayout extends HTMLElement {
         if (!preview) this.#applyPendingPanX()
         return renderPromises
     }
-    async #loadSpreadFrames(index) {
+    async #loadSpreadFrames(index, preload = false) {
         const key = `spread-${index}`
         const cached = this.#prerenderedSpreads.get(key)
         if (cached) return cached
@@ -932,7 +932,7 @@ export class FixedLayout extends HTMLElement {
                     index: this.book.sections.indexOf(section), src: await section?.load?.(),
                 }
             }
-            this.#regroup()
+            if (this.#regroup(preload) === false) return null
             if (this.#destroyed || this.#spreads[index] !== spread) return null
             const frames = {}
             for (const [side, input] of Object.entries(inputs))
@@ -1609,7 +1609,8 @@ export class FixedLayout extends HTMLElement {
     // marks itself `pageSpread: 'center'`. Regroup from the first spread that
     // changed; the spreads before it keep their objects and cached frames, so
     // a spread object still at its index is still current.
-    #regroup() {
+    // Returns false when it leaves the grouping alone (see keepShown).
+    #regroup(keepShown = false) {
         const old = this.#spreads
         this.#spread(this.spread)
         const same = (a, b) => a && b
@@ -1620,16 +1621,21 @@ export class FixedLayout extends HTMLElement {
             this.#spreads = old
             return
         }
-        this.#spreads = [...old.slice(0, from), ...this.#spreads.slice(from)]
+        const spreads = [...old.slice(0, from), ...this.#spreads.slice(from)]
         // A spread that survives intact (a wide page before it only shifted
         // it) keeps its frames at its new index. A backward preload can shift
         // the spread on screen this way, so #index follows it too.
         const newIndexOf = index => index < from ? index
-            : this.#spreads.findIndex((spread, i) => i >= from && same(spread, old[index]))
-        if (this.#index >= from) {
-            const index = newIndexOf(this.#index)
-            if (index >= 0) this.#index = index
+            : spreads.findIndex((spread, i) => i >= from && same(spread, old[index]))
+        const shown = this.#index >= from ? newIndexOf(this.#index) : this.#index
+        // A preload must not split the spread on screen: no index would name
+        // the pages shown. Leave the grouping to the navigation that loads it.
+        if (keepShown && this.#index >= 0 && shown < 0) {
+            this.#spreads = old
+            return false
         }
+        this.#spreads = spreads
+        if (shown >= 0) this.#index = shown
         // Any other spread on screen has to outlive the turn that leaves it
         // (readest#6239). So nothing is removed here: the frames move out of
         // reach of the new indices, and the trim evicts them by age.
@@ -2026,8 +2032,9 @@ export class FixedLayout extends HTMLElement {
             this.#activePreloads++
             Promise.resolve().then(async () => {
                 try {
-                    const frames = await this.#loadSpreadFrames(targetIndex)
-                    if (isStale() || !frames) return this.#preloadNextSpreads()
+                    const frames = await this.#loadSpreadFrames(targetIndex, true)
+                    if (isStale()) return this.#preloadNextSpreads()
+                    if (!frames) return
                     const side = frames.center ? 'center' : frames.left?.blank ? 'right' : 'left'
                     // Draw at the zoom a tap turn keeps; a swipe turn while
                     // zoomed in lands at fit-page and draws again.
