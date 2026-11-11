@@ -1586,9 +1586,11 @@ export class Paginator extends HTMLElement {
     #filling = false // true while #fillVisibleArea is running
     #fillPromise = null // tracks in-progress #fillVisibleArea for awaiting
     #lastTurn = -Infinity // when the last page turn or preview started
-    #turnWaiting = false // a page turn waits for #fillPromise
+    #turnsWaiting = 0 // page turns waiting for #fillPromise
     #hurry = null // resolves when a page turn starts waiting for #fillPromise
     #wakeIdle = null
+    #loadSettled = null // resolves when the next adjacent section load settles
+    #settleLoad = null
     #stabilizing = false // true while #display is stabilizing layout
     #rendered = false // true after first #display completes
     #lastLayout = null // cached layout from the last #beforeRender call
@@ -3986,7 +3988,7 @@ export class Paginator extends HTMLElement {
     // for the load.
     async #whenIdle() {
         await yieldToFrame()
-        for (let left; !this.#turnWaiting && (this.#pagePreview
+        for (let left; !this.#turnsWaiting && (this.#pagePreview
             || (left = this.#lastTurn + TURN_IDLE_MS - performance.now()) > 0);) {
             this.#hurry ??= new Promise(resolve => { this.#wakeIdle = resolve })
             await Promise.race([this.#pagePreview ?? wait(left), this.#hurry])
@@ -4001,8 +4003,18 @@ export class Paginator extends HTMLElement {
     // page turn that came in waited for them. A preload for the pages ahead
     // (`preload`) also waits each time until no page has turned for
     // TURN_IDLE_MS. A section the reader's position needs (`needed`) loads
-    // right away.
-    async #loadAdjacentSection(index, { needed = false, preload = false } = {}) {
+    // right away. A page turn waiting for the loads tries again as each one
+    // settles.
+    async #loadAdjacentSection(index, options) {
+        try {
+            await this.#loadAdjacentSectionNow(index, options)
+        } finally {
+            const settle = this.#settleLoad
+            this.#loadSettled = this.#settleLoad = null
+            settle?.()
+        }
+    }
+    async #loadAdjacentSectionNow(index, { needed = false, preload = false } = {}) {
         if (this.#views.has(index) || !this.#canGoToIndex(index)) return
         // A navigation while it waited may have moved away from the section
         const wanted = () => !this.#views.has(index)
@@ -4383,19 +4395,29 @@ export class Paginator extends HTMLElement {
         const scroll = () => prev ? this.#scrollPrev(distance) : this.#scrollNext(distance)
         let shouldGo = await scroll()
         if (shouldGo && this.#fillPromise) {
-            // Wait for any in-progress background pre-loading to complete —
-            // it may already be loading the section we need; a load held back
-            // for the page turns goes on now. Then try the turn again: the
-            // next page may be loaded by then.
-            this.#turnWaiting = true
+            // Wait for in-progress background loading: it may already be
+            // loading the section we need; a load held back for the page
+            // turns goes on now. Try the turn again as each section load
+            // settles, not only once all have: loading goes on past the next
+            // section until five pages are ready, five loads after one-page
+            // sections. Count the waiting turns: a tap may start the next
+            // turn before this one returns, and this one ending must not
+            // hold that turn's load back.
+            this.#turnsWaiting++
             this.#wakeIdle?.()
             this.#hurry = this.#wakeIdle = null
             try {
-                await this.#fillPromise
+                let filling = true
+                const done = () => { filling = false }
+                const fill = this.#fillPromise.then(done, done)
+                while (shouldGo && filling) {
+                    this.#loadSettled ??= new Promise(resolve => { this.#settleLoad = resolve })
+                    await Promise.race([fill, this.#loadSettled])
+                    shouldGo = await scroll()
+                }
             } finally {
-                this.#turnWaiting = false
+                this.#turnsWaiting--
             }
-            shouldGo = await scroll()
         }
         if (shouldGo) {
             const sorted = this.#sortedViews
