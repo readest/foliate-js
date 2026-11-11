@@ -469,6 +469,17 @@ export class FixedLayout extends HTMLElement {
             justify-content: safe center;
           }
         }
+        /* A page fitted to the view is sized from clientWidth, which rounds the
+           host's width (392.73px is 393px at 2.75x), so it can overflow by a
+           sliver. A touch scrolled that sliver, one device pixel, and the page
+           jumped as a finger landed. Only an axis a page really overflows,
+           such as a zoomed page, is left scrollable. */
+        :host(:not([flow="scrolled"]):not([overflowing-x])) {
+            overflow-x: hidden;
+        }
+        :host(:not([flow="scrolled"]):not([overflowing-y])) {
+            overflow-y: hidden;
+        }
         :host([flow="scrolled"]) {
             display: block;
             overflow-y: auto;
@@ -872,8 +883,7 @@ export class FixedLayout extends HTMLElement {
             const dimensions = transform({frame: center, styles: { marginInline: 'auto' }})
             if (!dimensions) return renderPromises
             const {width, height, containerWidth, containerHeight} = dimensions
-            if (!preview) this.#isOverflowX = width > containerWidth
-            if (!preview) this.#isOverflowY = height > containerHeight
+            if (!preview) this.#setOverflow(width > containerWidth, height > containerHeight)
         } else {
             // Hide the 1px white spine seam on a two-page spread by overlapping
             // the right page onto the left by one device pixel (#4857). Always
@@ -897,8 +907,8 @@ export class FixedLayout extends HTMLElement {
             if (!leftDimensions || !rightDimensions) return renderPromises
             const {width: leftWidth, height: leftHeight, containerWidth, containerHeight} = leftDimensions
             const {width: rightWidth, height: rightHeight} = rightDimensions
-            if (!preview) this.#isOverflowX = leftWidth + rightWidth > containerWidth
-            if (!preview) this.#isOverflowY = Math.max(leftHeight, rightHeight) > containerHeight
+            if (!preview) this.#setOverflow(leftWidth + rightWidth > containerWidth,
+                Math.max(leftHeight, rightHeight) > containerHeight)
         }
         // A pinch commit overrides the default re-centring above: scroll the
         // spread back to the on-screen rect it occupied in the live preview so
@@ -1703,6 +1713,12 @@ export class FixedLayout extends HTMLElement {
     set scrollLocked(value) {
         this.#scrollLocked = value
     }
+    #setOverflow(x, y) {
+        this.#isOverflowX = x
+        this.#isOverflowY = y
+        this.toggleAttribute('overflowing-x', x)
+        this.toggleAttribute('overflowing-y', y)
+    }
     get isOverflowX() {
         return this.#isOverflowX
     }
@@ -1900,8 +1916,9 @@ export class FixedLayout extends HTMLElement {
         }
         const first = turn.incoming.find(frame => !frame.blank)
         this.#totalScaleFactor = parseFloat(first.element.style.width) / first.width
-        this.#isOverflowX = turn.incoming.reduce((sum, frame) => sum + frame.element.clientWidth, 0) > this.clientWidth
-        this.#isOverflowY = turn.incoming.some(frame => frame.element.clientHeight > this.clientHeight)
+        this.#setOverflow(
+            turn.incoming.reduce((sum, frame) => sum + frame.element.clientWidth, 0) > this.clientWidth,
+            turn.incoming.some(frame => frame.element.clientHeight > this.clientHeight))
         this.scrollLeft = 0
         this.scrollTop = 0
         this.#pageTurn = null
