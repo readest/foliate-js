@@ -12,11 +12,6 @@ const CHUNK_SIZE = 256 * 1024
 const yieldToFrame = () => document.hidden ? wait(0)
     : new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)))
 
-// Loading a section in the background waits until no page has turned for
-// this long: each of its steps can run for a second on a Kindle, and a tap
-// that comes in meanwhile waits for it.
-const TURN_IDLE_MS = 1000
-
 // WebKit before Safari 17 (iOS <= 16) resolves the `document.fonts.ready`
 // promise synchronously while purging still-loading `@font-face`s during a
 // style resolver rebuild (CSSFontFaceSet::purge). Script execution is
@@ -1585,7 +1580,6 @@ export class Paginator extends HTMLElement {
     #bgAnimContext = null
     #filling = false // true while #fillVisibleArea is running
     #fillPromise = null // tracks in-progress #fillVisibleArea for awaiting
-    #lastTurn = -Infinity // when the last page turn or preview started
     #turnsWaiting = 0 // page turns waiting for #fillPromise
     #hurry = null // resolves when a page turn starts waiting for #fillPromise
     #wakeIdle = null
@@ -3984,14 +3978,15 @@ export class Paginator extends HTMLElement {
         this.#fillPromise.then(() => { this.#stabilizing = false })
     }
     // A background load's next step waits for the frame on screen to be
-    // painted and for page turns and previews to stop, unless a turn waits
-    // for the load.
+    // painted and for a page preview to end, unless a turn waits for the load.
+    // It does not wait for page turns to stop: a reader turning pages faster
+    // than a section loads would reach its turn with the load not started,
+    // and that turn would wait for all of it (about 4 s on a Kindle).
     async #whenIdle() {
         await yieldToFrame()
-        for (let left; !this.#turnsWaiting && (this.#pagePreview
-            || (left = this.#lastTurn + TURN_IDLE_MS - performance.now()) > 0);) {
+        while (!this.#turnsWaiting && this.#pagePreview) {
             this.#hurry ??= new Promise(resolve => { this.#wakeIdle = resolve })
-            await Promise.race([this.#pagePreview ?? wait(left), this.#hurry])
+            await Promise.race([this.#pagePreview, this.#hurry])
             await yieldToFrame()
         }
     }
@@ -4001,9 +3996,8 @@ export class Paginator extends HTMLElement {
     // the event loop (Readest Lite), the host's content transforms and the
     // document build each run as one task, up to a second on a Kindle, and a
     // page turn that came in waited for them. A preload for the pages ahead
-    // (`preload`) also waits each time until no page has turned for
-    // TURN_IDLE_MS. A section the reader's position needs (`needed`) loads
-    // right away. A page turn waiting for the loads tries again as each one
+    // (`preload`) also waits each time for a page preview to end. A section
+    // the reader's position needs (`needed`) loads right away. A page turn waiting for the loads tries again as each one
     // settles.
     async #loadAdjacentSection(index, options) {
         try {
@@ -4379,7 +4373,6 @@ export class Paginator extends HTMLElement {
     // and dropped the taps that came in meanwhile. A relocate the last turn
     // has not sent yet is dropped. A wheel turn waits for the lock.
     async #turnPage(dir, distance, { discrete = false } = {}) {
-        this.#lastTurn = performance.now()
         const nativeCommit = this.hasAttribute('data-native-paper-commit')
         if (this.#pagePreview) await this.#pagePreview
         if (this.#locked) {
@@ -4451,7 +4444,6 @@ export class Paginator extends HTMLElement {
     }
     async previewPage(forward, capture, signal) {
         if (signal?.aborted || this.#pagePreview || this.#locked || this.#stabilizing || this.#touchScrolled) return null
-        this.#lastTurn = performance.now()
         const delta = forward ? 1 : -1
         const key = this.getPageTurnKey(delta)
         if (!key) return null // unloaded sections use normal navigation
