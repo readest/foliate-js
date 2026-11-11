@@ -740,7 +740,10 @@ const applyPageColors = (canvas, matrix, imageRects) => {
     const { width, height } = canvas
     // Round inward: an edge pixel the image only partly covers is blended with
     // the paper, and keeping it would outline the image in the paper color.
-    const kept = joinAdjacentRects(imageRects).map(([x0, y0, x1, y1]) => {
+    // A joined picture spans only the extent its strips share, so the strips
+    // are kept as well: an edge column one strip covers stays untouched.
+    const joined = joinAdjacentRects(imageRects).filter(rect => !imageRects.includes(rect))
+    const kept = [...imageRects, ...joined].map(([x0, y0, x1, y1]) => {
         const x = Math.max(0, Math.ceil(x0))
         const y = Math.max(0, Math.ceil(y0))
         return [x, y, Math.min(width, Math.floor(x1)) - x, Math.min(height, Math.floor(y1)) - y]
