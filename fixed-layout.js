@@ -878,9 +878,11 @@ export class FixedLayout extends HTMLElement {
 
             // The page's own size, not its rounded clientWidth: two pages of a
             // spread that fits can each round up and add up to a pixel more.
+            // A page hidden in portrait takes no room.
+            const hidden = portrait && frame !== target
             return {
-                width: (width ?? blankWidth) * scale,
-                height: (height ?? blankHeight) * scale,
+                width: hidden ? 0 : (width ?? blankWidth) * scale,
+                height: hidden ? 0 : (height ?? blankHeight) * scale,
                 containerWidth,
                 containerHeight,
             }
