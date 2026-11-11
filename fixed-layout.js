@@ -168,6 +168,10 @@ export const computeScrollPinchTransform = ({
     transformOrigin: `${scrollLeft + viewportWidth / 2}px ${scrollTop + viewportHeight / 2}px`,
 })
 
+// Whether pages of `size` overflow a client box of `box`, the rounded size they
+// were fitted to: pages that fill it can add up to a fraction over it.
+const overflows = (size, box) => Math.round(size) > box
+
 // Scroll offsets to apply to the host (`overflow:auto`) after rendering a
 // paginated page. Horizontal is re-centered so the page sits in the middle of
 // the viewport, unless the horizontal pan lock is on: there the offset the
@@ -872,9 +876,11 @@ export class FixedLayout extends HTMLElement {
                 container.scrollTop = scrollTop
             }
 
+            // The page's own size, not its rounded clientWidth: two pages of a
+            // spread that fits can each round up and add up to a pixel more.
             return {
-                width: element.clientWidth,
-                height: element.clientHeight,
+                width: (width ?? blankWidth) * scale,
+                height: (height ?? blankHeight) * scale,
                 containerWidth,
                 containerHeight,
             }
@@ -883,7 +889,7 @@ export class FixedLayout extends HTMLElement {
             const dimensions = transform({frame: center, styles: { marginInline: 'auto' }})
             if (!dimensions) return renderPromises
             const {width, height, containerWidth, containerHeight} = dimensions
-            if (!preview) this.#setOverflow(width > containerWidth, height > containerHeight)
+            if (!preview) this.#setOverflow(overflows(width, containerWidth), overflows(height, containerHeight))
         } else {
             // Hide the 1px white spine seam on a two-page spread by overlapping
             // the right page onto the left by one device pixel (#4857). Always
@@ -907,8 +913,8 @@ export class FixedLayout extends HTMLElement {
             if (!leftDimensions || !rightDimensions) return renderPromises
             const {width: leftWidth, height: leftHeight, containerWidth, containerHeight} = leftDimensions
             const {width: rightWidth, height: rightHeight} = rightDimensions
-            if (!preview) this.#setOverflow(leftWidth + rightWidth > containerWidth,
-                Math.max(leftHeight, rightHeight) > containerHeight)
+            if (!preview) this.#setOverflow(overflows(leftWidth + rightWidth, containerWidth),
+                overflows(Math.max(leftHeight, rightHeight), containerHeight))
         }
         // A pinch commit overrides the default re-centring above: scroll the
         // spread back to the on-screen rect it occupied in the live preview so
@@ -1917,8 +1923,9 @@ export class FixedLayout extends HTMLElement {
         const first = turn.incoming.find(frame => !frame.blank)
         this.#totalScaleFactor = parseFloat(first.element.style.width) / first.width
         this.#setOverflow(
-            turn.incoming.reduce((sum, frame) => sum + frame.element.clientWidth, 0) > this.clientWidth,
-            turn.incoming.some(frame => frame.element.clientHeight > this.clientHeight))
+            overflows(turn.incoming.reduce((sum, frame) => sum + parseFloat(frame.element.style.width), 0),
+                this.clientWidth),
+            turn.incoming.some(frame => overflows(parseFloat(frame.element.style.height), this.clientHeight)))
         this.scrollLeft = 0
         this.scrollTop = 0
         this.#pageTurn = null
