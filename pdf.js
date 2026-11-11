@@ -735,20 +735,37 @@ const joinAdjacentRects = rects => {
     return joined
 }
 
+// The parts of pixel rect `r` outside pixel rect `c`.
+const subtractRect = (r, c) => {
+    const [x0, y0, x1, y1] = r
+    if (c[0] >= x1 || c[2] <= x0 || c[1] >= y1 || c[3] <= y0) return [r]
+    const top = Math.max(y0, c[1])
+    const bottom = Math.min(y1, c[3])
+    return [
+        [x0, y0, x1, top],
+        [x0, bottom, x1, y1],
+        [x0, top, Math.max(x0, c[0]), bottom],
+        [Math.min(x1, c[2]), top, x1, bottom],
+    ].filter(([a, b, e, f]) => e > a && f > b)
+}
+
 // Theme the canvas, except where `imageRects` (canvas pixels) say images are.
 const applyPageColors = (canvas, matrix, imageRects) => {
     const { width, height } = canvas
     // Round inward: an edge pixel the image only partly covers is blended with
     // the paper, and keeping it would outline the image in the paper color.
-    // A joined picture spans only the extent its strips share, so the strips
-    // are kept as well: an edge column one strip covers stays untouched.
-    const joined = joinAdjacentRects(imageRects).filter(rect => !imageRects.includes(rect))
-    const kept = [...imageRects, ...joined].map(([x0, y0, x1, y1]) => {
-        const x = Math.max(0, Math.ceil(x0))
-        const y = Math.max(0, Math.ceil(y0))
-        return [x, y, Math.min(width, Math.floor(x1)) - x, Math.min(height, Math.floor(y1)) - y]
-    }).filter(([, , w, h]) => w > 0 && h > 0)
-        .map(([x, y, w, h]) => {
+    const toPixels = ([x0, y0, x1, y1]) => [Math.max(0, Math.ceil(x0)), Math.max(0, Math.ceil(y0)),
+        Math.min(width, Math.floor(x1)), Math.min(height, Math.floor(y1))]
+    const isEmpty = ([x0, y0, x1, y1]) => x1 <= x0 || y1 <= y0
+    const joined = joinAdjacentRects(imageRects).map(toPixels).filter(rect => !isEmpty(rect))
+    // A joined picture spans only the extent its strips share, so what a strip
+    // covers beyond it, such as an edge column, is kept on its own.
+    const rest = imageRects.map(toPixels).flatMap(rect =>
+        joined.reduce((parts, j) => parts.flatMap(part => subtractRect(part, j)), [rect]))
+    const kept = [...joined, ...rest].filter(rect => !isEmpty(rect))
+        .map(([x, y, x1, y1]) => {
+            const w = x1 - x
+            const h = y1 - y
             const copy = document.createElement('canvas')
             copy.width = w
             copy.height = h
