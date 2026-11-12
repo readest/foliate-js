@@ -6,6 +6,27 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 // (readest#1711): one huge document takes minutes to lay out and paint.
 const CHUNK_THRESHOLD = 512 * 1024
 const CHUNK_SIZE = 256 * 1024
+const SECTION_SWIPE_DISTANCE = 48
+// Finger travel past a single-section boundary before the next chapter loads.
+const SECTION_PULL_SLOP = 8
+
+// A nested table/code scroller or an editable field owns its input even when
+// the chapter around it is already at an edge.
+const ownsScrollInput = (event, horizontal) => {
+    let element = event.target?.nodeType === 1 ? event.target : event.target?.parentElement
+    if (element?.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))
+        return true
+    const doc = element?.ownerDocument
+    for (; element && element !== doc.body && element !== doc.documentElement;
+        element = element.parentElement) {
+        const style = doc.defaultView.getComputedStyle(element)
+        const overflow = horizontal ? style.overflowX : style.overflowY
+        const room = horizontal ? element.scrollWidth - element.clientWidth
+            : element.scrollHeight - element.clientHeight
+        if (/auto|scroll/.test(overflow) && room > 1) return true
+    }
+    return false
+}
 
 // A microtask (or rAF alone) resumes before paint. Give input and rendering a
 // turn between the style, host-load, and pagination phases of a chapter load.
@@ -1542,6 +1563,7 @@ export class Paginator extends HTMLElement {
     #scrollBounds
     #touchState
     #touchScrolled
+    #singleSectionTurnPending = false
     #lastVisibleRange
     // Container position the last #afterScroll measured, if it also detected
     // the primary view: the container's debounced scroll listener then has
@@ -2696,6 +2718,117 @@ export class Paginator extends HTMLElement {
         }
         this.#scrollToPage(page, 'snap')
     }
+    #canHandleSingleSection(event) {
+        if (!this.noContinuousScroll || this.#locked || this.#stabilizing
+            || this.#singleSectionTurnPending || this.#isAnimating || this.#scrollLocked
+            || this.#pagePreview || event.defaultPrevented
+            || (globalThis.visualViewport?.scale ?? 1) > 1) return false
+        const doc = this.#primaryView?.document
+        return Boolean(doc && doc.getSelection()?.isCollapsed !== false
+            && !ownsScrollInput(event, this.#vertical))
+    }
+    #atSectionBoundary(dir) {
+        // WebKit can report rubber-band offsets beyond either end.
+        const position = this.#vertical ? -this.containerPosition : this.containerPosition
+        const max = Math.max(0, this.#renderedViewSize - this.size)
+        return dir < 0 ? position <= 2 : position >= max - 2
+    }
+    #turnSingleSection(dir, event) {
+        if (!this.#canHandleSingleSection(event) || !this.#atSectionBoundary(dir)
+            || this.#adjacentIndex(dir) == null) return false
+        const max = Math.max(0, this.#renderedViewSize - this.size)
+        const position = Math.max(0, Math.min(max,
+            this.#vertical ? -this.containerPosition : this.containerPosition))
+        this.containerPosition = this.#vertical ? -position : position
+        this.#singleSectionTurnPending = true
+        this.#locked = true
+        const navigate = async () => {
+            if (this.#fillPromise) await this.#fillPromise
+            const index = await this.#adjacentUnit(dir)
+            if (index != null) await this.#goTo({ index, anchor: dir < 0 ? () => 1 : () => 0 })
+        }
+        navigate().catch(error => console.warn(error)).finally(() => {
+            this.#locked = false
+            this.#singleSectionTurnPending = false
+        })
+        return true
+    }
+    // With Paging Animation on, a swipe heading out of a single-section
+    // boundary loads the adjacent chapter beside this one, and the finger then
+    // scrolls across into it (readest#6792).
+    #startSectionPull(dir, along) {
+        if (!this.hasAttribute('animated') || this.hasAttribute('eink')) return null
+        const index = this.#adjacentIndex(dir)
+        if (index == null) return null
+        // The pull is measured from where the finger is once the chapter is in.
+        const pull = { dir, index, from: null, along, last: along }
+        this.#stabilizing = true
+        pull.loading = this.#loadAdjacentSection(index).then(() => {
+            // A prepended chapter shifts the scroll position: take the
+            // boundary once the chapter is in.
+            if (!this.#views.has(index)) return
+            pull.from = this.containerPosition
+            pull.along = pull.last
+        })
+        return pull
+    }
+    #dragSectionPull(pull, along) {
+        pull.last = along
+        if (pull.from == null) return
+        const pulled = Math.max(0, Math.min(this.size, pull.dir * (along - pull.along)))
+        this.containerPosition = pull.from + (this.#vertical ? -1 : 1) * pull.dir * pulled
+    }
+    // Ease onto the adjacent chapter, or back, then drop the chapter left
+    // behind without moving the one that stays.
+    async #settleSectionPull(pull, commit) {
+        this.#locked = true
+        try {
+            await pull.loading
+            if (pull.from == null) {
+                this.#stabilizing = false
+                if (commit) await this.#goTo({ index: pull.index, anchor: pull.dir < 0 ? () => 1 : () => 0 })
+                return
+            }
+            const sign = this.#vertical ? -1 : 1
+            const extent = this.#renderedViewSize - this.size
+            const to = commit ? pull.from + sign * pull.dir * this.size : pull.from
+            const target = sign * Math.max(0, Math.min(extent, sign * to))
+            await rafAnimateScroll(this.containerPosition, target, 250, easeOutQuad,
+                position => this.containerPosition = position)
+            const keep = commit ? pull.index : this.#primaryIndex
+            const drop = commit ? this.#primaryIndex : pull.index
+            const edge = () => this.#views.get(keep).element.getBoundingClientRect()[this.#vertical ? 'x' : 'y']
+            const before = edge()
+            this.#destroyView(drop)
+            this.containerPosition += edge() - before
+            if (commit) {
+                this.#primaryIndex = keep
+                this.#syncA11y()
+                await this.#scrollToAnchor(pull.dir < 0 ? 1 : 0)
+            }
+        } catch (error) {
+            console.warn(error)
+        } finally {
+            this.#stabilizing = false
+            this.#locked = false
+        }
+    }
+    #touchAlong(touch, state) {
+        return this.#vertical ? touch.screenX - state.x : state.y - touch.screenY
+    }
+    #singleSectionTouchDirection(event, state, distance = SECTION_SWIPE_DISTANCE) {
+        if (this.hasAttribute('no-swipe')) return 0
+        const boundary = state?.singleSectionBoundary
+        const touch = event.changedTouches?.[0]
+        if (!boundary || !touch || boundary.index !== this.#primaryIndex
+            || boundary.vertical !== this.#vertical) return 0
+        const along = this.#touchAlong(touch, state)
+        const across = this.#vertical ? state.y - touch.screenY : touch.screenX - state.x
+        if (Math.abs(along) < distance || Math.abs(along) <= Math.abs(across))
+            return 0
+        const dir = Math.sign(along)
+        return (dir < 0 ? boundary.start : boundary.end) && this.#atSectionBoundary(dir) ? dir : 0
+    }
     #onTouchStart(e) {
         const previousState = this.#touchState
         const replacementTouch = Boolean(previousState?.active)
@@ -2730,6 +2863,10 @@ export class Paginator extends HTMLElement {
             lastMovementTime: e.timeStamp,
             active: true,
             blocked,
+            singleSectionBoundary: !blocked && touch && this.#canHandleSingleSection(e) ? {
+                start: this.#atSectionBoundary(-1), end: this.#atSectionBoundary(1),
+                index: this.#primaryIndex, vertical: this.#vertical,
+            } : null,
             layeredGesture: blocked ? 'rejected' : 'pending',
             layeredEarlyClaimBlocked: earlyClaimBlocked,
             layeredEdgeDirection: edgeDirection,
@@ -2773,6 +2910,9 @@ export class Paginator extends HTMLElement {
         if (!state?.active || state.blocked) return
         if (e.touches.length > 1) {
             if (this.#touchScrolled) e.preventDefault()
+            state.singleSectionBoundary = null
+            if (state.pull) this.#settleSectionPull(state.pull, false)
+            state.pull = null
             this.#rejectLayeredGesture(state)
             return
         }
@@ -2785,7 +2925,24 @@ export class Paginator extends HTMLElement {
             this.#rejectLayeredGesture(state)
             return
         }
-        if (this.scrolled) return
+        if (this.scrolled) {
+            // A swipe that began at a single-section boundary takes over the
+            // scroll once it heads past that boundary (readest#6792).
+            if (state.pull) {
+                e.preventDefault()
+                this.#dragSectionPull(state.pull, this.#touchAlong(e.changedTouches[0], state))
+                return
+            }
+            if (!state.singleSectionBoundary) return
+            if (!this.#canHandleSingleSection(e)) {
+                state.singleSectionBoundary = null
+                return
+            }
+            const dir = this.#singleSectionTouchDirection(e, state, SECTION_PULL_SLOP)
+            if (dir) state.pull = this.#startSectionPull(dir, this.#touchAlong(e.changedTouches[0], state))
+            if (state.pull || this.#singleSectionTouchDirection(e, state)) e.preventDefault()
+            return
+        }
         // When the host opts out of swipe-to-paginate, let touch events reach
         // native behavior (text selection, etc.) without us tracking or
         // pre-empting them.
@@ -3192,6 +3349,18 @@ export class Paginator extends HTMLElement {
             return
         }
 
+        if (this.scrolled) {
+            this.#touchScrolled = false
+            const touch = e?.changedTouches?.[0]
+            if (state?.pull) this.#settleSectionPull(state.pull, Boolean(touch)
+                && state.pull.dir * this.#touchAlong(touch, state) >= SECTION_SWIPE_DISTANCE)
+            else {
+                const dir = this.#singleSectionTouchDirection(e, state)
+                if (dir) this.#turnSingleSection(dir, e)
+            }
+            return
+        }
+
         if (!this.#touchScrolled) {
             // A tap that never dragged may still have taken over a mid-flight
             // transform in #onTouchStart; put the views back to rest.
@@ -3298,7 +3467,12 @@ export class Paginator extends HTMLElement {
     #onTouchCancel() {
         this.#bgAnimContext = null
         const state = this.#touchState
-        if (state) state.active = false
+        if (state) {
+            state.active = false
+            state.singleSectionBoundary = null
+            if (state.pull) this.#settleSectionPull(state.pull, false)
+            state.pull = null
+        }
         if (state?.blocked) {
             this.#touchScrolled = false
             return
@@ -3941,11 +4115,23 @@ export class Paginator extends HTMLElement {
         // before the insertion so it can be restored once the view renders.
         const firstIndex = this.#sortedViews[0]?.[0]
         const isPrepend = this.scrolled && firstIndex != null && index < firstIndex
-        const startBefore = isPrepend ? this.#renderedStart : 0
+        let startBefore = 0
         try {
             const src = await section.load()
             const data = await section.loadContent?.()
+            startBefore = isPrepend ? this.#renderedStart : 0
             const view = this.#createView(index)
+            const compensatePrepend = () => {
+                if (!isPrepend) return
+                const addedSize = view.element.getBoundingClientRect()[this.sideProp]
+                const correction = startBefore + addedSize - this.#renderedStart
+                if (Math.abs(correction) > 0.5)
+                    this.containerPosition += (this.#vertical ? -1 : 1) * correction
+            }
+            // The empty view is already viewport-sized. Anchor its insertion
+            // before yielding to the iframe load, or the placeholder paints a
+            // blank screen over the page in view until the section renders.
+            compensatePrepend()
             const afterLoad = async doc => {
                 if (doc.head) {
                     const $styleBefore = doc.createElement('style')
@@ -3968,7 +4154,14 @@ export class Paginator extends HTMLElement {
             // — they must NOT call #beforeRender, which would modify
             // global state (direction, CSS classes, dir attribute, etc.).
             const cachedLayout = this.#lastLayout
-            const beforeRender = () => cachedLayout
+            const beforeRender = () => {
+                // Keep any scrolling since the placeholder went in; only its
+                // change in size when the content renders needs compensating.
+                if (isPrepend)
+                    startBefore = this.#renderedStart
+                        - view.element.getBoundingClientRect()[this.sideProp]
+                return cachedLayout
+            }
             await view.load(src, data, afterLoad, beforeRender, async () => {
                 // touchend queues the snap in rAF. Require two idle frames so
                 // we cannot slip layout between finger release and that snap.
@@ -4003,12 +4196,7 @@ export class Paginator extends HTMLElement {
             // same amount. This corrects the browser's scroll-anchoring
             // suppression at scrollTop 0 and is a no-op when anchoring already
             // handled the shift (correction ≈ 0).
-            if (isPrepend) {
-                const addedSize = view.element.getBoundingClientRect()[this.sideProp]
-                const correction = startBefore + addedSize - this.#renderedStart
-                if (Math.abs(correction) > 0.5)
-                    this.containerPosition += (this.#vertical ? -1 : 1) * correction
-            }
+            compensatePrepend()
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
                     doc: view.document, index: this.#spineOf(index),
