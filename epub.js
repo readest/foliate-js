@@ -954,6 +954,12 @@ class Loader {
         this.eventTarget.dispatchEvent(event)
         const newData = await event.detail.data
         const newType = await event.detail.type
+        // Another load of the same resource finished first: two sections
+        // that link one stylesheet, loaded at once. Keep that copy and count
+        // this parent on it. A second entry would set the count back to 1,
+        // and unloading either section would then revoke the stylesheet the
+        // other still shows.
+        if (this.#cache.has(href)) return this.ref(href, parent)
         const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#cache.set(href, url)
         this.#refCount.set(href, 1)
