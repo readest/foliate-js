@@ -1566,6 +1566,10 @@ export class Paginator extends HTMLElement {
     #singleSectionWheelAt = -Infinity
     #singleSectionWheelBlocked = false
     #lastVisibleRange
+    // Container position the last #afterScroll measured, if it also detected
+    // the primary view: the container's debounced scroll listener then has
+    // nothing left to do at that position.
+    #relocatedAt = null
     #scrollLocked = false
     #subpixelOffset = 0
     #isAnimating = false
@@ -1778,7 +1782,11 @@ export class Paginator extends HTMLElement {
             } else if (!this.scrolled && !this.#stabilizing) {
                 // As in scrolled mode, a scroll that settles while a navigation
                 // renders its target is not the reader's position: detecting the
-                // primary view from it would trim the target as off screen
+                // primary view from it would trim the target as off screen.
+                // A page turn relocates as it scrolls; its own scroll event
+                // lands here too and needs no second pass.
+                if (this.#relocatedAt != null
+                    && Math.abs(this.containerPosition - this.#relocatedAt) < 1) return
                 this.#afterScroll('container-scroll')
             }
         }, 250)
@@ -2097,6 +2105,9 @@ export class Paginator extends HTMLElement {
             container: this,
             onExpand: () => {
                 this.#padLastPage()
+                // The primary view, or one before it, reflowed: what the
+                // last relocate measured may no longer be on the page.
+                if (index <= this.#primaryIndex) this.#relocatedAt = null
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
                 if (this.#filling || this.#stabilizing || this.scrolled) return
@@ -3882,6 +3893,7 @@ export class Paginator extends HTMLElement {
         }
     }
     #afterScroll(reason) {
+        this.#relocatedAt = null
         // In multi-view, detect which section is primary
         if (this.#views.size > 1 && reason !== 'anchor' && reason !== 'navigation') {
             this.#detectPrimaryView()
@@ -3895,6 +3907,10 @@ export class Paginator extends HTMLElement {
         const { range, index: visibleIndex } = this.#getVisibleRange() || {}
         if (!range) return
         this.#lastVisibleRange = range
+        // Anchor and navigation relocates skip primary detection, which the
+        // debounced scroll listener still provides.
+        if (reason !== 'anchor' && reason !== 'navigation')
+            this.#relocatedAt = this.containerPosition
         // don't set new anchor if relocation was to scroll to anchor
         if (reason === 'selection' || reason === 'navigation' || reason === 'anchor')
             this.#justAnchored = true

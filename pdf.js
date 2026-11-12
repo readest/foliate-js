@@ -212,6 +212,7 @@ let annotationLayerBuilderCSS = null
 
 // Track active render tasks per iframe document to cancel superseded renders
 const activeRenderTasks = new WeakMap()
+const pendingPageRenders = new WeakMap()
 // Generation counter per document to detect stale renders after async gaps
 const renderGenerations = new WeakMap()
 // What each document was last rendered for, so an identical re-render can be
@@ -453,8 +454,12 @@ const getVisibleRect = doc => {
     const box = frame.getBoundingClientRect()
     // Mid-pinch the frame is scaled by a transform; the re-render comes next.
     if (Math.abs(box.width - frame.offsetWidth) > 1) return null
+    // innerWidth/innerHeight are rounded to whole CSS px; at a fractional dpr
+    // (1080 px / 2.75) that would leave a coarse strip at the screen edge.
+    const vv = win.visualViewport
     let [left, top, right, bottom] = [Math.max(0, box.left), Math.max(0, box.top),
-        Math.min(win.innerWidth, box.right), Math.min(win.innerHeight, box.bottom)]
+        Math.min(vv?.width ?? win.innerWidth, box.right),
+        Math.min(vv?.height ?? win.innerHeight, box.bottom)]
     for (let el = frame.parentElement ?? frame.parentNode?.host; el;
         el = el.parentElement ?? el.parentNode?.host) {
         const { overflowX, overflowY } = win.getComputedStyle(el)
@@ -479,6 +484,8 @@ const detailSources = new WeakMap()
 const details = new WeakMap()
 const scrollWatched = new WeakSet()
 let detailTimer = null
+const isPageTurning = doc => doc.defaultView?.frameElement?.parentElement
+    ?.hasAttribute('data-page-turn-view')
 
 // Readest blends PDF canvases into the theme (`mix-blend-mode`), which would
 // let the coarse page show through the detail, so the page is cut away under it.
@@ -501,6 +508,9 @@ const dropDetail = doc => {
 }
 
 const updateDetail = async doc => {
+    // A retained turn moves the existing canvases. Re-cropping the detail to
+    // the moving viewport cuts a new edge into the page and exposes a seam.
+    if (isPageTurning(doc)) return
     const source = detailSources.get(doc)
     // Where the page bitmap already matches the screen, there is nothing to add.
     const visible = source?.renderDpr < devicePixelRatio && getVisibleRect(doc)
@@ -541,6 +551,7 @@ const updateDetail = async doc => {
         return
     }
     if (details.get(doc) !== detail) return
+    if (isPageTurning(doc)) return dropDetail(doc)
     detail.task = null
     if (colorMatrix) {
         const k = dpr / renderDpr
@@ -567,10 +578,24 @@ const scheduleDetails = () => {
 
 const setDetailSource = (doc, source) => {
     dropDetail(doc)
-    if (!detailSources.has(doc)) detailDocs.add(new WeakRef(doc))
+    const frame = doc.defaultView?.frameElement
+    if (!detailSources.has(doc)) {
+        const ref = new WeakRef(doc)
+        detailDocs.add(ref)
+        // Keep a ready detail fixed during the gesture, cancel pending work,
+        // and refresh after either landing or cancellation without a scroll.
+        if (frame?.parentElement) new MutationObserver(() => {
+            const doc = ref.deref()
+            if (!doc) return
+            if (isPageTurning(doc)) {
+                if (details.get(doc)?.task) dropDetail(doc)
+            } else scheduleDetails()
+        }).observe(frame.parentElement, {
+            attributes: true, attributeFilter: ['data-page-turn-view'],
+        })
+    }
     detailSources.set(doc, source)
     // Follow the reader panning or scrolling a zoomed page.
-    const frame = doc.defaultView?.frameElement
     for (let el = frame?.parentElement ?? frame?.parentNode?.host; el;
         el = el.parentElement ?? el.parentNode?.host) {
         if (scrollWatched.has(el)) continue
@@ -683,17 +708,64 @@ const MAX_KEPT_IMAGE_COVERAGE = 0.5
 const getKeptImageRects = (imageRects, width, height) => imageRects.filter(([x0, y0, x1, y1]) =>
     (x1 - x0) * (y1 - y0) < width * height * MAX_KEPT_IMAGE_COVERAGE)
 
+// Images that meet edge to edge, such as a scan stored as a stack of strips,
+// are joined into one: rounded inward one by one, the pixel row or column
+// where two of them meet would be themed as if it were paper.
+const joinAdjacentRects = rects => {
+    const near = (a, b) => Math.abs(a - b) < 0.5
+    const join = (a, b) => {
+        if (near(a[0], b[0]) && near(a[2], b[2]) && a[1] <= b[3] + 0.5 && b[1] <= a[3] + 0.5)
+            return [Math.max(a[0], b[0]), Math.min(a[1], b[1]), Math.min(a[2], b[2]), Math.max(a[3], b[3])]
+        if (near(a[1], b[1]) && near(a[3], b[3]) && a[0] <= b[2] + 0.5 && b[0] <= a[2] + 0.5)
+            return [Math.min(a[0], b[0]), Math.max(a[1], b[1]), Math.max(a[2], b[2]), Math.min(a[3], b[3])]
+        return null
+    }
+    const joined = [...rects]
+    for (let i = 0; i < joined.length; i++) {
+        for (let j = 0; j < joined.length; j++) {
+            const rect = i !== j && join(joined[i], joined[j])
+            if (!rect) continue
+            joined[i] = rect
+            joined.splice(j, 1)
+            // Compare the joined rect with every other one again.
+            i = -1
+            break
+        }
+    }
+    return joined
+}
+
+// The parts of pixel rect `r` outside pixel rect `c`.
+const subtractRect = (r, c) => {
+    const [x0, y0, x1, y1] = r
+    if (c[0] >= x1 || c[2] <= x0 || c[1] >= y1 || c[3] <= y0) return [r]
+    const top = Math.max(y0, c[1])
+    const bottom = Math.min(y1, c[3])
+    return [
+        [x0, y0, x1, top],
+        [x0, bottom, x1, y1],
+        [x0, top, Math.max(x0, c[0]), bottom],
+        [Math.min(x1, c[2]), top, x1, bottom],
+    ].filter(([a, b, e, f]) => e > a && f > b)
+}
+
 // Theme the canvas, except where `imageRects` (canvas pixels) say images are.
 const applyPageColors = (canvas, matrix, imageRects) => {
     const { width, height } = canvas
     // Round inward: an edge pixel the image only partly covers is blended with
     // the paper, and keeping it would outline the image in the paper color.
-    const kept = imageRects.map(([x0, y0, x1, y1]) => {
-        const x = Math.max(0, Math.ceil(x0))
-        const y = Math.max(0, Math.ceil(y0))
-        return [x, y, Math.min(width, Math.floor(x1)) - x, Math.min(height, Math.floor(y1)) - y]
-    }).filter(([, , w, h]) => w > 0 && h > 0)
-        .map(([x, y, w, h]) => {
+    const toPixels = ([x0, y0, x1, y1]) => [Math.max(0, Math.ceil(x0)), Math.max(0, Math.ceil(y0)),
+        Math.min(width, Math.floor(x1)), Math.min(height, Math.floor(y1))]
+    const isEmpty = ([x0, y0, x1, y1]) => x1 <= x0 || y1 <= y0
+    const joined = joinAdjacentRects(imageRects).map(toPixels).filter(rect => !isEmpty(rect))
+    // A joined picture spans only the extent its strips share, so what a strip
+    // covers beyond it, such as an edge column, is kept on its own.
+    const rest = imageRects.map(toPixels).flatMap(rect =>
+        joined.reduce((parts, j) => parts.flatMap(part => subtractRect(part, j)), [rect]))
+    const kept = [...joined, ...rest].filter(rect => !isEmpty(rect))
+        .map(([x, y, x1, y1]) => {
+            const w = x1 - x
+            const h = y1 - y
             const copy = document.createElement('canvas')
             copy.width = w
             copy.height = h
@@ -975,7 +1047,19 @@ const renderPage = async (page, getImageBlob) => {
         <div class="annotationLayer"></div>
     `
     const src = URL.createObjectURL(new Blob([data], { type: 'text/html' }))
-    const onZoom = ({ doc, scale, pageColors }) => render(page, doc, scale, pageColors)
+    const onZoom = ({ doc, scale, pageColors }) => {
+        if (!doc) return
+        // A duplicate render can be skipped while its first bitmap/text layer
+        // is still drawing. Its caller must await that work too before exposing
+        // the page or capturing it for a turn.
+        const previous = pendingPageRenders.get(doc)
+        const current = render(page, doc, scale, pageColors)
+        const ready = Promise.all([previous, current]).then(() => {})
+        pendingPageRenders.set(doc, ready)
+        return ready.finally(() => {
+            if (pendingPageRenders.get(doc) === ready) pendingPageRenders.delete(doc)
+        })
+    }
     return { src, data, onZoom }
 }
 
