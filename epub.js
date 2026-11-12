@@ -936,6 +936,9 @@ class Loader {
     #cacheXHTMLContent = new Map()
     #children = new Map()
     #refCount = new Map()
+    // resources whose cached copy is the untransformed one made to break an
+    // import loop (a stylesheet that imports itself), not the real resource
+    #loopCopies = new Set()
     eventTarget = new EventTarget()
     constructor({ loadText, loadBlob, resources, entries }) {
         this.loadText = loadText
@@ -946,7 +949,7 @@ class Loader {
         // needed only when replacing in (X)HTML w/o parsing (see below)
         //.filter(({ mediaType }) => ![MIME.XHTML, MIME.HTML].includes(mediaType))
     }
-    async createURL(href, data, type, parent) {
+    async createURL(href, data, type, parent, loopCopy = false) {
         if (!data) return ''
         const detail = { data, type }
         Object.defineProperty(detail, 'name', { value: href }) // readonly
@@ -958,8 +961,12 @@ class Loader {
         // that link one stylesheet, loaded at once. Keep that copy and count
         // this parent on it. A second entry would set the count back to 1,
         // and unloading either section would then revoke the stylesheet the
-        // other still shows.
-        if (this.#cache.has(href)) return this.ref(href, parent)
+        // other still shows. A copy that only broke an import loop is
+        // replaced, as before.
+        if (this.#cache.has(href) && !this.#loopCopies.has(href))
+            return this.ref(href, parent)
+        if (loopCopy) this.#loopCopies.add(href)
+        else this.#loopCopies.delete(href)
         const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#cache.set(href, url)
         this.#refCount.set(href, 1)
@@ -1007,6 +1014,7 @@ class Loader {
             this.#cache.delete(href)
             this.#cacheXHTMLContent.delete(url)
             this.#refCount.delete(href)
+            this.#loopCopies.delete(href)
             // unref children
             const childList = this.#children.get(href)
             if (childList) while (childList.length) this.unref(childList.pop())
@@ -1036,7 +1044,7 @@ class Loader {
         if (shouldReplace) return this.loadReplaced(item, parents)
         // NOTE: this can be replaced with `Promise.try()`
         const tryLoadBlob = Promise.resolve().then(() => this.loadBlob(href))
-        return this.createURL(href, tryLoadBlob, mediaType, parent)
+        return this.createURL(href, tryLoadBlob, mediaType, parent, parents.includes(href))
     }
     async loadItemXHTMLContent(item, parents = []) {
         // Callers read the source of a section they have just loaded (the
