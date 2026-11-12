@@ -7,7 +7,6 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const CHUNK_THRESHOLD = 512 * 1024
 const CHUNK_SIZE = 256 * 1024
 const SECTION_SWIPE_DISTANCE = 48
-const SECTION_WHEEL_IDLE_MS = 180
 
 // A nested table/code scroller or an editable field owns its input even when
 // the chapter around it is already at an edge.
@@ -1563,8 +1562,6 @@ export class Paginator extends HTMLElement {
     #touchState
     #touchScrolled
     #singleSectionTurnPending = false
-    #singleSectionWheelAt = -Infinity
-    #singleSectionWheelBlocked = false
     #lastVisibleRange
     // Container position the last #afterScroll measured, if it also detected
     // the primary view: the container's debounced scroll listener then has
@@ -1874,13 +1871,11 @@ export class Paginator extends HTMLElement {
         })
 
         const opts = { passive: false }
-        this.addEventListener('wheel', this.#onSingleSectionWheel.bind(this), opts)
         this.addEventListener('touchstart', this.#onTouchStart.bind(this), opts)
         this.addEventListener('touchmove', this.#onTouchMove.bind(this), opts)
         this.addEventListener('touchend', this.#onTouchEnd.bind(this))
         this.addEventListener('touchcancel', this.#onTouchCancel.bind(this))
         this.addEventListener('load', ({ detail: { doc } }) => {
-            doc.addEventListener('wheel', this.#onSingleSectionWheel.bind(this), opts)
             doc.addEventListener('touchstart', this.#onTouchStart.bind(this), opts)
             doc.addEventListener('touchmove', this.#onTouchMove.bind(this), opts)
             doc.addEventListener('touchend', this.#onTouchEnd.bind(this))
@@ -2756,30 +2751,6 @@ export class Paginator extends HTMLElement {
         })
         return true
     }
-    #onSingleSectionWheel(event) {
-        if (!this.noContinuousScroll) {
-            this.#singleSectionWheelBlocked = false
-            return
-        }
-        if (event.ctrlKey || event.metaKey || event.defaultPrevented
-            || ownsScrollInput(event, this.#vertical)) return
-        const along = this.#vertical ? -event.deltaX : event.deltaY
-        const across = this.#vertical ? event.deltaY : event.deltaX
-        if (!along || Math.abs(along) <= Math.abs(across)) return
-        const now = performance.now()
-        if (now - this.#singleSectionWheelAt > SECTION_WHEEL_IDLE_MS
-            && !this.#singleSectionTurnPending)
-            this.#singleSectionWheelBlocked = false
-        this.#singleSectionWheelAt = now
-        if (this.#singleSectionWheelBlocked) {
-            event.preventDefault()
-            return
-        }
-        if (this.#turnSingleSection(Math.sign(along), event)) {
-            this.#singleSectionWheelBlocked = true
-            event.preventDefault()
-        }
-    }
     #singleSectionTouchDirection(event, state) {
         if (this.hasAttribute('no-swipe')) return 0
         const boundary = state?.singleSectionBoundary
@@ -2873,14 +2844,9 @@ export class Paginator extends HTMLElement {
     #onTouchMove(e) {
         const state = this.#touchState
         if (!state?.active || state.blocked) return
-        if (this.scrolled) {
-            if (e.touches.length !== 1 || !this.#canHandleSingleSection(e))
-                state.singleSectionBoundary = null
-            else if (this.#singleSectionTouchDirection(e, state)) e.preventDefault()
-            return
-        }
         if (e.touches.length > 1) {
             if (this.#touchScrolled) e.preventDefault()
+            state.singleSectionBoundary = null
             this.#rejectLayeredGesture(state)
             return
         }
@@ -2891,6 +2857,14 @@ export class Paginator extends HTMLElement {
         state.pinched = globalThis.visualViewport.scale > 1
         if (state.pinched) {
             this.#rejectLayeredGesture(state)
+            return
+        }
+        if (this.scrolled) {
+            // A swipe that began at a single-section boundary takes over the
+            // scroll once it heads past that boundary (readest#6792).
+            if (!state.singleSectionBoundary) return
+            if (!this.#canHandleSingleSection(e)) state.singleSectionBoundary = null
+            else if (this.#singleSectionTouchDirection(e, state)) e.preventDefault()
             return
         }
         // When the host opts out of swipe-to-paginate, let touch events reach
@@ -4058,23 +4032,11 @@ export class Paginator extends HTMLElement {
         // before the insertion so it can be restored once the view renders.
         const firstIndex = this.#sortedViews[0]?.[0]
         const isPrepend = this.scrolled && firstIndex != null && index < firstIndex
-        let startBefore = 0
+        const startBefore = isPrepend ? this.#renderedStart : 0
         try {
             const src = await section.load()
             const data = await section.loadContent?.()
-            startBefore = isPrepend ? this.#renderedStart : 0
             const view = this.#createView(index)
-            const compensatePrepend = () => {
-                if (!isPrepend) return
-                const addedSize = view.element.getBoundingClientRect()[this.sideProp]
-                const correction = startBefore + addedSize - this.#renderedStart
-                if (Math.abs(correction) > 0.5)
-                    this.containerPosition += (this.#vertical ? -1 : 1) * correction
-            }
-            // The empty view is already viewport-sized. Anchor its insertion
-            // before yielding to the iframe load, or WebKit paints a chapter
-            // jump while the previous section is still only a placeholder.
-            compensatePrepend()
             const afterLoad = async doc => {
                 if (doc.head) {
                     const $styleBefore = doc.createElement('style')
@@ -4097,14 +4059,7 @@ export class Paginator extends HTMLElement {
             // — they must NOT call #beforeRender, which would modify
             // global state (direction, CSS classes, dir attribute, etc.).
             const cachedLayout = this.#lastLayout
-            const beforeRender = () => {
-                // Retain any scrolling since the placeholder was inserted;
-                // only compensate its size change when real content renders.
-                if (isPrepend)
-                    startBefore = this.#renderedStart
-                        - view.element.getBoundingClientRect()[this.sideProp]
-                return cachedLayout
-            }
+            const beforeRender = () => cachedLayout
             await view.load(src, data, afterLoad, beforeRender, async () => {
                 // touchend queues the snap in rAF. Require two idle frames so
                 // we cannot slip layout between finger release and that snap.
@@ -4139,7 +4094,12 @@ export class Paginator extends HTMLElement {
             // same amount. This corrects the browser's scroll-anchoring
             // suppression at scrollTop 0 and is a no-op when anchoring already
             // handled the shift (correction ≈ 0).
-            compensatePrepend()
+            if (isPrepend) {
+                const addedSize = view.element.getBoundingClientRect()[this.sideProp]
+                const correction = startBefore + addedSize - this.#renderedStart
+                if (Math.abs(correction) > 0.5)
+                    this.containerPosition += (this.#vertical ? -1 : 1) * correction
+            }
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
                     doc: view.document, index: this.#spineOf(index),
