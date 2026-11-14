@@ -55,6 +55,27 @@ const extractFootnote = (doc, anchor) => {
     return el
 }
 
+const hasLocalBacklink = (note, reference, section, targetHref) => {
+    const sourceHref = reference.getAttribute('href')
+    if (!note.matches('p') || !sourceHref?.startsWith('#') || !section?.resolveHref) return false
+    if (section.resolveHref(sourceHref) !== targetHref) return false
+    // Some books place the return anchor immediately before the numbered link.
+    let previous = reference.previousSibling
+    while (previous?.nodeType === 8 || previous?.nodeType === 3 && !previous.textContent.trim())
+        previous = previous.previousSibling
+    const ids = [reference.id]
+    if (previous?.matches?.('a[id]:not([href])') && !previous.textContent.trim()) ids.push(previous.id)
+    const targetPath = targetHref.split('#')[0]
+    return Array.from(note.querySelectorAll('a[href]')).some(a => {
+        const href = a.getAttribute('href')
+        if (!href.startsWith('#')) return false
+        const resolved = section.resolveHref(href)
+        if (typeof resolved !== 'string') return false
+        const [path, fragment] = resolved.split('#')
+        return path === targetPath && fragment && ids.includes(fragment)
+    })
+}
+
 const isTextish = node => node?.nodeType === 3 || node?.nodeType === 4
 
 // Describe how an extracted fragment maps back onto the pristine section
@@ -143,7 +164,7 @@ export const extractToBody = (doc, range) => {
 
 export class FootnoteHandler extends EventTarget {
     detectFootnotes = true
-    #showFragment(book, { index, anchor, check }, href) {
+    #showFragment(book, { index, anchor, check, reference }, href) {
         const view = document.createElement('foliate-view')
         let loaded = false
         return new Promise((resolve, reject) => {
@@ -178,6 +199,13 @@ export class FootnoteHandler extends EventTarget {
                         } else if (el.closest('.note')) {
                             range = doc.createRange()
                             range.selectNodeContents(el.closest('.note'))
+                        } else if (check && el.children.length > 3) {
+                            if (!hasLocalBacklink(el, reference, book.sections[index], href)) {
+                                reject(new Error('Failed to locate footnote content'))
+                                return
+                            }
+                            range = doc.createRange()
+                            range.selectNode(el)
                         } else if (el.querySelector('a')) {
                             range = doc.createRange()
                             range.setStartBefore(el)
@@ -190,10 +218,6 @@ export class FootnoteHandler extends EventTarget {
                                 range.setEndBefore(next)
                             } else {
                                 range.setEndAfter(el.parentNode.lastChild)
-                            }
-                            if (check && el.children.length > 3) {
-                                reject(new Error('Failed to locate footnote content'))
-                                return
                             }
                         } else if (check) {
                             reject(new Error('Failed to locate footnote content'))
@@ -245,7 +269,7 @@ export class FootnoteHandler extends EventTarget {
         else if (this.detectFootnotes && (maybe() || check)) {
             e.preventDefault()
             return Promise.resolve(book.resolveHref(href)).then(({ index, anchor }) => {
-                const target = { index, anchor: doc => extractFootnote(doc, anchor), check }
+                const target = { index, anchor: doc => extractFootnote(doc, anchor), check, reference: a }
                 return this.#showFragment(book, target, href)
             })
         }
