@@ -86,52 +86,96 @@ const SCROLL_RELOCATE_MAX_WAIT = 1000
 // Transforms ALL children of the container so multi-view layouts
 // animate as a unified whole. Extra elements (e.g. background) are
 // also transformed so they slide in sync with the content.
-const cssAnimateScroll = (element, scrollProp, startValue, endValue, duration, extraElements = []) => new Promise(resolve => {
+const cssAnimateScroll = (element, scrollProp, startValue, endValue, duration, extraElements = [], elements = null, useWaapi = true) => {
+    const empty = {
+        promise: Promise.resolve(),
+        cancel: () => {},
+        freeze: () => startValue,
+    }
     if (document.hidden) {
         element[scrollProp] = endValue
-        return resolve()
+        return empty
     }
 
-    const children = [...element.children]
+    const children = elements?.length ? elements : [...element.children]
     if (!children.length) {
         element[scrollProp] = endValue
-        return resolve()
+        return empty
     }
 
     const allElements = [...children, ...extraElements]
     const isHorizontal = scrollProp === 'scrollLeft'
     const delta = endValue - startValue
     const transformProp = isHorizontal ? 'translateX' : 'translateY'
-
-    // Prepare all elements for animation
+    const first = children[0]
+    const easing = 'cubic-bezier(0.25, 0.46, 0.45, 0.94)'
+    // Elements already promoted to a compositor layer stay warm after cleanup so
+    // the next turn avoids a cold layer-upload hitch on Frame 0.
+    const keepWillChange = new Set()
     for (const el of allElements) {
-        el.style.willChange = 'transform'
-        el.style.transform = `${transformProp}(0px)`
-        el.style.transition = 'none'
+        if (el.style.willChange === 'transform') keepWillChange.add(el)
+        else el.style.willChange = 'transform'
     }
 
-    // Force reflow to apply initial state
-    element.getBoundingClientRect()
-
-    // Start animation on all elements
-    for (const el of allElements) {
-        el.style.transition = `transform ${duration}ms cubic-bezier(0.25, 0.46, 0.45, 0.94)`
-        el.style.transform = `${transformProp}(${-delta}px)`
-    }
-
-    let resolved = false
-    const cleanup = () => {
-        if (resolved) return
-        resolved = true
-
+    let animations = null
+    if (useWaapi && typeof first.animate === 'function') {
+        const fromTransform = `${transformProp}(0px)`
+        const toTransform = `${transformProp}(${-delta}px)`
+        animations = allElements.map(el => el.animate(
+            [{ transform: fromTransform }, { transform: toTransform }],
+            { duration, easing, fill: 'forwards' },
+        ))
+    } else {
+        // Fallback for environments without Element.animate (e.g. test DOMs)
         for (const el of allElements) {
-            el.style.willChange = ''
-            el.style.transform = ''
-            el.style.transition = ''
+            el.style.transform = `${transformProp}(0px)`
+            el.style.transition = 'none'
         }
 
+        // Force reflow to apply initial state
+        element.getBoundingClientRect()
+
+        // Start animation on all elements
+        for (const el of allElements) {
+            el.style.transition = `transform ${duration}ms ${easing}`
+            el.style.transform = `${transformProp}(${-delta}px)`
+        }
+    }
+
+    let settled = false
+    let timer = 0
+    let resolvePromise
+    const promise = new Promise(resolve => { resolvePromise = resolve })
+
+    const clearStyles = () => {
+        if (animations) {
+            for (const anim of animations) anim.cancel()
+        }
+        for (const el of allElements) {
+            if (!keepWillChange.has(el)) el.style.willChange = ''
+            if (!animations) {
+                el.style.transform = ''
+                el.style.transition = ''
+            }
+        }
+    }
+
+    const onTransitionEnd = (e) => {
+        if (e.target === first && e.propertyName === 'transform') {
+            cleanup(endValue, true)
+        }
+    }
+
+    const cleanup = (targetValue, allowDeferClamp) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (!animations) first.removeEventListener('transitionend', onTransitionEnd)
+
+        clearStyles()
+
         // Apply final scroll position
-        element[scrollProp] = endValue
+        element[scrollProp] = targetValue
         // Translating the children shrank the container's scrollable overflow
         // by the animated distance, and WebKit (iOS 18) still reports that
         // shrunken extent when the transforms are cleared in this same task —
@@ -139,33 +183,49 @@ const cssAnimateScroll = (element, scrollProp, startValue, endValue, duration, e
         // beyond the target and is invisible; on the last page of the book,
         // where the target *is* the maximum scroll offset, it lands a full page
         // short and the page visibly snaps back (readest#5663).
-        if (Math.abs(element[scrollProp] - endValue) > 0.5) {
+        if (allowDeferClamp && Math.abs(element[scrollProp] - targetValue) > 0.5) {
             // Forcing a layout here is not enough — the extent it reports is
             // restored, but the scroll clamp still uses the stale one for the
             // rest of the task. The next frame is past the compositor's
             // animation teardown, so re-apply there.
             requestAnimationFrame(() => {
-                element[scrollProp] = endValue
-                resolve()
+                element[scrollProp] = targetValue
+                resolvePromise()
             })
             return
         }
-        resolve()
+        resolvePromise()
     }
 
-    // Listen for transition end on the first child
-    const first = children[0]
-    const onTransitionEnd = (e) => {
-        if (e.target === first && e.propertyName === 'transform') {
-            first.removeEventListener('transitionend', onTransitionEnd)
-            cleanup()
-        }
+    if (animations) {
+        animations[0].finished.then(() => cleanup(endValue, true), () => {})
+    } else {
+        first.addEventListener('transitionend', onTransitionEnd)
     }
-    first.addEventListener('transitionend', onTransitionEnd)
 
-    // Fallback timeout in case transitionend doesn't fire
-    setTimeout(cleanup, duration + 50)
-})
+    // Fallback timeout in case transitionend / finished doesn't fire
+    timer = setTimeout(() => cleanup(endValue, true), duration + 50)
+
+    const freeze = () => {
+        if (settled) return element[scrollProp]
+        const transform = getComputedStyle(first).transform
+        const currentTranslate = transform && transform !== 'none'
+            ? new DOMMatrix(transform)[isHorizontal ? 'm41' : 'm42'] : 0
+        cleanup(startValue - currentTranslate, false)
+        return element[scrollProp]
+    }
+
+    const cancel = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (!animations) first.removeEventListener('transitionend', onTransitionEnd)
+        clearStyles()
+        resolvePromise()
+    }
+
+    return { promise, cancel, freeze }
+}
 
 // Two-phase page-turn slide for vertical (vertical-rl/lr) paginated books.
 // Their pages read horizontally but CSS fragmentation stacks them along the
@@ -413,25 +473,40 @@ const easeOutQuad = x => 1 - (1 - x) * (1 - x)
 // CSS-transform animate, this never composites the whole section as a
 // single layer, so it doesn't block when the section exceeds the GPU texture
 // limit — it just changes scroll offset each frame (incremental/tiled).
-const rafAnimateScroll = (a, b, duration, ease, render) => new Promise(resolve => {
-    let start
-    const step = now => {
-        if (document.hidden) {
-            render(lerp(a, b, 1))
-            return resolve()
-        }
-        start ??= now
-        const fraction = Math.min(1, (now - start) / duration)
-        render(lerp(a, b, ease(fraction)))
-        if (fraction < 1) requestAnimationFrame(step)
-        else resolve()
-    }
+const rafAnimateScroll = (a, b, duration, ease, render) => {
     if (document.hidden) {
         render(lerp(a, b, 1))
-        return resolve()
+        return { promise: Promise.resolve(), cancel: () => {}, freeze: () => b }
     }
-    requestAnimationFrame(step)
-})
+    const start = document.timeline?.currentTime ?? performance.now()
+    let rafId = 0
+    let done = false
+    let resolvePromise
+    const promise = new Promise(resolve => { resolvePromise = resolve })
+    const step = now => {
+        if (done) return
+        if (document.hidden) {
+            done = true
+            render(lerp(a, b, 1))
+            return resolvePromise()
+        }
+        const fraction = Math.min(1, Math.max(0, (now - start) / duration))
+        render(lerp(a, b, ease(fraction)))
+        if (fraction < 1) rafId = requestAnimationFrame(step)
+        else {
+            done = true
+            resolvePromise()
+        }
+    }
+    rafId = requestAnimationFrame(step)
+    const cancel = () => {
+        if (done) return
+        done = true
+        cancelAnimationFrame(rafId)
+        resolvePromise()
+    }
+    return { promise, cancel, freeze: cancel }
+}
 
 // A CSS-transform page-turn must composite the whole section as one layer. Once
 // that layer is past the GPU texture limit (large sections; worse at high DPR on
@@ -1572,6 +1647,8 @@ export class Paginator extends HTMLElement {
     #scrollLocked = false
     #subpixelOffset = 0
     #isAnimating = false
+    #pushAnim = null
+    #pushAnimId = 0
     // Generation counter for slideTurnAnimation: a newer vertical page turn
     // bumps it so an in-flight two-phase slide stops touching the DOM.
     #slideTurnId = 0
@@ -1592,6 +1669,10 @@ export class Paginator extends HTMLElement {
     // a scroll animation starts so the per-frame repaint reuses it instead of
     // forcing a fresh style+layout read every frame; null when not animating.
     #bgAnimContext = null
+    #uniformDragBg = false
+    #skipAfterScrollBg = false
+    #lastBgRenderKey = null
+    #preloadTimer = 0
     #filling = false // true while #fillVisibleArea is running
     #fillPromise = null // tracks in-progress #fillVisibleArea for awaiting
     #stabilizing = false // true while #display is stabilizing layout
@@ -1778,7 +1859,8 @@ export class Paginator extends HTMLElement {
                 scrolledScrollRelocate()
                 // Backward preloading is handled eagerly in the (non-debounced)
                 // scroll listener below, mirroring the forward buffer.
-            } else if (!this.scrolled && !this.#stabilizing) {
+            } else if (!this.scrolled && !this.#stabilizing
+                && !this.#isAnimating && !this.#touchState?.active) {
                 // As in scrolled mode, a scroll that settles while a navigation
                 // renders its target is not the reader's position: detecting the
                 // primary view from it would trim the target as off screen.
@@ -1796,35 +1878,15 @@ export class Paginator extends HTMLElement {
             // drag scrolls the container (no animation runs then). During the
             // snap animation #isAnimating is set and the destination background
             // is already in place, so the rebuild is skipped.
-            if (!this.scrolled && !this.#isAnimating) this.#replaceBackground()
+            if (!this.scrolled && !this.#isAnimating && !this.#uniformDragBg)
+                this.#replaceBackground()
             // Preload forward when fewer than minPages ahead. Skip while a finger
-            // drag is in progress: loading a section runs columnize/expand on the
-            // main thread, which drops frames mid-swipe (readest#4785). The buffer
-            // is still 4+ pages deep during a one-page drag, and the scroll that
-            // settles the gesture re-fires this with the finger already up, so the
-            // top-up just moves off the active drag instead of being skipped.
-            if (!this.noPreload && !this.noContinuousScroll && !this.#filling
-                && !this.#stabilizing && !this.#touchScrolled) {
-                const minPages = 5
-                const pagesAhead = this.size > 0
-                    ? Math.floor((this.#renderedViewSize - this.#renderedEnd) / this.size)
-                    : 0
-                if (pagesAhead < minPages) {
-                    const sorted = this.#sortedViews
-                    const lastIndex = sorted[sorted.length - 1]?.[0]
-                    if (lastIndex != null) {
-                        const nextIdx = this.#adjacentIndex(1, lastIndex)
-                        if (nextIdx != null && !this.#views.has(nextIdx) && this.#isSameDirection(nextIdx)) {
-                            this.#filling = true
-                            this.#loadAdjacentSection(nextIdx)
-                                .finally(() => {
-                                    this.#filling = false
-                                    this.dispatchEvent(new Event('stabilized'))
-                                })
-                        }
-                    }
-                }
-            }
+            // drag or push animation is in progress: loading a section runs
+            // columnize/expand on the main thread, which drops frames mid-turn
+            // (readest#4785). The scroll or settle after the turn re-fires this.
+            if (this.scrolled) this.#maybePreloadForward()
+            else if (!this.#isAnimating && !this.#touchScrolled && !this.#touchState?.active)
+                this.#schedulePreloadForward(120)
             // Preload backward when fewer than minPages behind, mirroring the
             // forward buffer so scrolling up never dead-ends at the top with the
             // previous section unloaded (readest/readest#4112). The
@@ -1869,7 +1931,7 @@ export class Paginator extends HTMLElement {
                     scrolledScrollRelocate()
                 }
             }
-            debouncedScroll()
+            if (!this.#isAnimating) debouncedScroll()
         })
 
         const opts = { passive: false }
@@ -2227,21 +2289,28 @@ export class Paginator extends HTMLElement {
     // instead of one flat colour flashing across the viewport. Only writes layout
     // (no reads), so it is safe to run every animation frame.
     #paintPaginatedBackground(ctx, atPosition) {
-        // Reset any inline backgrounds left over from a previous mode so the
-        // host's texture isn't occluded after toggling.
-        this.#background.style.background = ''
-        for (const [, view] of this.#sortedViews) {
-            view.element.style.background = ''
-        }
         const scrollPos = Math.abs(atPosition ?? this.#renderedStart)
         const segments = computeBackgroundSegments(
             ctx.views, scrollPos, ctx.bgSize, ctx.inset, ctx.containerSize)
+        // Under a texture, leave the container transparent so the host texture
+        // shows through the gaps a transparent page no longer fills (readest#4399).
+        const hostBg = ctx.hasTexture ? '' : ctx.fallbackBg
+        const renderKey = `${this.#vertical ? 1 : 0}|${hostBg}|${segments
+            .map(s => `${s.start.toFixed(2)}:${s.size.toFixed(2)}:${s.bg}`)
+            .join(';')}`
+        for (const [, view] of this.#sortedViews) {
+            if (view.element.style.background) view.element.style.background = ''
+        }
+        if (this.#lastBgRenderKey === renderKey
+            && this.#background.style.display === ''
+            && this.#background.childElementCount === segments.length) {
+            return
+        }
+        this.#lastBgRenderKey = renderKey
 
         this.#background.innerHTML = ''
         this.#background.style.display = ''
-        // Under a texture, leave the container transparent so the host texture
-        // shows through the gaps a transparent page no longer fills (readest#4399).
-        this.#background.style.background = ctx.hasTexture ? '' : ctx.fallbackBg
+        this.#background.style.background = hostBg
 
         const posProp = this.#vertical ? 'top' : 'left'
         const sizeProp = this.#vertical ? 'height' : 'width'
@@ -2259,6 +2328,151 @@ export class Paginator extends HTMLElement {
             this.#background.appendChild(seg)
         }
     }
+    // True when all currently rendered views share the same flat (non-image)
+    // background and cover the current viewport, so scrolling within them
+    // during a finger drag cannot alter #background.
+    #uniformBackground(ctx) {
+        if (!ctx?.views.length) return false
+        const first = ctx.views[0].bg
+        if (/\burl\(/i.test(first)) return false
+        if (!ctx.views.every(v => v.bg === first)) return false
+        const fallback = ctx.hasTexture ? '' : ctx.fallbackBg
+        if (first === fallback) return true
+        const total = ctx.views.reduce((sum, v) => sum + v.size, 0)
+        return total >= this.#renderedEnd - 0.5
+    }
+    // True when every view overlapping [startPos, endPos] shares the same
+    // flat (non-image) background and covers the full scroll span without gaps.
+    #viewsCoverRange(ctx, startPos, endPos) {
+        if (!ctx?.views.length) return false
+        const rangeStart = Math.min(Math.abs(startPos), Math.abs(endPos))
+        const rangeEnd = Math.max(Math.abs(startPos), Math.abs(endPos)) + ctx.containerSize
+        if (rangeStart < -0.5) return false
+        let offset = 0
+        let bg = null
+        let sawView = false
+        for (const view of ctx.views) {
+            const viewStart = offset
+            const viewEnd = offset + view.size
+            offset = viewEnd
+            if (viewEnd <= rangeStart + 0.5 || viewStart >= rangeEnd - 0.5) continue
+            if (/\burl\(/i.test(view.bg)) return false
+            if (!sawView) {
+                bg = view.bg
+                sawView = true
+            } else if (view.bg !== bg) {
+                return false
+            }
+        }
+        return sawView && offset >= rangeEnd - 0.5
+    }
+    get #gpuSafeThreshold() {
+        const dpr = Math.max(1, globalThis.devicePixelRatio || 1)
+        return Math.min(60000, Math.floor(140000 / dpr))
+    }
+    // Keep only the active views within #gpuSafeThreshold pre-promoted on the
+    // compositor layer so WAAPI turns start cleanly without oversized-layer freezes.
+    #syncPrimaryCompositorHint(elements = null, totalSize = null) {
+        if (this.scrolled || this.hasAttribute('gpu-composite')) {
+            for (const [, view] of this.#views) {
+                if (view.element.style.willChange) view.element.style.willChange = ''
+            }
+            return
+        }
+        let targets = elements
+        let size = totalSize
+        if (targets == null) {
+            const pv = this.#primaryView
+            targets = pv ? [pv.element] : []
+            size = pv ? (pv.element.getBoundingClientRect?.()[this.sideProp] ?? 0) : 0
+        }
+        const keep = size > 0 && size <= this.#gpuSafeThreshold ? new Set(targets) : null
+        for (const [, view] of this.#views) {
+            const desired = keep?.has(view.element) ? 'transform' : ''
+            if (view.element.style.willChange !== desired) {
+                view.element.style.willChange = desired
+            }
+        }
+    }
+    // Views whose content overlaps either viewport endpoint in [startPos, endPos]
+    // plus their combined layout size along the scroll axis. Off-screen chapters
+    // outside this range never enter the viewport during the turn, so skipping
+    // transform/will-change on them avoids oversized GPU layers on Android.
+    #viewRangeForScroll(ctx, startPos, endPos) {
+        if (!ctx?.views.length) return { elements: null, totalSize: this.#renderedViewSize }
+        const sorted = this.#sortedViews
+        if (sorted.length !== ctx.views.length) {
+            return { elements: null, totalSize: this.#renderedViewSize }
+        }
+        const rangeStart = Math.min(Math.abs(startPos), Math.abs(endPos))
+        const rangeEnd = Math.max(Math.abs(startPos), Math.abs(endPos)) + ctx.containerSize
+        const elements = []
+        let totalSize = 0
+        let offset = 0
+        for (let i = 0; i < sorted.length; i++) {
+            const viewSize = ctx.views[i].size
+            const viewStart = offset
+            const viewEnd = offset + viewSize
+            offset = viewEnd
+            if (viewEnd > rangeStart - 1 && viewStart < rangeEnd + 1) {
+                elements.push(sorted[i][1].element)
+                totalSize += viewSize
+            }
+        }
+        return elements.length
+            ? { elements, totalSize }
+            : { elements: null, totalSize: this.#renderedViewSize }
+    }
+    #stopPushAnimation({ freeze = false } = {}) {
+        const anim = this.#pushAnim
+        this.#pushAnim = null
+        this.#pushAnimId++
+        this.#skipAfterScrollBg = false
+        if (!anim) return false
+        this.#isAnimating = false
+        this.#bgAnimContext = null
+        if (freeze) anim.freeze()
+        else anim.cancel()
+        return true
+    }
+    #clearPreloadTimer() {
+        if (this.#preloadTimer) {
+            clearTimeout(this.#preloadTimer)
+            this.#preloadTimer = 0
+        }
+    }
+    #schedulePreloadForward(delayMs = 120) {
+        this.#clearPreloadTimer()
+        this.#preloadTimer = setTimeout(() => {
+            this.#preloadTimer = 0
+            if (!this.isConnected) return
+            this.#maybePreloadForward()
+        }, delayMs)
+    }
+    // Preload the next chapter when fewer than minPages remain ahead, unless a
+    // drag or push animation is running (loading a section runs layout on the
+    // main thread and drops frames mid-turn). Called from the scroll listener
+    // and again once a push animation settles.
+    #maybePreloadForward() {
+        if (this.noPreload || this.noContinuousScroll || this.#filling || this.#stabilizing) return
+        if (this.#isAnimating || this.#touchScrolled || this.#touchState?.active) return
+        const minPages = 5
+        const pagesRemaining = this.size > 0
+            ? Math.floor((this.#renderedViewSize - this.#renderedEnd) / this.size)
+            : 0
+        if (pagesRemaining >= minPages) return
+        const sorted = this.#sortedViews
+        const lastIndex = sorted[sorted.length - 1]?.[0]
+        if (lastIndex == null) return
+        const nextIdx = this.#adjacentIndex(1, lastIndex)
+        if (nextIdx == null || this.#views.has(nextIdx) || !this.#isSameDirection(nextIdx)) return
+        this.#filling = true
+        this.#loadAdjacentSection(nextIdx)
+            .finally(() => {
+                this.#filling = false
+                this.dispatchEvent(new Event('stabilized'))
+            })
+    }
     // Update the #background grid so each column shows the correct section's
     // background. Pass atPosition to pre-compute for a destination scroll
     // position (e.g. before an animation starts). During a scroll animation the
@@ -2270,6 +2484,7 @@ export class Paginator extends HTMLElement {
         if (this.noBackground) return
 
         if (this.scrolled) {
+            this.#lastBgRenderKey = null
             // In scrolled mode, set background directly on each view element
             // so it scrolls with the content. The static #background provides
             // the fallback color for margins and gaps between views.
@@ -2794,7 +3009,7 @@ export class Paginator extends HTMLElement {
             const to = commit ? pull.from + sign * pull.dir * this.size : pull.from
             const target = sign * Math.max(0, Math.min(extent, sign * to))
             await rafAnimateScroll(this.containerPosition, target, 250, easeOutQuad,
-                position => this.containerPosition = position)
+                position => this.containerPosition = position).promise
             const keep = commit ? pull.index : this.#primaryIndex
             const drop = commit ? this.#primaryIndex : pull.index
             const edge = () => this.#views.get(keep).element.getBoundingClientRect()[this.#vertical ? 'x' : 'y']
@@ -2875,11 +3090,7 @@ export class Paginator extends HTMLElement {
             layeredHorizontalSampleTime: null,
         }
         if (replacementTouch || multiTouch) this.#touchScrolled = false
-        // Hint to browser that scrolling will occur for better GPU layer management
-        const pv = this.#primaryView
-        if (pv?.element) {
-            pv.element.style.willChange = 'transform'
-        }
+        this.#clearPreloadTimer()
         // A touch on a vertical book takes over any in-flight page-turn slide
         // or settle: freeze the views where they are and let the drag continue
         // from that offset. Also re-syncs the drag offset to the rendered
@@ -2897,6 +3108,7 @@ export class Paginator extends HTMLElement {
                 el.style.transform = m41 ? `translateX(${m41}px)` : ''
             }
         }
+        const tookOverPush = this.#stopPushAnimation({ freeze: true })
         // Snapshot the invariant background paint inputs for the whole drag. The
         // layout is settled at the start of a gesture and only the scroll offset
         // changes while the finger moves, so every per-move #replaceBackground()
@@ -2904,6 +3116,16 @@ export class Paginator extends HTMLElement {
         // (readest#4785). Cleared in #onTouchEnd; the snap that follows rebuilds
         // its own.
         this.#bgAnimContext = this.scrolled ? null : this.#computePaginatedBgContext()
+        this.#uniformDragBg = this.#uniformBackground(this.#bgAnimContext)
+        if (!this.scrolled && !this.hasAttribute('gpu-composite')) {
+            const range = this.#viewRangeForScroll(
+                this.#bgAnimContext,
+                this.containerPosition - this.size,
+                this.containerPosition + this.size,
+            )
+            this.#syncPrimaryCompositorHint(range.elements, range.totalSize)
+        }
+        if (tookOverPush && !this.scrolled) this.#replaceBackground()
     }
     #onTouchMove(e) {
         const state = this.#touchState
@@ -2969,11 +3191,13 @@ export class Paginator extends HTMLElement {
         state.x = x
         state.y = y
         state.t = e.timeStamp
-        state.vx = dx / dt
-        state.vy = dy / dt
+        if (dt > 0) {
+            state.vx = dx / dt
+            state.vy = dy / dt
+            state.dt += dt
+        }
         state.dx += dx
         state.dy += dy
-        state.dt += dt
         updateReleaseSample(state, state.dx, e.timeStamp)
         this.#touchScrolled = true
         if (!this.hasAttribute('animated') || this.hasAttribute('eink')) return
@@ -3342,6 +3566,7 @@ export class Paginator extends HTMLElement {
         // The drag is over: drop the drag-time paint snapshot so the snap
         // animation (or any other repaint) rebuilds a fresh context.
         this.#bgAnimContext = null
+        this.#uniformDragBg = false
         const state = this.#touchState
         if (state) state.active = false
         if (state?.blocked) {
@@ -3452,7 +3677,7 @@ export class Paginator extends HTMLElement {
         // at this point I'm basically throwing `requestAnimationFrame` at
         // anything that doesn't work
         const snapState = state
-        requestAnimationFrame(() => {
+        const runSnap = () => {
             if (globalThis.visualViewport.scale === 1 && snapState
                 && this.#touchState === snapState) {
                 const { vx, vy, dx, dy, dt } = snapState
@@ -3462,10 +3687,15 @@ export class Paginator extends HTMLElement {
                 this.snap(layeredRejected ? 0 : vx, vy,
                     layeredRejected ? 0 : dx, dy, dt)
             }
-        })
+        }
+        // Start snap immediately on release unless zoomed/pinched so the user
+        // does not lose a full display frame before the push animation begins.
+        if ((globalThis.visualViewport?.scale ?? 1) === 1 && !snapState?.pinched) runSnap()
+        else requestAnimationFrame(runSnap)
     }
     #onTouchCancel() {
         this.#bgAnimContext = null
+        this.#uniformDragBg = false
         const state = this.#touchState
         if (state) {
             state.active = false
@@ -3551,6 +3781,7 @@ export class Paginator extends HTMLElement {
     }
     async #scrollTo(offset, reason, smooth) {
         const { size } = this
+        this.#stopPushAnimation({ freeze: true })
         // Near-equality, not exact: on fractional device-pixel-ratio screens
         // (e.g. 2.75) the container scroll rests a sub-pixel off the page
         // offset, and an exact check made every same-page settle miss this
@@ -3621,7 +3852,26 @@ export class Paginator extends HTMLElement {
             // Snapshot the invariant paint inputs once; every per-frame
             // #replaceBackground below reuses this instead of forcing a fresh
             // style+layout read each frame (readest#4785).
-            this.#bgAnimContext = this.scrolled ? null : this.#computePaginatedBgContext()
+            this.#clearPreloadTimer()
+            const bgCtx = this.scrolled ? null : this.#computePaginatedBgContext()
+            this.#bgAnimContext = bgCtx
+            const repaintBackground = !this.scrolled && !this.#viewsCoverRange(bgCtx, startPosition, offset)
+            if (!this.scrolled && (repaintBackground || !this.#lastBgRenderKey)) {
+                this.#replaceBackground(startPosition)
+            }
+            const animId = ++this.#pushAnimId
+            const finishPush = () => {
+                if (animId !== this.#pushAnimId) return
+                this.#pushAnim = null
+                this.#isAnimating = false
+                this.#bgAnimContext = null
+                this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
+                this.#skipAfterScrollBg = !repaintBackground
+                this.#afterScroll(reason)
+                this.#schedulePreloadForward(120)
+            }
+            const { elements: animatedChildren, totalSize: animatedSize } =
+                this.#viewRangeForScroll(bgCtx, startPosition, offset)
             // For a large section the CSS-transform animation blocks the UI while
             // Blink composites the oversized layer; animate the native scroll
             // offset instead (incremental/tiled, like a swipe), keeping the
@@ -3630,30 +3880,27 @@ export class Paginator extends HTMLElement {
             // opt-in) skip this main-thread fallback and keep the smooth GPU
             // cssAnimateScroll path even for large sections (readest#4768).
             if (!this.hasAttribute('gpu-composite')
-                && this.#renderedViewSize > RAF_ANIMATE_SCROLL_THRESHOLD) {
-                return rafAnimateScroll(startPosition, offset, 300, easeOutQuad, x => {
+                && animatedSize > this.#gpuSafeThreshold) {
+                this.#syncPrimaryCompositorHint([], 0)
+                const anim = rafAnimateScroll(startPosition, offset, 300, easeOutQuad, x => {
                     this.#container[this.scrollProp] = x
-                    if (!this.scrolled) this.#replaceBackground()
-                }).then(() => {
-                    this.#isAnimating = false
-                    this.#bgAnimContext = null
-                    this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
-                    this.#afterScroll(reason)
+                    if (repaintBackground) this.#replaceBackground(x)
                 })
+                this.#pushAnim = anim
+                return anim.promise.then(finishPush)
             }
-            // Slide the per-view backgrounds in lockstep with the content. The
-            // content animates via a transform on each view; we re-sync the
-            // backgrounds to that animated offset every frame so each page's
-            // colour stays glued to its content as it slides. Pre-setting the
-            // destination instead made the outgoing page lose its background the
-            // instant the animation started, flashing the wrong colour across
-            // the part of the screen it still covered until it slid off.
-            if (!this.scrolled) {
-                this.#replaceBackground(startPosition)
-                const child = this.#container.children[0]
+            if (!this.hasAttribute('gpu-composite')) {
+                this.#syncPrimaryCompositorHint(animatedChildren, animatedSize)
+            }
+            // Slide the per-view backgrounds in lockstep with the content when a
+            // chapter boundary or custom background edge scrolls through view.
+            // Uniform flat backgrounds stay unchanged across the turn, so we
+            // skip the per-frame getComputedStyle + DOM rebuild in syncBackground.
+            const syncTarget = animatedChildren?.[0] ?? this.#container.children[0]
+            if (repaintBackground && syncTarget) {
                 const syncBackground = () => {
-                    if (!this.#isAnimating) return
-                    const transform = child && getComputedStyle(child).transform
+                    if (animId !== this.#pushAnimId) return
+                    const transform = getComputedStyle(syncTarget).transform
                     const tx = transform && transform !== 'none'
                         ? new DOMMatrix(transform)[this.#vertical ? 'm42' : 'm41'] : 0
                     this.#replaceBackground(startPosition - tx)
@@ -3662,18 +3909,18 @@ export class Paginator extends HTMLElement {
                 requestAnimationFrame(syncBackground)
             }
             // Use GPU-accelerated scroll animation for smoother experience on high refresh rate screens
-            return cssAnimateScroll(
+            const anim = cssAnimateScroll(
                 this.#container,
                 this.scrollProp,
                 startPosition,
                 offset,
                 300,
-            ).then(() => {
-                this.#isAnimating = false
-                this.#bgAnimContext = null
-                this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
-                this.#afterScroll(reason)
-            })
+                [],
+                animatedChildren,
+                !this.hasAttribute('gpu-composite'),
+            )
+            this.#pushAnim = anim
+            return anim.promise.then(finishPush)
         } else {
             if (this.#vertical && !this.scrolled) this.#settleDrag(true)
             this.containerPosition = offset
@@ -3902,7 +4149,7 @@ export class Paginator extends HTMLElement {
                 if (index !== this.#primaryIndex) {
                     this.#primaryIndex = index
                     this.#syncA11y()
-                    this.#trimDistantViews()
+                    this.#trimDistantViews({ trimBefore: true })
                     this.#replaceBackground()
                     this.#fillPromise = this.#preloadNext()
                 }
@@ -3950,10 +4197,14 @@ export class Paginator extends HTMLElement {
         }
     }
     #afterScroll(reason) {
+        const skipTurnBg = this.#skipAfterScrollBg
+        this.#skipAfterScrollBg = false
+        const prevPrimary = this.#primaryIndex
         this.#relocatedAt = null
         // In multi-view, detect which section is primary
         if (this.#views.size > 1 && reason !== 'anchor' && reason !== 'navigation') {
             this.#detectPrimaryView()
+            if (!this.scrolled) this.#trimDistantViews({ trimBefore: true })
             // Scrolling can bring a previously off-screen view into the
             // viewport (e.g. the next section's first column joining the
             // current section's last column in a dual-page spread) without
@@ -4007,8 +4258,12 @@ export class Paginator extends HTMLElement {
             detail.size = textPages > 0 ? this.columnCount / textPages : 1
             if (reason === 'container-scroll' && localPage === 0) return
         }
-        // Update per-column backgrounds for the current scroll position
-        if (!this.scrolled) this.#replaceBackground()
+        // Update per-column backgrounds for the current scroll position unless
+        // a uniform push turn already painted it in this same section.
+        if (!this.scrolled && (!skipTurnBg || prevPrimary !== this.#primaryIndex)) {
+            this.#replaceBackground()
+        }
+        if (!this.scrolled) this.#syncPrimaryCompositorHint()
         // Report a chunk's position as a position in its whole section
         const { spine, chunk, count } = this.#units[index] ?? {}
         if (count > 1) {
@@ -4263,20 +4518,46 @@ export class Paginator extends HTMLElement {
             this.dispatchEvent(new Event('stabilized'))
         }
     }
-    // Trim views whose content is entirely more than 10 pages away
-    // from the current viewport. Only removes views AFTER the primary
-    // — removing views before would shift scroll position.
-    #trimDistantViews() {
+    // Trim views whose content is entirely distant from the current viewport.
+    // Trims views after #primaryIndex beyond 10 pages; in paginated mode with
+    // trimBefore, also trims earlier views more than 6 pages behind while
+    // compensating scroll position so the primary view stays anchored.
+    #trimDistantViews({ trimBefore = false } = {}) {
         const { size } = this
         if (!size) return
         const maxDistance = size * 10
-        const viewportEnd = this.#renderedEnd
+        const maxBefore = size * 6
+        const primaryView = this.#primaryView
+        const edge = this.#vertical ? 'top' : 'left'
+        const canTrimBefore = trimBefore && !this.scrolled && primaryView
+            && this.#getViewOffset(this.#primaryIndex) <= this.#renderedStart + 1
+        let totalShift = 0
         for (const [index, view] of this.#sortedViews) {
-            if (index <= this.#primaryIndex) continue
-            const offset = this.#getViewOffset(index)
-            if (offset - viewportEnd > maxDistance) {
-                this.#destroyView(index)
+            if (index > this.#primaryIndex) {
+                const offset = this.#getViewOffset(index)
+                if (offset - this.#renderedEnd > maxDistance) {
+                    this.#destroyView(index)
+                }
+            } else if (canTrimBefore && index < this.#primaryIndex) {
+                const viewSize = view.element.getBoundingClientRect()[this.sideProp]
+                const endOffset = this.#getViewOffset(index) + viewSize
+                // Re-read #renderedStart every iteration because destroying an
+                // earlier view shifts containerPosition and all subsequent offsets.
+                if (this.#renderedStart - endOffset > maxBefore) {
+                    const before = primaryView.element.getBoundingClientRect()[edge]
+                    this.#destroyView(index)
+                    const after = primaryView.element.getBoundingClientRect()[edge]
+                    const shift = after - before
+                    if (shift) {
+                        this.containerPosition += shift
+                        totalShift += shift
+                    }
+                }
             }
+        }
+        if (totalShift) {
+            if (this.#scrollBounds) this.#scrollBounds[0] += totalShift
+            if (this.#relocatedAt != null) this.#relocatedAt += totalShift
         }
     }
     #canGoToIndex(index) {
@@ -4633,6 +4914,9 @@ export class Paginator extends HTMLElement {
         this.#vtFinishing = null
         this.#vtProgrammatic = null
         this.#slideTurnId++
+        this.#clearPreloadTimer()
+        this.#lastBgRenderKey = null
+        this.#stopPushAnimation()
         if (transition || this.#vtNamedHost) {
             transition?.ready?.catch(() => {})
             transition?.updateCallbackDone?.catch(() => {})
