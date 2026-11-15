@@ -168,6 +168,10 @@ export const computeScrollPinchTransform = ({
     transformOrigin: `${scrollLeft + viewportWidth / 2}px ${scrollTop + viewportHeight / 2}px`,
 })
 
+// Whether pages of `size` overflow a client box of `box`, the rounded size they
+// were fitted to: pages that fill it can add up to a fraction over it.
+const overflows = (size, box) => Math.round(size) > box
+
 // Scroll offsets to apply to the host (`overflow:auto`) after rendering a
 // paginated page. Horizontal is re-centered so the page sits in the middle of
 // the viewport, unless the horizontal pan lock is on: there the offset the
@@ -315,15 +319,17 @@ export class FixedLayout extends HTMLElement {
     #pendingPanX = null
     #isOverflowX = false
     #isOverflowY = false
-    #preloadCache = new Map()
+    #loadingSpreads = new Map()
+    #pageTurn = null
+    #destroyed = false
+    #layoutBox = null
     #prerenderedSpreads = new Map()
     #spreadAccessTime = new Map()
     #spreadAccessTick = 0
     // Counter for the keys stale cached spreads move to on a regroup.
     #staleSpreads = 0
     #maxConcurrentPreloads = 1
-    #numPrerenderedSpreads = 1
-    #maxCachedSpreads = 2
+    #maxCachedSpreads = 3
     #overlayers = new Map()
     #pageColors = {}
     #preloadQueue = []
@@ -467,6 +473,17 @@ export class FixedLayout extends HTMLElement {
             justify-content: safe center;
           }
         }
+        /* A page fitted to the view is sized from clientWidth, which rounds the
+           host's width (392.73px is 393px at 2.75x), so it can overflow by a
+           sliver. A touch scrolled that sliver, one device pixel, and the page
+           jumped as a finger landed. Only an axis a page really overflows,
+           such as a zoomed page, is left scrollable. */
+        :host(:not([flow="scrolled"]):not([overflowing-x])) {
+            overflow-x: hidden;
+        }
+        :host(:not([flow="scrolled"]):not([overflowing-y])) {
+            overflow-y: hidden;
+        }
         :host([flow="scrolled"]) {
             display: block;
             overflow-y: auto;
@@ -536,7 +553,9 @@ export class FixedLayout extends HTMLElement {
 
         this.#observer.observe(this)
     }
-    attributeChangedCallback(name, _, value) {
+    attributeChangedCallback(name, oldValue, value) {
+        if (oldValue === value) return
+        if (this.#pageTurn && !this.#pageTurn.committing) this.cancelPageTurn()
         switch (name) {
             case 'zoom':
                 this.#zoom = value !== 'fit-width' && value !== 'fit-page'
@@ -710,7 +729,13 @@ export class FixedLayout extends HTMLElement {
             }
         })
     }
-    #render(side = this.#side, pageTurn = false) {
+    #render(side = this.#side, pageTurn = false, preview = null,
+        scaleFactor = preview ? this.#pageTurnScaleFactor : this.#scaleFactor) {
+        if (this.#pageTurn && !preview) {
+            const box = this.getBoundingClientRect(), before = this.#pageTurn.box
+            if (box.width === before.width && box.height === before.height) return []
+            this.cancelPageTurn()
+        }
         if (this.#scrollMode) {
             this.#renderScrollMode()
             return []
@@ -721,15 +746,18 @@ export class FixedLayout extends HTMLElement {
         // by the time a page turn reaches us its frame swap has already
         // clamped the live value to 0 (#5976).
         const pannedX = this.#pannedX ?? this.scrollLeft
-        this.#pannedX = null
-        const left = this.#left ?? {}
-        const right = this.#center ?? this.#right ?? {}
+        if (!preview) this.#pannedX = null
+        const frames = preview ?? { left: this.#left, right: this.#right, center: this.#center }
+        const left = frames.left ?? {}, center = frames.center
+        const right = center ?? frames.right ?? {}
+        const shown = preview ? this.#shownFrames() : []
         const target = side === 'left' ? left : right
         const { width, height } = this.getBoundingClientRect()
+        if (!preview) this.#layoutBox = { width, height }
         // for unfolded devices with slightly taller height than width also use landscape layout
         const portrait = this.spread !== 'both' && this.spread !== 'portrait'
             && height > width * 1.2
-        this.#portrait = portrait
+        if (!preview) this.#portrait = portrait
         const blankWidth = left.width ?? right.width ?? 0
         const blankHeight = left.height ?? right.height ?? 0
         // Fit to the client box: a page taller than the view gets a classic
@@ -739,10 +767,10 @@ export class FixedLayout extends HTMLElement {
         let scale = typeof this.#zoom === 'number' && !isNaN(this.#zoom)
             ? this.#zoom
             : (this.#zoom === 'fit-width'
-                ? (portrait || this.#center
+                ? (portrait || center
                     ? clientWidth / (target.width ?? blankWidth)
                     : clientWidth / ((left.width ?? blankWidth) + (right.width ?? blankWidth)))
-                : (portrait || this.#center
+                : (portrait || center
                     ? Math.min(
                         clientWidth / (target.width ?? blankWidth),
                         clientHeight / (target.height ?? blankHeight))
@@ -753,13 +781,14 @@ export class FixedLayout extends HTMLElement {
                             right.height ?? blankHeight)))
             ) || 1
 
-        scale *= this.#scaleFactor
-        this.#totalScaleFactor = scale
+        scale *= scaleFactor
+        if (!preview) this.#totalScaleFactor = scale
 
         const renderPromises = []
         const transform = ({frame, styles}) => {
             let { element, iframe, width, height, blank, onZoom } = frame
             if (!iframe) return
+            if (shown.includes(frame)) return { width: element.clientWidth, height: element.clientHeight }
             if (onZoom) {
                 const p = onZoom({ doc: frame.iframe.contentDocument, scale, pageColors: this.#pageColors })
                 if (p?.then) {
@@ -768,11 +797,12 @@ export class FixedLayout extends HTMLElement {
                     // the rebuild, re-emit create-overlayer so listeners can
                     // re-anchor annotations against the fresh DOM.
                     const refreshed = p.then(() => this.#refreshOverlayerForFrame(frame))
+                    frame.rendered = refreshed
                     renderPromises.push(refreshed)
                 }
             }
             const iframeScale = onZoom ? scale : 1
-            const zoomedOut = this.#scaleFactor < 1.0
+            const zoomedOut = scaleFactor < 1.0
             // Centering a zoomed-out page inside its box only works for the PDF
             // path, whose iframe is natively sized to the (scaled) box. Non-PDF
             // fixed layout keeps the iframe at its native size and shrinks it
@@ -790,8 +820,14 @@ export class FixedLayout extends HTMLElement {
             Object.assign(element.style, {
                 width: `${(width ?? blankWidth) * scale}px`,
                 height: `${(height ?? blankHeight) * scale}px`,
+                // PDF.js paints opaque paper into a transparent iframe. Keep
+                // its backing opaque too, including when WebKit merges moving
+                // layers after a turn, or a cached layer edge shows as a line.
+                backgroundColor: onZoom ? this.#pageColors.background || '#ffffff' : element.style.backgroundColor,
                 flexShrink: '0',
-                display: centerInBox ? 'flex' : 'block',
+                // Preparing a portrait sibling must preserve its hidden layout state.
+                display: preview && element.style.display === 'none'
+                    ? 'none' : centerInBox ? 'flex' : 'block',
                 marginBlock: centerInBox ? undefined : 'auto',
                 alignItems: centerInBox ? 'center' : undefined,
                 justifyContent: centerInBox ? 'center' : undefined,
@@ -835,22 +871,27 @@ export class FixedLayout extends HTMLElement {
                 pageTurn,
                 lockPanX: this.hasAttribute('lock-pan-x'),
             })
-            container.scrollLeft = scrollLeft
-            container.scrollTop = scrollTop
+            if (!preview) {
+                container.scrollLeft = scrollLeft
+                container.scrollTop = scrollTop
+            }
 
+            // The page's own size, not its rounded clientWidth: two pages of a
+            // spread that fits can each round up and add up to a pixel more.
+            // A page hidden in portrait takes no room.
+            const hidden = portrait && frame !== target
             return {
-                width: element.clientWidth,
-                height: element.clientHeight,
+                width: hidden ? 0 : (width ?? blankWidth) * scale,
+                height: hidden ? 0 : (height ?? blankHeight) * scale,
                 containerWidth,
                 containerHeight,
             }
         }
-        if (this.#center) {
-            const dimensions = transform({frame: this.#center, styles: { marginInline: 'auto' }})
+        if (center) {
+            const dimensions = transform({frame: center, styles: { marginInline: 'auto' }})
             if (!dimensions) return renderPromises
             const {width, height, containerWidth, containerHeight} = dimensions
-            this.#isOverflowX = width > containerWidth
-            this.#isOverflowY = height > containerHeight
+            if (!preview) this.#setOverflow(overflows(width, containerWidth), overflows(height, containerHeight))
         } else {
             // Hide the 1px white spine seam on a two-page spread by overlapping
             // the right page onto the left by one device pixel (#4857). Always
@@ -874,14 +915,14 @@ export class FixedLayout extends HTMLElement {
             if (!leftDimensions || !rightDimensions) return renderPromises
             const {width: leftWidth, height: leftHeight, containerWidth, containerHeight} = leftDimensions
             const {width: rightWidth, height: rightHeight} = rightDimensions
-            this.#isOverflowX = leftWidth + rightWidth > containerWidth
-            this.#isOverflowY = Math.max(leftHeight, rightHeight) > containerHeight
+            if (!preview) this.#setOverflow(overflows(leftWidth + rightWidth, containerWidth),
+                overflows(Math.max(leftHeight, rightHeight), containerHeight))
         }
         // A pinch commit overrides the default re-centring above: scroll the
         // spread back to the on-screen rect it occupied in the live preview so
         // the zoom doesn't jump (matters most when the page was scrolled within
         // an overflowing zoom). See pinchEnd.
-        if (this.#pinchAnchor) {
+        if (!preview && this.#pinchAnchor) {
             const frame = this.#shownFrames()[0]
             if (frame) {
                 const b = frame.element.getBoundingClientRect()
@@ -892,49 +933,60 @@ export class FixedLayout extends HTMLElement {
             }
             this.#pinchAnchor = null
         }
-        this.#applyPendingPanX()
+        if (!preview) this.#applyPendingPanX()
         return renderPromises
     }
-    async #showSpread({ left, right, center, side, spreadIndex }) {
+    async #loadSpreadFrames(index, preload = false) {
+        const key = `spread-${index}`
+        const cached = this.#prerenderedSpreads.get(key)
+        if (cached) return cached
+        if (this.#loadingSpreads.has(key)) return this.#loadingSpreads.get(key)
+        const spread = this.#spreads[index]
+        const loading = (async () => {
+            const inputs = {}
+            for (const side of spread.center ? ['center'] : ['left', 'right']) {
+                const section = spread[side]
+                inputs[side] = {
+                    index: this.book.sections.indexOf(section), src: await section?.load?.(),
+                }
+            }
+            if (this.#regroup(preload) === false) return null
+            if (this.#destroyed || this.#spreads[index] !== spread) return null
+            const frames = {}
+            for (const [side, input] of Object.entries(inputs))
+                frames[side] = await this.#createFrame({ ...input, detached: true })
+            if (this.#destroyed || this.#spreads[index] !== spread) {
+                for (const frame of Object.values(frames)) frame.element.remove()
+                return null
+            }
+            this.#prerenderedSpreads.set(key, frames)
+            this.#touchSpread(key)
+            return frames
+        })()
+        this.#loadingSpreads.set(key, loading)
+        try { return await loading }
+        finally { this.#loadingSpreads.delete(key) }
+    }
+
+    async #showSpread(index, side) {
         this.#left = null
         this.#right = null
         this.#center = null
 
-        const cacheKey = spreadIndex !== undefined ? `spread-${spreadIndex}` : null
-        const prerendered = cacheKey ? this.#prerenderedSpreads.get(cacheKey) : null
-
-        if (prerendered) {
-            this.#touchSpread(cacheKey)
-            if (prerendered.center) {
-                this.#center = prerendered.center
-            } else {
-                this.#left = prerendered.left
-                this.#right = prerendered.right
-            }
-        } else {
-            if (center) {
-                this.#center = await this.#createFrame(center)
-                if (cacheKey) {
-                    this.#prerenderedSpreads.set(cacheKey, { center: this.#center })
-                    this.#touchSpread(cacheKey)
-                }
-            } else {
-                this.#left = await this.#createFrame(left)
-                this.#right = await this.#createFrame(right)
-                if (cacheKey) {
-                    this.#prerenderedSpreads.set(cacheKey, { left: this.#left, right: this.#right })
-                    this.#touchSpread(cacheKey)
-                }
-            }
-        }
+        const frames = await this.#loadSpreadFrames(index)
+        if (!frames) return false
+        this.#touchSpread(`spread-${index}`)
+        this.#center = frames.center
+        this.#left = frames.left
+        this.#right = frames.right
 
         // Scroll mode began while the page loaded (a flow switch as the book
         // opens): its strip is the view now, and the sweep below would hide it.
-        if (this.#scrollMode) return
+        if (this.#scrollMode) return true
 
-        this.#side = center ? 'center' : this.#left?.blank ? 'right'
+        this.#side = frames.center ? 'center' : this.#left?.blank ? 'right'
             : this.#right?.blank ? 'left' : side
-        const visibleFrames = center
+        const visibleFrames = frames.center
             ? [this.#center?.element]
             : [this.#left?.element, this.#right?.element]
 
@@ -959,30 +1011,30 @@ export class FixedLayout extends HTMLElement {
         const renderPromises = this.#render(this.#side, true)
         if (renderPromises.length) await Promise.all(renderPromises)
 
-        const showingFrames = center
+        const showingFrames = frames.center
             ? [this.#center]
             : [this.#left, this.#right]
-        for (const frame of showingFrames) {
-            if (!frame?.iframe) continue
-            const index = frame.iframe.dataset.sectionIndex != null
-                ? parseInt(frame.iframe.dataset.sectionIndex) : undefined
-            if (index != null && !this.#overlayers.has(index)) {
-                const doc = frame.iframe.contentDocument
-                if (doc) {
-                    this.dispatchEvent(new CustomEvent('create-overlayer', {
-                        detail: {
-                            doc, index,
-                            attach: overlayer => {
-                                this.#overlayers.set(index, overlayer)
-                                frame.element.append(overlayer.element)
-                                applyOverlayerViewBox(frame, overlayer)
-                            },
-                        },
-                    }))
-                }
-            }
-        }
+        for (const frame of showingFrames) this.#ensureOverlayerForFrame(frame)
+        return true
     }
+    #ensureOverlayerForFrame(frame) {
+        if (!frame?.iframe) return
+        const index = frame.iframe.dataset.sectionIndex != null
+            ? parseInt(frame.iframe.dataset.sectionIndex) : undefined
+        const doc = frame.iframe.contentDocument
+        if (index == null || !doc || this.#overlayers.has(index)) return
+        this.dispatchEvent(new CustomEvent('create-overlayer', {
+            detail: {
+                doc, index,
+                attach: overlayer => {
+                    this.#overlayers.set(index, overlayer)
+                    frame.element.append(overlayer.element)
+                    applyOverlayerViewBox(frame, overlayer)
+                },
+            },
+        }))
+    }
+
     #initScrollMode(targetIndex = 0) {
         const currentIndex = targetIndex
 
@@ -1551,12 +1603,12 @@ export class FixedLayout extends HTMLElement {
         }, [{}])
     }
     #respread(spreadMode) {
+        this.cancelPageTurn()
         if (this.#index === -1) return
         const section = this.book.sections[this.index]
         this.#spread(spreadMode)
         const { index } = this.getSpreadOf(section)
         this.#index = -1
-        this.#preloadCache.clear()
         for (const frames of this.#prerenderedSpreads.values()) {
             if (frames.center) {
                 frames.center.element?.remove()
@@ -1575,7 +1627,8 @@ export class FixedLayout extends HTMLElement {
     // marks itself `pageSpread: 'center'`. Regroup from the first spread that
     // changed; the spreads before it keep their objects and cached frames, so
     // a spread object still at its index is still current.
-    #regroup() {
+    // Returns false when it leaves the grouping alone (see keepShown).
+    #regroup(keepShown = false) {
         const old = this.#spreads
         this.#spread(this.spread)
         const same = (a, b) => a && b
@@ -1586,21 +1639,37 @@ export class FixedLayout extends HTMLElement {
             this.#spreads = old
             return
         }
-        this.#spreads = [...old.slice(0, from), ...this.#spreads.slice(from)]
-        const isRegrouped = key => Number(/^spread-(\d+)$/.exec(key)?.[1] ?? -1) >= from
-        for (const key of [...this.#preloadCache.keys()])
-            if (isRegrouped(key)) this.#preloadCache.delete(key)
-        // The spread on screen can be among the stale ones, and it has to
-        // outlive the turn that leaves it (readest#6239). So nothing is removed
-        // here: the frames move out of reach of the new indices, and the trim
-        // evicts them by age.
+        const spreads = [...old.slice(0, from), ...this.#spreads.slice(from)]
+        // A spread that survives intact (a wide page before it only shifted
+        // it) keeps its frames at its new index. A backward preload can shift
+        // the spread on screen this way, so #index follows it too.
+        const newIndexOf = index => index < from ? index
+            : spreads.findIndex((spread, i) => i >= from && same(spread, old[index]))
+        const shown = this.#index >= from ? newIndexOf(this.#index) : this.#index
+        // A preload must not split the spread on screen: no index would name
+        // the pages shown. Leave the grouping to the navigation that loads it.
+        if (keepShown && this.#index >= 0 && shown < 0) {
+            this.#spreads = old
+            return false
+        }
+        this.#spreads = spreads
+        if (shown >= 0) this.#index = shown
+        // Any other spread on screen has to outlive the turn that leaves it
+        // (readest#6239). So nothing is removed here: the frames move out of
+        // reach of the new indices, and the trim evicts them by age.
+        const moved = []
         for (const key of [...this.#prerenderedSpreads.keys()]) {
-            if (!isRegrouped(key)) continue
-            const staleKey = `stale-${++this.#staleSpreads}`
-            this.#prerenderedSpreads.set(staleKey, this.#prerenderedSpreads.get(key))
-            this.#spreadAccessTime.set(staleKey, this.#spreadAccessTime.get(key) ?? 0)
+            const index = Number(/^spread-(\d+)$/.exec(key)?.[1] ?? -1)
+            if (index < from) continue
+            moved.push([newIndexOf(index), this.#prerenderedSpreads.get(key),
+                this.#spreadAccessTime.get(key) ?? 0])
             this.#prerenderedSpreads.delete(key)
             this.#spreadAccessTime.delete(key)
+        }
+        for (const [index, frames, time] of moved) {
+            const key = index >= 0 ? `spread-${index}` : `stale-${++this.#staleSpreads}`
+            this.#prerenderedSpreads.set(key, frames)
+            this.#spreadAccessTime.set(key, time)
         }
     }
     // After a regroup, go where the page a turn aimed at now sits: the page on
@@ -1639,6 +1708,7 @@ export class FixedLayout extends HTMLElement {
         const old = this.#pageColors
         if (old?.background === value?.background && old?.foreground === value?.foreground
             && old?.keepImages === value?.keepImages) return
+        this.cancelPageTurn()
         this.#pageColors = value
         this.#render()
     }
@@ -1651,6 +1721,12 @@ export class FixedLayout extends HTMLElement {
     set scrollLocked(value) {
         this.#scrollLocked = value
     }
+    #setOverflow(x, y) {
+        this.#isOverflowX = x
+        this.#isOverflowY = y
+        this.toggleAttribute('overflowing-x', x)
+        this.toggleAttribute('overflowing-y', y)
+    }
     get isOverflowX() {
         return this.#isOverflowX
     }
@@ -1659,14 +1735,227 @@ export class FixedLayout extends HTMLElement {
     }
     get atStart() {
         if (this.#scrollMode) return this.#scrollProgression() <= 0
-        return this.#index <= 0
+        return this.getPageTurnKey(-1) === null
     }
     get atEnd() {
         if (this.#scrollMode)
             return this.#scrollProgression() + this.#scrollViewLength()
                 >= this.#scrollTotalLength() - 2
-        return this.#index >= this.#spreads.length - 1
+        return this.getPageTurnKey(1) === null
     }
+    // A flat turn moves the existing iframe elements. They are never detached,
+    // copied to bitmaps, or redrawn while the finger is down.
+    #syncTurnLayout() {
+        const box = this.getBoundingClientRect()
+        if (box.width !== this.#layoutBox?.width || box.height !== this.#layoutBox?.height) this.#render()
+    }
+    async preparePageTurn(forward) {
+        if (!this.#pageTurn) this.#syncTurnLayout()
+        return !!(await this.#preparePageTurn(forward))
+    }
+    get #pageTurnScaleFactor() {
+        return this.#zoom === 'fit-page' ? Math.min(1, this.#scaleFactor) : 1
+    }
+    async #preparePageTurn(forward, turn) {
+        const key = this.getPageTurnKey(forward ? 1 : -1)
+        if (!key || this.#scrollMode || this.#destroyed) return false
+        const [indexText, explicitSide] = key.split(':')
+        return this.#prepareTurnTo(forward, Number(indexText), explicitSide, turn)
+    }
+    async #prepareTurnTo(forward, index, explicitSide, turn) {
+        // Pin the destination while it loads and draws: a preload finishing
+        // meanwhile trims the cache, and must not detach these frames.
+        if (turn) turn.index = index
+        const spread = this.#spreads[index]
+        const frames = await this.#loadSpreadFrames(index)
+        if (!frames) {
+            if (this.#destroyed) return false
+            // The load regrouped the spreads: turn to where the page it aimed
+            // at now sits, as #goToPageOf does for navigation.
+            const near = explicitSide ?? (forward !== this.rtl ? 'left' : 'right')
+            const target = this.getSpreadOf(spread.center ?? spread[near] ?? spread.left ?? spread.right)
+            if (!target) return false
+            const portrait = this.#portrait && !this.#spreads[target.index].center
+            return this.#prepareTurnTo(forward, target.index, portrait ? target.side : undefined, turn)
+        }
+        const side = explicitSide ?? (frames.center ? 'center'
+            : frames.left?.blank ? 'right' : frames.right?.blank ? 'left'
+                : forward !== this.rtl ? 'left' : 'right')
+        const scaleFactor = this.#pageTurnScaleFactor
+        await Promise.all(this.#render(side, true, frames))
+        return { index, side, frames, scaleFactor }
+    }
+    async beginPageTurn(forward) {
+        if (this.#pageTurn || this.#scrollMode) return false
+        this.#syncTurnLayout()
+        const turn = {
+            outgoing: this.#shownFrames(), incoming: [], saved: [], incomingStyles: [], progress: 0,
+            forward, ready: false, committing: false, animations: [],
+            style: { position: this.style.position, overflow: this.style.overflow }, scrollLeft: this.scrollLeft, scrollTop: this.scrollTop,
+            box: this.getBoundingClientRect(),
+        }
+        this.#pageTurn = turn
+        try {
+            const prepared = await this.#preparePageTurn(forward, turn)
+            await Promise.all(turn.outgoing.map(frame => frame.rendered))
+            if (this.#pageTurn !== turn) return false
+            if (!prepared) { this.cancelPageTurn(); return false }
+            Object.assign(turn, prepared)
+            turn.overlap = turn.outgoing.some(frame => frame.onZoom)
+                ? 2 / (window.devicePixelRatio || 1) : 0
+            const { frames, side } = prepared
+            turn.incoming = frames.center ? [frames.center]
+                : this.#portrait ? [frames[side]] : [frames.left, frames.right].filter(Boolean)
+            const width = this.clientWidth, height = this.clientHeight
+            turn.width = width
+            turn.height = height
+            const origin = this.getBoundingClientRect()
+            for (const frame of turn.outgoing) {
+                const rect = frame.element.getBoundingClientRect()
+                turn.saved.push({ frame, style: frame.element.style.cssText })
+                const x = rect.left - origin.left, y = rect.top - origin.top
+                Object.assign(frame.element.style, {
+                    position: 'absolute', left: `${x}px`, top: `${y}px`, margin: '0',
+                    clipPath: `inset(${Math.max(0, -y)}px ${Math.max(0, x + rect.width - width)}px ${Math.max(0, y + rect.height - height)}px ${Math.max(0, -x)}px)`,
+                    willChange: 'transform', transform: 'translate3d(0,0,0)',
+                })
+                frame.element.dataset.pageTurnView = 'outgoing'
+            }
+            const totalWidth = turn.incoming.reduce((sum, frame) => sum + parseFloat(frame.element.style.width), 0)
+            let x = Math.max(0, (width - totalWidth) / 2)
+            for (const frame of turn.incoming) {
+                const w = parseFloat(frame.element.style.width), h = parseFloat(frame.element.style.height)
+                turn.incomingStyles.push({ frame, style: frame.element.style.cssText })
+                const overlap = frame === frames.right && !this.#portrait
+                    ? computeSpreadSpineOverlap({ portrait: false, leftBlank: !!frames.left?.blank,
+                        rightBlank: !!frames.right?.blank, devicePixelRatio: window.devicePixelRatio || 1 }) : 0
+                const left = x + overlap, top = Math.max(0, (height - h) / 2)
+                Object.assign(frame.element.style, {
+                    position: 'absolute', left: `${left}px`, top: `${top}px`,
+                    margin: '0', display: 'block', visibility: 'visible', pointerEvents: 'none',
+                    willChange: 'transform', clipPath: `inset(${Math.max(0, -top)}px ${Math.max(0, left + w - width)}px ${Math.max(0, top + h - height)}px ${Math.max(0, -left)}px)`,
+                    zIndex: '1',
+                })
+                frame.element.dataset.pageTurnView = 'incoming'
+                x += w
+                this.#refreshOverlayerForFrame(frame)
+                this.#ensureOverlayerForFrame(frame)
+            }
+            Object.assign(this.style, { position: 'relative', overflow: 'clip' })
+            this.scrollLeft = 0
+            this.scrollTop = 0
+            turn.ready = true
+            this.movePageTurn(turn.progress)
+            return true
+        } catch (error) {
+            if (this.#pageTurn === turn) this.cancelPageTurn()
+            throw error
+        }
+    }
+    movePageTurn(progress) {
+        const turn = this.#pageTurn
+        if (!turn) return
+        turn.progress = Math.max(0, Math.min(1, progress))
+        if (!turn.ready) return
+        for (const frame of turn.outgoing)
+            frame.element.style.transform = this.#pageTurnTransform(turn, turn.progress, 0)
+        for (const frame of turn.incoming)
+            frame.element.style.transform = this.#pageTurnTransform(turn, turn.progress, -1)
+    }
+    #pageTurnTransform(turn, progress, offset) {
+        const sign = turn.forward !== this.rtl ? -1 : 1
+        // Cover fractional-pixel gaps while both surfaces are visible, tapering
+        // to zero at either endpoint so the original landing geometry is exact.
+        const overlap = offset ? Math.min(turn.overlap,
+            progress * turn.width, (1 - progress) * turn.width) : 0
+        return `translate3d(${sign * ((progress + offset) * turn.width + overlap)}px,0,0)`
+    }
+    async endPageTurn(commit, duration = 200) {
+        const turn = this.#pageTurn
+        if (!turn?.ready) { this.cancelPageTurn(); return false }
+        const from = turn.progress, target = commit ? 1 : 0
+        if (duration > 0 && from !== target) {
+            const edge = turn.overlap / turn.width
+            // Include the overlap's breakpoints: interpolating just its two
+            // endpoints would uncover the seam while the release still moves.
+            const poses = [from, ...[edge, 1 - edge]
+                .filter(p => p > Math.min(from, target) && p < Math.max(from, target))
+                .sort((a, b) => commit ? a - b : b - a), target]
+            for (const [frames, offset] of [[turn.outgoing, 0], [turn.incoming, -1]]) {
+                for (const frame of frames) {
+                    const animation = frame.element.animate(poses.map(progress => ({
+                        transform: this.#pageTurnTransform(turn, progress, offset),
+                        offset: Math.abs((progress - from) / (target - from)),
+                    })), { duration, easing: 'cubic-bezier(0.2,0,0.2,1)', fill: 'both' })
+                    turn.animations.push(animation)
+                }
+            }
+            await Promise.all(turn.animations.map(animation => animation.finished.catch(() => {})))
+        }
+        if (this.#pageTurn !== turn) return false
+        if (!commit) { this.cancelPageTurn(); return false }
+        this.movePageTurn(1)
+        for (const animation of turn.animations) animation.cancel()
+        turn.committing = true
+        // As goToSpread does: the spread being left outranks the preloads made
+        // while it was shown, so the trim keeps it for a turn back.
+        this.#touchSpread(`spread-${this.#index}`)
+        this.#index = turn.index
+        this.#side = turn.side
+        this.#left = turn.frames.left
+        this.#right = turn.frames.right
+        this.#center = turn.frames.center
+        this.#scaleFactor = turn.scaleFactor
+        this.setAttribute('scale-factor', String(turn.scaleFactor * 100))
+        this.#restorePageTurnStyles(turn)
+        const activeElements = Object.values(turn.frames).map(frame => frame.element)
+        for (const element of this.#root.children) {
+            if (!activeElements.includes(element)) Object.assign(element.style, {
+                position: 'absolute', display: 'none', visibility: 'hidden', pointerEvents: 'none',
+            })
+        }
+        for (const frame of Object.values(turn.frames)) {
+            Object.assign(frame.element.style, {
+                position: 'relative', left: '', top: '',
+                display: turn.incoming.includes(frame)
+                    ? frame.onZoom && turn.scaleFactor < 1 ? 'flex' : 'block' : 'none',
+                visibility: 'visible', pointerEvents: 'auto',
+            })
+        }
+        const first = turn.incoming.find(frame => !frame.blank)
+        this.#totalScaleFactor = parseFloat(first.element.style.width) / first.width
+        this.#setOverflow(
+            overflows(turn.incoming.reduce((sum, frame) => sum + parseFloat(frame.element.style.width), 0),
+                this.clientWidth),
+            turn.incoming.some(frame => overflows(parseFloat(frame.element.style.height), this.clientHeight)))
+        this.scrollLeft = 0
+        this.scrollTop = 0
+        this.#pageTurn = null
+        // A portrait turn shows one page of the spread; its sibling is shown
+        // later without #showSpread, so it needs its overlayer now.
+        for (const frame of Object.values(turn.frames)) this.#ensureOverlayerForFrame(frame)
+        this.#touchSpread(`spread-${turn.index}`)
+        this.#reportLocation('page')
+        this.#preloadNextSpreads()
+        return true
+    }
+    cancelPageTurn() {
+        const turn = this.#pageTurn
+        if (!turn) return
+        this.#pageTurn = null
+        for (const animation of turn.animations) animation.cancel()
+        this.#restorePageTurnStyles(turn)
+        this.scrollLeft = turn.scrollLeft
+        this.scrollTop = turn.scrollTop
+    }
+    #restorePageTurnStyles(turn) {
+        Object.assign(this.style, turn.style)
+        for (const { frame, style } of [...turn.saved, ...turn.incomingStyles]) {
+            frame.element.style.cssText = style
+            delete frame.element.dataset.pageTurnView
+        }
+    }
+
     // Names the page next()/prev() would show, as the paginator does. A
     // portrait view shows one side of a spread at a time, so the side is part
     // of the key there.
@@ -1709,6 +1998,7 @@ export class FixedLayout extends HTMLElement {
         }
     }
     async goToSpread(index, side, reason) {
+        this.cancelPageTurn()
         if (index < 0 || index > this.#spreads.length - 1) return
         if (index === this.#index) {
             // Moving to the other page of the spread on screen (a portrait view
@@ -1717,7 +2007,8 @@ export class FixedLayout extends HTMLElement {
             // relocation like any other.
             const moved = side != null && side !== this.#side
             if (moved) this.#side = side
-            this.#render(side)
+            const rendering = this.#render(side)
+            if (rendering?.length) await Promise.all(rendering)
             if (moved) this.#reportLocation(reason)
             return
         }
@@ -1731,37 +2022,9 @@ export class FixedLayout extends HTMLElement {
         if (this.#index >= 0) this.#touchSpread(`spread-${this.#index}`)
         this.#index = index
         const spread = this.#spreads[index]
-        const cacheKey = `spread-${index}`
-        const cached = this.#preloadCache.get(cacheKey)
-        if (cached && cached !== 'loading') {
-            if (cached.center) {
-                const sectionIndex = this.book.sections.indexOf(spread.center)
-                await this.#showSpread({ center: { index: sectionIndex, src: cached.center }, spreadIndex: index, side })
-            } else {
-                const indexL = this.book.sections.indexOf(spread.left)
-                const indexR = this.book.sections.indexOf(spread.right)
-                const left = { index: indexL, src: cached.left }
-                const right = { index: indexR, src: cached.right }
-                await this.#showSpread({ left, right, side, spreadIndex: index })
-            }
-        } else {
-            if (spread.center) {
-                const sectionIndex = this.book.sections.indexOf(spread.center)
-                const src = await spread.center?.load?.()
-                this.#regroup()
-                if (this.#spreads[index] !== spread) return this.#goToPageOf(spread, side, reason)
-                await this.#showSpread({ center: { index: sectionIndex, src }, spreadIndex: index, side })
-            } else {
-                const indexL = this.book.sections.indexOf(spread.left)
-                const indexR = this.book.sections.indexOf(spread.right)
-                const srcL = await spread.left?.load?.()
-                const srcR = await spread.right?.load?.()
-                this.#regroup()
-                if (this.#spreads[index] !== spread) return this.#goToPageOf(spread, side, reason)
-                const left = { index: indexL, src: srcL }
-                const right = { index: indexR, src: srcR }
-                await this.#showSpread({ left, right, side, spreadIndex: index })
-            }
+        if (!await this.#showSpread(index, side)) {
+            if (!this.#destroyed) return this.#goToPageOf(spread, side, reason)
+            return
         }
 
         this.#reportLocation(reason)
@@ -1770,98 +2033,44 @@ export class FixedLayout extends HTMLElement {
     #preloadNextSpreads() {
         this.#cleanupPreloadCache()
 
-        if (this.#numPrerenderedSpreads <= 0) return
-
-        const toPreload = []
-        const forwardPreloadCount = Math.max(1, this.#numPrerenderedSpreads - 1)
-        const backwardPreloadCount = Math.max(0, this.#numPrerenderedSpreads - forwardPreloadCount)
-        for (let distance = 1; distance <= forwardPreloadCount; distance++) {
-            const forwardIndex = this.#index + distance
-            if (forwardIndex >= 0 && forwardIndex < this.#spreads.length) {
-                toPreload.push({ index: forwardIndex, direction: 'forward', distance })
-            }
-        }
-        for (let distance = 1; distance <= backwardPreloadCount; distance++) {
-            const backwardIndex = this.#index - distance
-            if (backwardIndex >= 0 && backwardIndex < this.#spreads.length) {
-                toPreload.push({ index: backwardIndex, direction: 'backward', distance })
-            }
-        }
-        for (const { index: targetIndex, direction } of toPreload) {
+        for (const targetIndex of [this.#index + 1, this.#index - 1]) {
             const cacheKey = `spread-${targetIndex}`
             if (this.#prerenderedSpreads.has(cacheKey)) continue
             const spread = this.#spreads[targetIndex]
             if (!spread) continue
-            this.#preloadQueue.push({ targetIndex, direction, spread, cacheKey })
+            this.#preloadQueue.push({ targetIndex, spread, cacheKey })
         }
 
         this.#processPreloadQueue()
     }
 
     async #processPreloadQueue() {
+        if (this.#destroyed) return
         while (this.#preloadQueue.length > 0 && this.#activePreloads < this.#maxConcurrentPreloads) {
             const task = this.#preloadQueue.shift()
             if (!task) break
 
             const { spread, cacheKey, targetIndex } = task
+            if (this.#prerenderedSpreads.has(cacheKey)) continue
             // A page that loads wide regroups the spreads, which can leave
             // this task holding a spread that is no longer at its index.
             const isStale = () => this.#spreads[targetIndex] !== spread
-            this.#preloadCache.set(cacheKey, 'loading')
             this.#activePreloads++
             Promise.resolve().then(async () => {
                 try {
-                    if (spread.center) {
-                        const src = await spread.center?.load?.()
-                        this.#regroup()
-                        if (isStale()) return this.#preloadNextSpreads()
-                        this.#preloadCache.set(cacheKey, { center: src })
-
-                        const sectionIndex = this.book.sections.indexOf(spread.center)
-                        const frame = await this.#createFrame({ index: sectionIndex, src, detached: true })
-                        if (isStale()) return frame.element.remove()
-
-                        this.#prerenderedSpreads.set(cacheKey, { center: frame })
-                        this.#touchSpread(cacheKey)
-                        if (frame.onZoom) {
-                            const doc = frame.iframe.contentDocument
-                            frame.onZoom({ doc, scale: this.#totalScaleFactor, pageColors: this.#pageColors })
-                        }
-                    } else {
-                        const srcL = await spread.left?.load?.()
-                        const srcR = await spread.right?.load?.()
-                        this.#regroup()
-                        if (isStale()) return this.#preloadNextSpreads()
-                        this.#preloadCache.set(cacheKey, { left: srcL, right: srcR })
-
-                        const indexL = this.book.sections.indexOf(spread.left)
-                        const indexR = this.book.sections.indexOf(spread.right)
-                        const leftFrame = await this.#createFrame({ index: indexL, src: srcL, detached: true })
-                        const rightFrame = await this.#createFrame({ index: indexR, src: srcR, detached: true })
-                        if (isStale()) {
-                            leftFrame.element.remove()
-                            rightFrame.element.remove()
-                            return
-                        }
-
-                        this.#prerenderedSpreads.set(cacheKey, { left: leftFrame, right: rightFrame })
-                        this.#touchSpread(cacheKey)
-
-                        if (leftFrame.onZoom) {
-                            const docL = leftFrame.iframe.contentDocument
-                            leftFrame.onZoom({ doc: docL, scale: this.#totalScaleFactor, pageColors: this.#pageColors })
-                        }
-                        if (rightFrame.onZoom) {
-                            const docR = rightFrame.iframe.contentDocument
-                            rightFrame.onZoom({ doc: docR, scale: this.#totalScaleFactor, pageColors: this.#pageColors })
-                        }
-                    }
+                    const frames = await this.#loadSpreadFrames(targetIndex, true)
+                    if (isStale()) return this.#preloadNextSpreads()
+                    if (!frames) return
+                    const side = frames.center ? 'center' : frames.left?.blank ? 'right' : 'left'
+                    // Draw at the zoom a tap turn keeps; a swipe turn while
+                    // zoomed in lands at fit-page and draws again.
+                    await Promise.all(this.#render(side, false, frames, this.#scaleFactor))
                 } catch {
-                    this.#preloadCache.delete(cacheKey)
                     this.#prerenderedSpreads.delete(cacheKey)
                 } finally {
                     this.#activePreloads--
                     this.#processPreloadQueue()
+                    if (!this.#activePreloads && !this.#preloadQueue.length) this.#cleanupPreloadCache()
                 }
             })
         }
@@ -1878,7 +2087,9 @@ export class FixedLayout extends HTMLElement {
             return
         }
 
+        const pinned = new Set([`spread-${this.#index}`, `spread-${this.#pageTurn?.index}`])
         const framesByAge = Array.from(this.#prerenderedSpreads.keys())
+            .filter(key => !pinned.has(key))
             .map(key => ({
                 key,
                 accessTime: this.#spreadAccessTime.get(key) || 0,
@@ -1905,7 +2116,6 @@ export class FixedLayout extends HTMLElement {
 
                 this.#prerenderedSpreads.delete(key)
                 this.#spreadAccessTime.delete(key)
-                this.#preloadCache.delete(key)
             })
         }
     }
@@ -2001,6 +2211,7 @@ export class FixedLayout extends HTMLElement {
         }
     }
     async next(distance) {
+        this.cancelPageTurn()
         this.#selectToken = null
         if (this.#scrollMode) {
             if (this.#scrollHorizontal) {
@@ -2015,6 +2226,7 @@ export class FixedLayout extends HTMLElement {
         if (!s) return this.goToSpread(this.#index + 1, this.rtl ? 'right' : 'left', 'page')
     }
     async prev(distance) {
+        this.cancelPageTurn()
         this.#selectToken = null
         if (this.#scrollMode) {
             if (this.#scrollHorizontal) {
@@ -2204,6 +2416,9 @@ export class FixedLayout extends HTMLElement {
         return 'width'
     }
     destroy() {
+        this.#destroyed = true
+        this.#preloadQueue = []
+        this.cancelPageTurn()
         this.#observer.unobserve(this)
         if (this.#scrollMode) {
             this.removeEventListener('scroll', this.#handleScrollEvent)
@@ -2233,7 +2448,6 @@ export class FixedLayout extends HTMLElement {
             }
         }
         this.#prerenderedSpreads.clear()
-        this.#preloadCache.clear()
         this.#spreadAccessTime.clear()
         this.#overlayers.clear()
     }
