@@ -847,7 +847,14 @@ class Encryption {
 }
 
 class Resources {
-    constructor({ opf, resolveHref }) {
+    constructor({ opf, resolveHref, data }) {
+        if (data) {
+            // restored from a snapshot (see `toJSON`): no package document
+            Object.assign(this, data)
+            this.manifestById = new Map(this.manifest.map(item => [item.id, item]))
+            this.cover = this.manifest[data.cover]
+            return
+        }
         this.opf = opf
         const { $, $$, $$$ } = childGetter(opf, NS.OPF)
 
@@ -904,6 +911,11 @@ class Resources {
 
         this.cfis = CFI.fromElements($$itemref)
     }
+    toJSON() {
+        const { manifest, spine, pageProgressionDirection, navPath, ncxPath, guide, cfis } = this
+        return { manifest, spine, pageProgressionDirection, navPath, ncxPath, guide, cfis,
+            cover: manifest.indexOf(this.cover) }
+    }
     getItemByID(id) {
         return this.manifestById.get(id)
     }
@@ -916,6 +928,14 @@ class Resources {
     resolveCFI(cfi) {
         const parts = CFI.parse(cfi)
         const top = (parts.parent ?? parts).shift()
+        if (!this.opf) {
+            // Restored from a snapshot: find the itemref by its path, which `cfis` holds for
+            // each spine item. The package document below is walked by index too: its ID
+            // assertion is always dropped (an itemref's nodeName is never 'idref').
+            const path = steps => steps.map(step => step.index).join('/')
+            const index = this.cfis.findIndex(c => path(CFI.parse(c)[0]) === path(top))
+            return { index, anchor: doc => CFI.toRange(doc, parts) }
+        }
         let $itemref = CFI.toElement(this.opf, top)
         // make sure it's an idref; if not, try again without the ID assertion
         // mainly because Epub.js used to generate wrong ID assertions
@@ -940,6 +960,9 @@ class Loader {
     // import loop (a stylesheet that imports itself), not the real resource
     #loopCopies = new Set()
     eventTarget = new EventTarget()
+    // `{ get(href), put(href, entry) }`: keeps a prepared (X)HTML, SVG or CSS
+    // resource for the next open of the book, see `#keep`
+    resourceCache = null
     constructor({ loadText, loadBlob, resources, entries }) {
         this.loadText = loadText
         this.loadBlob = loadBlob
@@ -949,14 +972,20 @@ class Loader {
         // needed only when replacing in (X)HTML w/o parsing (see below)
         //.filter(({ mediaType }) => ![MIME.XHTML, MIME.HTML].includes(mediaType))
     }
-    async createURL(href, data, type, parent, loopCopy = false) {
+    // `restored`: the data is a kept resource, already transformed;
+    // `keep`: what `#keep` needs to keep this resource once transformed
+    async createURL(href, data, type, parent, loopCopy = false, { restored, keep } = {}) {
         if (!data) return ''
-        const detail = { data, type }
-        Object.defineProperty(detail, 'name', { value: href }) // readonly
-        const event = new CustomEvent('data', { detail })
-        this.eventTarget.dispatchEvent(event)
-        const newData = await event.detail.data
-        const newType = await event.detail.type
+        let newData = data, newType = type
+        if (!restored) {
+            const detail = { data, type }
+            Object.defineProperty(detail, 'name', { value: href }) // readonly
+            const event = new CustomEvent('data', { detail })
+            this.eventTarget.dispatchEvent(event)
+            newData = await event.detail.data
+            newType = await event.detail.type
+            if (keep) this.#keep(href, newData, newType, keep)
+        }
         // Another load of the same resource finished first: two sections
         // that link one stylesheet, loaded at once. Keep that copy and count
         // this parent on it. A second entry would set the count back to 1,
@@ -1110,9 +1139,44 @@ class Loader {
         }
         return this.loadItem(item, parents.concat(base))
     }
+    // Keep a resource as the `data` listeners left it, with the object URLs
+    // of the resources it links to replaced by `\0<n>\0`, n indexing
+    // `children`: their hrefs, which `#restore` loads again in a later session.
+    #keep(href, data, type, { children, mediaType }) {
+        if (typeof data !== 'string' || !data) return
+        const urls = [...children.keys()]
+        const index = new Map(urls.map((url, i) => [url, i]))
+        const kept = urls.length ? data.replace(new RegExp(urls.map(regexEscape)
+            .sort((a, b) => b.length - a.length).join('|'), 'g'),
+        url => `\0${index.get(url)}\0`) : data
+        Promise.resolve()
+            .then(() => this.resourceCache?.put(href, {
+                type, mediaType, data: kept, children: [...children.values()] }))
+            .catch(e => console.warn(e))
+    }
+    async #restore(item, { type, mediaType, data, children }, parents) {
+        const urls = await mapBounded(children, href => this.loadHref(href, item.href, parents))
+        item.mediaType = mediaType
+        const restored = data.replace(/\0(\d+)\0/g, (_, i) => urls[i] ?? '')
+        return this.createURL(item.href, restored, type, parents.at(-1), false, { restored: true })
+    }
     async loadReplaced(item, parents = []) {
         const { href, mediaType } = item
         const parent = parents.at(-1)
+        const cacheable = this.resourceCache
+            && [MIME.XHTML, MIME.HTML, MIME.SVG, MIME.CSS].includes(mediaType)
+        if (cacheable) {
+            const kept = await Promise.resolve()
+                .then(() => this.resourceCache.get(href)).catch(() => null)
+            if (kept) return this.#restore(item, kept, parents)
+        }
+        // the resources this one links to, by the object URL each was given
+        const children = new Map()
+        const load = h => this.loadHref(h, href, parents).then(url => {
+            if (url !== h && url?.startsWith('blob:')) children.set(url, h)
+            return url
+        })
+        const keep = cacheable ? { children } : undefined
         let str = ''
         try {
             str = await this.loadText(href)
@@ -1144,7 +1208,7 @@ class Loader {
                     if (child.data) {
                         const replacedData = await replaceSeries(child.data,
                             /(?:^|\s*)(href\s*=\s*['"])([^'"]*)(['"])/i,
-                            (_, p1, p2, p3) => this.loadHref(p2, href, parents)
+                            (_, p1, p2, p3) => load(p2)
                                 .then(p2 => `${p1}${p2}${p3}`))
                         child.replaceWith(doc.createProcessingInstruction(
                             child.target, replacedData))
@@ -1158,12 +1222,12 @@ class Loader {
             // (readest/readest#6513)
             await mapBounded([...doc.querySelectorAll('img[src]')], async el => {
                 const slim = el.getAttribute('src').replace(/(\.\w+)$/, '~slim$1')
-                const url = await this.loadHref(slim, href, parents)
+                const url = await load(slim)
                 if (url !== slim) el.setAttribute('data-duokan-slim-src', url)
             })
             // replace hrefs (excluding anchors)
             const replace = async (el, attr) => el.setAttribute(attr,
-                await this.loadHref(el.getAttribute(attr), href, parents))
+                await load(el.getAttribute(attr)))
             const attrTasks = [
                 [...doc.querySelectorAll('link[href]')].map(el => [el, 'href']),
                 [...doc.querySelectorAll('[src]')].map(el => [el, 'src']),
@@ -1172,41 +1236,41 @@ class Loader {
             ].flat()
             await mapBounded(attrTasks, ([el, attr]) => replace(el, attr))
             await mapBounded([...doc.querySelectorAll('[*|href]:not([href])')],
-                async el => el.setAttributeNS(NS.XLINK, 'href', await this.loadHref(
-                    el.getAttributeNS(NS.XLINK, 'href'), href, parents)))
+                async el => el.setAttributeNS(NS.XLINK, 'href', await load(
+                    el.getAttributeNS(NS.XLINK, 'href'))))
             await mapBounded([...doc.querySelectorAll('[srcset]')],
                 async el => el.setAttribute('srcset', await replaceSeries(el.getAttribute('srcset'),
                     /(\s*)(.+?)\s*((?:\s[\d.]+[wx])+\s*(?:,|$)|,\s+|$)/g,
-                    (_, p1, p2, p3) => this.loadHref(p2, href, parents)
+                    (_, p1, p2, p3) => load(p2)
                         .then(p2 => `${p1}${p2}${p3}`))))
             // replace inline styles
             await mapBounded([...doc.querySelectorAll('style')], async el => {
                 if (el.textContent) el.textContent =
-                    await this.replaceCSS(el.textContent, href, parents)
+                    await this.replaceCSS(el.textContent, href, parents, load)
             })
             await mapBounded([...doc.querySelectorAll('[style]')],
                 async el => el.setAttribute('style',
-                    await this.replaceCSS(el.getAttribute('style'), href, parents)))
+                    await this.replaceCSS(el.getAttribute('style'), href, parents, load)))
             // TODO: replace inline scripts? probably not worth the trouble
             const result = new XMLSerializer().serializeToString(doc)
-            return this.createURL(href, result, item.mediaType, parent)
+            if (keep) keep.mediaType = item.mediaType
+            return this.createURL(href, result, item.mediaType, parent, false, { keep })
         }
 
         const result = mediaType === MIME.CSS
-            ? await this.replaceCSS(str, href, parents)
+            ? await this.replaceCSS(str, href, parents, load)
             : await this.replaceString(str, href, parents)
-        return this.createURL(href, result, mediaType, parent)
+        if (keep) keep.mediaType = mediaType
+        return this.createURL(href, result, mediaType, parent, false, { keep })
     }
-    async replaceCSS(str, href, parents = []) {
+    async replaceCSS(str, href, parents = [], load = url => this.loadHref(url, href, parents)) {
         const replacedUrls = await replaceSeries(str,
             /url\(\s*["']?([^'"\n]*?)\s*["']?\s*\)/gi,
-            (_, url) => this.loadHref(url, href, parents)
-                .then(url => `url("${url}")`))
+            (_, url) => load(url).then(url => `url("${url}")`))
         // apart from `url()`, strings can be used for `@import` (but why?!)
         return replaceSeries(replacedUrls,
             /@import\s*["']([^"'\n]*?)["']/gi,
-            (_, url) => this.loadHref(url, href, parents)
-                .then(url => `@import "${url}"`))
+            (_, url) => load(url).then(url => `@import "${url}"`))
     }
     // find & replace all possible relative paths for all assets without parsing
     replaceString(str, href, parents = []) {
@@ -1272,6 +1336,9 @@ const xmlNamedEntities = {
     hellip: '&#8230;', copy: '&#169;', reg: '&#174;', trade: '&#8482;',
     bull: '&#8226;', middot: '&#183;',
 }
+// the shape of `EPUB.snapshot`; a change to it, or to what `#parse` reads, needs a new version
+const SNAPSHOT_VERSION = 1
+
 const sanitizeXMLEntities = str => str
     .replace(/&([a-z]+);/gi, (match, entity) =>
         xmlNamedEntities[entity.toLowerCase()] ?? match)
@@ -1290,6 +1357,10 @@ export class EPUB {
         this.loadBlob = loadBlob
         this.getSize = getSize
         this.#encryption = new Encryption(deobfuscators(sha1))
+    }
+    // keep prepared resources for the next open, see `Loader.resourceCache`
+    setResourceCache(cache) {
+        this.#loader.resourceCache = cache
     }
     async #loadXML(uri) {
         const str = await this.loadText(uri)
@@ -1310,27 +1381,27 @@ ${doc.querySelector('parsererror').innerText}`)
             return null
         }
     }
-    async init() {
-        const $container = await this.#loadXML('META-INF/container.xml')
-        if (!$container) throw new Error('Failed to load container file')
+    // `snapshot`: the `snapshot` an earlier `init` of this book took, restored instead of reading
+    // and parsing the container, package and navigation documents again (one of another version,
+    // or unreadable, is ignored). `takeSnapshot`: keep what this `init` parses as `this.snapshot`,
+    // a JSON string; none for a book with encrypted resources, whose keys come from the package.
+    async init({ snapshot, takeSnapshot } = {}) {
+        let data = null
+        if (snapshot) try {
+            data = JSON.parse(snapshot)
+            if (data?.version !== SNAPSHOT_VERSION) data = null
+        } catch {
+            data = null
+        }
+        if (data) this.resources = new Resources({ data: data.resources })
+        else {
+            const { encrypted, ...parsed } = await this.#parse()
+            data = parsed
+            this.resources = data.resources
+            // before anything below or the reader changes what it holds
+            if (takeSnapshot && !encrypted) this.snapshot = JSON.stringify(data)
+        }
 
-        const opfs = Array.from(
-            $container.getElementsByTagNameNS(NS.CONTAINER, 'rootfile'),
-            getAttributes('full-path', 'media-type'))
-            .filter(file => file.mediaType === 'application/oebps-package+xml')
-
-        if (!opfs.length) throw new Error('No package document defined in container')
-        const opfPath = opfs[0].fullPath
-        const opf = await this.#loadXML(opfPath)
-        if (!opf) throw new Error('Failed to load package document')
-
-        const $encryption = await this.#loadXML('META-INF/encryption.xml')
-        await this.#encryption.init($encryption, opf)
-
-        this.resources = new Resources({
-            opf,
-            resolveHref: url => resolveURL(url, opfPath),
-        })
         this.#loader = new Loader({
             loadText: this.loadText,
             loadBlob: uri => Promise.resolve(this.loadBlob(uri))
@@ -1369,42 +1440,14 @@ ${doc.querySelector('parsererror').innerText}`)
             }
         }).filter(s => s)
 
-        const { navPath, ncxPath } = this.resources
-        if (navPath) try {
-            const resolve = url => resolveURL(url, navPath)
-            const nav = parseNav(await this.#loadXML(navPath), resolve)
-            this.toc = nav.toc
-            this.pageList = nav.pageList
-            this.landmarks = nav.landmarks
-        } catch(e) {
-            console.warn(e)
-        }
-        // Some publishers ship an EPUB3 nav doc whose <li>s contain only
-        // plain text (no <a href>). parseNav returns a non-empty array, so
-        // the original check `if (!this.toc)` would skip the NCX fallback
-        // and the reader ends up with an unusable empty TOC. Detect this
-        // case by recursively checking whether any item has a real href.
-        const hasNavigableHref = items => Array.isArray(items) && items.some(
-            it => (it && (it.href || hasNavigableHref(it.subitems))))
-        if (!hasNavigableHref(this.toc) && ncxPath) try {
-            const resolve = url => resolveURL(url, ncxPath)
-            const ncx = parseNCX(await this.#loadXML(ncxPath), resolve)
-            this.toc = ncx.toc
-            this.pageList = ncx.pageList
-        } catch(e) {
-            console.warn(e)
-        }
-
-        this.landmarks ??= this.resources.guide
-
-        const { metadata, rendition, media } = getMetadata(opf)
-        this.metadata = metadata
-        this.rendition = rendition
-        this.media = media
+        this.toc = data.toc
+        this.pageList = data.pageList
+        this.landmarks = data.landmarks ?? this.resources.guide
+        this.metadata = data.metadata
+        this.rendition = data.rendition
+        this.media = data.media
         this.dir = this.resources.pageProgressionDirection
-        const displayOptions = getDisplayOptions(
-            await this.#loadOptionalXML('META-INF/com.apple.ibooks.display-options.xml')
-            ?? await this.#loadOptionalXML('META-INF/com.kobobooks.display-options.xml'))
+        const { displayOptions } = data
         if (displayOptions) {
             if (displayOptions.fixedLayout === 'true')
                 this.rendition.layout ??= 'pre-paginated'
@@ -1421,6 +1464,63 @@ ${doc.querySelector('parsererror').innerText}`)
             && (first.id === coverHref || /cover/i.test(first.id.split('/').pop())))
             first.pageSpread = 'center'
         return this
+    }
+    // what `init` reads from the container, package and navigation documents
+    async #parse() {
+        const $container = await this.#loadXML('META-INF/container.xml')
+        if (!$container) throw new Error('Failed to load container file')
+
+        const opfs = Array.from(
+            $container.getElementsByTagNameNS(NS.CONTAINER, 'rootfile'),
+            getAttributes('full-path', 'media-type'))
+            .filter(file => file.mediaType === 'application/oebps-package+xml')
+
+        if (!opfs.length) throw new Error('No package document defined in container')
+        const opfPath = opfs[0].fullPath
+        const opf = await this.#loadXML(opfPath)
+        if (!opf) throw new Error('Failed to load package document')
+
+        const $encryption = await this.#loadXML('META-INF/encryption.xml')
+        await this.#encryption.init($encryption, opf)
+
+        const resources = new Resources({
+            opf,
+            resolveHref: url => resolveURL(url, opfPath),
+        })
+
+        let toc, pageList, landmarks
+        const { navPath, ncxPath } = resources
+        if (navPath) try {
+            const resolve = url => resolveURL(url, navPath)
+            const nav = parseNav(await this.#loadXML(navPath), resolve)
+            toc = nav.toc
+            pageList = nav.pageList
+            landmarks = nav.landmarks
+        } catch(e) {
+            console.warn(e)
+        }
+        // Some publishers ship an EPUB3 nav doc whose <li>s contain only
+        // plain text (no <a href>). parseNav returns a non-empty array, so
+        // the original check `if (!this.toc)` would skip the NCX fallback
+        // and the reader ends up with an unusable empty TOC. Detect this
+        // case by recursively checking whether any item has a real href.
+        const hasNavigableHref = items => Array.isArray(items) && items.some(
+            it => (it && (it.href || hasNavigableHref(it.subitems))))
+        if (!hasNavigableHref(toc) && ncxPath) try {
+            const resolve = url => resolveURL(url, ncxPath)
+            const ncx = parseNCX(await this.#loadXML(ncxPath), resolve)
+            toc = ncx.toc
+            pageList = ncx.pageList
+        } catch(e) {
+            console.warn(e)
+        }
+
+        const { metadata, rendition, media } = getMetadata(opf)
+        const displayOptions = getDisplayOptions(
+            await this.#loadOptionalXML('META-INF/com.apple.ibooks.display-options.xml')
+            ?? await this.#loadOptionalXML('META-INF/com.kobobooks.display-options.xml'))
+        return { version: SNAPSHOT_VERSION, encrypted: !!$encryption, resources,
+            toc, pageList, landmarks, metadata, rendition, media, displayOptions }
     }
     async loadDocument(item) {
         // a spine item missing from the archive loads as an empty document
