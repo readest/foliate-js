@@ -250,14 +250,63 @@ const indexChildNodes = (node, filter) => {
     return nodes
 }
 
-const partsToNode = (node, parts, filter) => {
+// Without a filter, and with no cfi-skip child, an element's CFI children are
+// its own but the cfi-inert ones: element k (from 1) of the others is at index
+// 2k and the text after it at 2k + 1. A step then needs those elements, not a
+// walk of all its children: a long chapter puts hundreds of paragraphs in one
+// parent (and a single-file book thousands in <body>, after the reader's
+// cfi-inert skip link), and where each DOM call is a native one (Readest Lite)
+// walking them twice per conversion took ~0.13 s on a Kindle. `cache` keeps
+// them for the other end of a range.
+const ownElements = (node, filter, cache) => {
+    if (filter || !isElementNode(node)) return null
+    if (cache?.has(node)) return cache.get(node)
+    let elements = node.children
+    const inert = []
+    for (const el of node.querySelectorAll('[cfi-inert], [cfi-skip]')) {
+        if (el.parentNode !== node) continue
+        if (!isInertNode(el)) {
+            elements = null
+            break
+        }
+        inert.push(el)
+    }
+    if (elements && inert.length)
+        elements = Array.prototype.filter.call(elements, el => !inert.includes(el))
+    if (!elements?.length) elements = null
+    cache?.set(node, elements)
+    return elements
+}
+
+// a child that starts a new CFI chunk
+const isIndexedElement = node => isElementNode(node) && !isInertNode(node)
+
+// indexChildNodes(node)[index], from the node's own elements
+const childAt = (node, elements, index) => {
+    const count = elements.length
+    if (index === 0) return 'before'
+    if (index === 2 * count + 2) return 'after'
+    if (index % 2 === 0) return elements[index / 2 - 1]
+    const k = (index - 1) / 2
+    if (k > count) return undefined
+    const texts = []
+    for (let x = k ? elements[k - 1].nextSibling : node.firstChild;
+        x && !isIndexedElement(x); x = x.nextSibling)
+        if (isTextNode(x)) texts.push(x)
+    if (texts.length) return texts.length === 1 ? texts[0] : texts
+    return k === 0 ? 'first' : k === count ? 'last' : null
+}
+
+const partsToNode = (node, parts, filter, cache) => {
     const { id } = parts[parts.length - 1]
     if (id) {
         const el = node.ownerDocument.getElementById(id)
         if (el) return { node: el, offset: 0 }
     }
     for (const { index } of parts) {
-        const newNode = node ? indexChildNodes(node, filter)[index] : null
+        const elements = node ? ownElements(node, filter, cache) : null
+        const newNode = !node ? null : elements
+            ? childAt(node, elements, index) : indexChildNodes(node, filter)[index]
         // handle non-existent nodes
         if (newNode === 'first') return { node: node.firstChild ?? node }
         if (newNode === 'last') return { node: node.lastChild ?? node }
@@ -276,7 +325,23 @@ const partsToNode = (node, parts, filter) => {
     }
 }
 
-const nodeToParts = (node, offset, filter) => {
+// The index of an element or text `node` among its parent's own elements (see
+// ownElements), with its offset as if the chunk's text nodes were merged.
+const indexAmong = (elements, node, offset) => {
+    const position = x => Array.prototype.indexOf.call(elements, x)
+    if (isElementNode(node)) {
+        const i = position(node)
+        return i < 0 ? null : { index: 2 * (i + 1), offset }
+    }
+    if (!isTextNode(node)) return null
+    let x = node.previousSibling
+    for (; x && !isIndexedElement(x); x = x.previousSibling)
+        if (isTextNode(x)) offset += x.nodeValue.length
+    const i = x ? position(x) : -1
+    return x && i < 0 ? null : { index: 2 * (i + 1) + 1, offset }
+}
+
+const nodeToParts = (node, offset, filter, cache) => {
     const { id } = node
     // A cfi-skip wrapper is invisible to CFI, so index this node within the
     // wrapper's nearest non-skip ancestor — where rawChildNodes has hoisted it —
@@ -284,24 +349,29 @@ const nodeToParts = (node, offset, filter) => {
     // relative to the wrapper and not match the same node without the wrapper.
     let parentNode = node.parentNode
     while (parentNode && isSkipNode(parentNode)) parentNode = parentNode.parentNode
-    const indexed = indexChildNodes(parentNode, filter)
-    const index = indexed.findIndex(x =>
-        Array.isArray(x) ? x.some(x => x === node) : x === node)
-    // adjust offset as if merging the text nodes in the chunk
-    const chunk = indexed[index]
-    if (Array.isArray(chunk)) {
-        let sum = 0
-        for (const x of chunk) {
-            if (x === node) {
-                sum += offset
-                break
-            } else sum += x.nodeValue.length
+    const elements = ownElements(parentNode, filter, cache)
+    const found = elements ? indexAmong(elements, node, offset) : null
+    let part = found && { id, ...found }
+    if (!part) {
+        const indexed = indexChildNodes(parentNode, filter)
+        const index = indexed.findIndex(x =>
+            Array.isArray(x) ? x.some(x => x === node) : x === node)
+        // adjust offset as if merging the text nodes in the chunk
+        const chunk = indexed[index]
+        if (Array.isArray(chunk)) {
+            let sum = 0
+            for (const x of chunk) {
+                if (x === node) {
+                    sum += offset
+                    break
+                } else sum += x.nodeValue.length
+            }
+            offset = sum
         }
-        offset = sum
+        part = { id, index, offset }
     }
-    const part = { id, index, offset }
     return (parentNode !== node.ownerDocument.documentElement
-        ? nodeToParts(parentNode, null, filter).concat(part) : [part])
+        ? nodeToParts(parentNode, null, filter, cache).concat(part) : [part])
         // remove ignored nodes
         .filter(x => x.index !== -1)
 }
@@ -347,9 +417,10 @@ const startInsideChild = (node, offset) => {
 }
 
 export const fromRange = (range, filter) => {
-    const start = nodeToParts(...startInsideChild(range.startContainer, range.startOffset), filter)
+    const cache = new Map()
+    const start = nodeToParts(...startInsideChild(range.startContainer, range.startOffset), filter, cache)
     if (range.collapsed) return toString([start])
-    const end = nodeToParts(...endInsideChild(range.endContainer, range.endOffset), filter)
+    const end = nodeToParts(...endInsideChild(range.endContainer, range.endOffset), filter, cache)
     return buildRange([start], [end])
 }
 
@@ -359,8 +430,9 @@ export const toRange = (doc, parts, filter) => {
         const endParts = collapse(parts, true)
 
         const root = doc.documentElement
-        const start = partsToNode(root, startParts[0], filter)
-        const end = partsToNode(root, endParts[0], filter)
+        const cache = new Map()
+        const start = partsToNode(root, startParts[0], filter, cache)
+        const end = partsToNode(root, endParts[0], filter, cache)
 
         if (!start?.node || !end?.node) return null
 
