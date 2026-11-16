@@ -915,7 +915,7 @@ const getOpeningImage = (doc, els = doc.body.querySelectorAll('img, svg, video, 
     [...els].find(el => el.getClientRects().length && inFlow(el, doc.body))
 
 class View {
-    #observer = new ResizeObserver(() => this.expand())
+    #observer = new ResizeObserver(() => this.expand(true))
     #element = document.createElement('div')
     #iframe = document.createElement('iframe')
     #contentRange = document.createRange()
@@ -950,6 +950,8 @@ class View {
     // `#pageCache` (`{ get, put }`), so the section's next open need not measure it.
     #measured = []
     #pageCache
+    // What the last expand() of a paginated layout was for (a `#measured` key)
+    #expandedKey = null
     fontReady = Promise.resolve()
     // Settles when the load in progress ends, the view rendered or dropped
     loading = Promise.resolve()
@@ -1659,7 +1661,10 @@ class View {
         }
         return 1.0
     }
-    expand() {
+    // `resized`: called for a resize notification. The first one comes right after a load renders
+    // the section, for the size it was just laid out at; nothing moved then, and expanding again
+    // would only make the reader re-anchor and relocate at the same page.
+    expand(resized) {
         // Font-ready callbacks can run while a preload yields between phases.
         // Its range and page geometry are not initialized until first render.
         if (!this.document?.documentElement || this.document !== this.#loadedDoc) return
@@ -1685,6 +1690,8 @@ class View {
             const key = JSON.stringify([this.#layout, this.#vertical, this.#rtl,
                 rootRect.width, rootRect.height, bodyRect.width, bodyRect.height,
                 this.#breakTargets.length ? startColumn + lead : 0])
+            if (resized && key === this.#expandedKey) return
+            this.#expandedKey = key
             let measured = this.#measured.find(m => m.key === key)
             if (!measured) {
                 const contentRect = this.#contentRange.getBoundingClientRect()
@@ -1734,6 +1741,7 @@ class View {
                 this.#overlayer.redraw()
             }
         } else {
+            this.#expandedKey = null
             const side = this.#vertical ? 'width' : 'height'
             const otherSide = this.#vertical ? 'height' : 'width'
             const contentSize = documentElement.getBoundingClientRect()[side]
@@ -2043,6 +2051,9 @@ export class Paginator extends HTMLElement {
     // A scroll that landed on a view still loading, with nothing to report
     // there yet: `{ reason }`, relocated once that view renders.
     #pendingRelocate = null
+    // Container position the last anchor or navigation relocate measured,
+    // which left detecting the primary view to the debounced scroll listener.
+    #anchorRelocatedAt = null
     // The reason of a page turn's relocate that waits for the turned page to
     // paint (#scrollTo); #flushRelocate runs it early when needed.
     #turnRelocate = null
@@ -2284,6 +2295,15 @@ export class Paginator extends HTMLElement {
                 // lands here too and needs no second pass.
                 if (this.#relocatedAt != null
                     && Math.abs(this.containerPosition - this.#relocatedAt) < 1) return
+                // The scroll of an anchor or navigation relocate (opening a
+                // book at its position) needs a second pass only if the
+                // primary view it left undetected is another one.
+                if (this.#anchoredHere()) {
+                    const primary = this.#primaryIndex
+                    this.#detectPrimaryView()
+                    this.#syncA11y()
+                    if (this.#primaryIndex === primary) return
+                }
                 this.#afterScroll('container-scroll')
             }
         }, 250)
@@ -2666,7 +2686,7 @@ export class Paginator extends HTMLElement {
                 this.#padLastPage()
                 // The primary view, or one before it, reflowed: what the
                 // last relocate measured may no longer be on the page.
-                if (index <= this.#primaryIndex) this.#relocatedAt = null
+                if (index <= this.#primaryIndex) this.#relocatedAt = this.#anchorRelocatedAt = null
                 this.#keepReadingPositionOnStripChange(index, offsetBeforeExpand)
                 // An expand for another reason, a late image, can come before
                 // the iframe takes its new width: wait for the one at that width.
@@ -4753,8 +4773,12 @@ export class Paginator extends HTMLElement {
             this.dispatchEvent(new Event('stabilized'))
         }
     }
+    #anchoredHere() {
+        return this.#anchorRelocatedAt != null
+            && Math.abs(this.containerPosition - this.#anchorRelocatedAt) < 1
+    }
     #afterScroll(reason) {
-        this.#relocatedAt = null
+        this.#relocatedAt = this.#anchorRelocatedAt = null
         // In multi-view, detect which section is primary
         if (this.#views.size > 1 && reason !== 'anchor' && reason !== 'navigation') {
             this.#detectPrimaryView()
@@ -4784,6 +4808,7 @@ export class Paginator extends HTMLElement {
         // debounced scroll listener still provides.
         if (reason !== 'anchor' && reason !== 'navigation')
             this.#relocatedAt = this.containerPosition
+        else this.#anchorRelocatedAt = this.containerPosition
         // don't set new anchor if relocation was to scroll to anchor
         if (reason === 'selection' || reason === 'navigation' || reason === 'anchor')
             this.#anchoredAt = this.containerPosition
@@ -5112,6 +5137,7 @@ export class Paginator extends HTMLElement {
             if (!size) return
             const minPages = 5
             const maxSections = 8
+            let loaded = false
 
             // If the primary section is shorter than one spread and
             // there's no section already loaded before it, load the
@@ -5125,6 +5151,7 @@ export class Paginator extends HTMLElement {
                     const prevIdx = this.#adjacentIndex(-1, firstIndex)
                     if (prevIdx != null && this.#isSameDirection(prevIdx)) {
                         await this.#loadAdjacentSection(prevIdx)
+                        loaded = true
                     }
                 }
             }
@@ -5144,9 +5171,12 @@ export class Paginator extends HTMLElement {
                 // Stop at writing-mode boundaries
                 if (!this.#isSameDirection(nextIdx)) break
                 await this.#loadAdjacentSection(nextIdx)
+                loaded = true
                 if (!this.#views.has(nextIdx)) break
             }
-            if (reanchor) {
+            // Nothing to correct if no section loaded and the page the anchor
+            // relocate measured is still on screen, with nothing reflowed.
+            if (reanchor && (loaded || !this.#anchoredHere())) {
                 this.#flushRelocate()
                 this.#scrollToAnchor(this.#anchor)
             }
