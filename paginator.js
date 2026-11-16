@@ -748,10 +748,18 @@ class View {
     #layout = {}
     #contentPages = 0
     #bgImageSize = null
+    // How far the content runs along the pages, as `expand()` measured it, with what that depends
+    // on (`key`): the last few, as a load measures a section before and after `expand()` sizes its
+    // root. Measuring takes the boxes of all the section's text, a few hundred ms on an e-ink
+    // reader, and a load measures a section up to three times (render, fonts, resize). Kept in
+    // `#pageCache` (`{ get, put }`), so the section's next open need not measure it.
+    #measured = []
+    #pageCache
     fontReady = Promise.resolve()
-    constructor({ container, onExpand }) {
+    constructor({ container, onExpand, pageCache }) {
         this.container = container
         this.onExpand = onExpand
+        this.#pageCache = pageCache
         this.#iframe.setAttribute('part', 'filter')
         this.#element.append(this.#iframe)
         Object.assign(this.#element.style, {
@@ -802,6 +810,8 @@ class View {
                 const doc = this.document
                 if (!doc?.documentElement || !doc.body) return resolve()
                 await afterLoad?.(doc)
+                const kept = await this.#pageCache?.get()
+                this.#measured = Array.isArray(kept) ? kept : []
                 await yieldToFrame()
                 if (this.document !== doc) return resolve()
 
@@ -1223,13 +1233,26 @@ class View {
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
             const otherSide = this.#vertical ? 'width' : 'height'
-            const contentRect = this.#contentRange.getBoundingClientRect()
             const rootRect = documentElement.getBoundingClientRect()
-            // offset caused by column break at the start of the page
-            // which seem to be supported only by WebKit and only for horizontal writing
-            const contentStart = this.#vertical ? 0
-                : this.#rtl ? rootRect.right - contentRect.right : contentRect.left - rootRect.left
-            const contentSize = (contentStart + contentRect[side]) * this.#zoom
+            // Content that grows or shrinks changes the body's box, which spans its columns.
+            const bodyRect = this.document.body.getBoundingClientRect()
+            const key = JSON.stringify([this.#layout, this.#vertical, this.#rtl,
+                rootRect.width, rootRect.height, bodyRect.width, bodyRect.height])
+            let measured = this.#measured.find(m => m.key === key)
+            if (!measured) {
+                const contentRect = this.#contentRange.getBoundingClientRect()
+                measured = {
+                    key,
+                    // offset caused by column break at the start of the page
+                    // which seem to be supported only by WebKit and only for horizontal writing
+                    start: this.#vertical ? 0
+                        : this.#rtl ? rootRect.right - contentRect.right : contentRect.left - rootRect.left,
+                    size: contentRect[side],
+                }
+                this.#measured = [measured, ...this.#measured].slice(0, 4)
+                this.#pageCache?.put(this.#measured)
+            }
+            const contentSize = (measured.start + measured.size) * this.#zoom
             // Size content by individual columns, not full spreads.
             // This allows adjacent sections to share a spread when a
             // section doesn't fill all available columns.
@@ -1592,6 +1615,7 @@ export class Paginator extends HTMLElement {
     // Cache of section index → vertical (boolean). Populated as views
     // are loaded so we can check direction *before* loading a section.
     #directionCache = new Map()
+    #pageCache = null
     constructor() {
         super()
         this.#root.innerHTML = `<style>
@@ -1998,6 +2022,11 @@ export class Paginator extends HTMLElement {
                 break
         }
     }
+    // Where a section's measured extent is kept between opens (see View's `#measured`):
+    // `{ get(index) => Promise<entry | null>, put(index, entry) }`, or null.
+    setPageCache(cache) {
+        this.#pageCache = cache
+    }
     open(book) {
         this.bookDir = book.dir
         this.#bookSections = book.sections
@@ -2090,8 +2119,13 @@ export class Paginator extends HTMLElement {
             this.#container.removeChild(existing.element)
             this.#views.delete(index)
         }
+        const cache = this.#pageCache
         const view = new View({
             container: this,
+            pageCache: cache && {
+                get: () => cache.get(index),
+                put: entry => cache.put(index, entry),
+            },
             onExpand: () => {
                 this.#padLastPage()
                 // The primary view, or one before it, reflowed: what the
