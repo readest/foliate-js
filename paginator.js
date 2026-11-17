@@ -1541,6 +1541,7 @@ export class Paginator extends HTMLElement {
     #header
     #footer
     #views = new Map() // Map<sectionIndex, View>
+    #viewSizes = new Map() // last measured size of each view, for its growth
     #primaryIndex = -1
     // Internally `index` is a render unit: a whole section, or one chunk of a
     // section too big to render whole. Spine indices only cross the public API.
@@ -2108,6 +2109,7 @@ export class Paginator extends HTMLElement {
                 // The primary view, or one before it, reflowed: what the
                 // last relocate measured may no longer be on the page.
                 if (index <= this.#primaryIndex) this.#relocatedAt = null
+                this.#keepReadingPositionOnStripChange(index)
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
                 if (this.#filling || this.#stabilizing || this.scrolled) return
@@ -2123,6 +2125,19 @@ export class Paginator extends HTMLElement {
         else this.#container.append(view.element)
         this.#syncA11y()
         return view
+    }
+    // A view before the primary that grows moves the text in view along the
+    // strip. Scroll anchoring follows that in a horizontal strip (scrollTop),
+    // not in a vertical one (scrollLeft), so fold the growth in there.
+    #keepReadingPositionOnStripChange(index) {
+        if (!this.scrolled || !this.#vertical || !this.#views.has(this.#primaryIndex)) return
+        const view = this.#views.get(index)
+        if (!view) return
+        const size = view.element.getBoundingClientRect()[this.sideProp]
+        const previous = this.#viewSizes.get(index)
+        this.#viewSizes.set(index, size)
+        if (index < this.#primaryIndex && previous != null && Math.abs(size - previous) > 0.5)
+            this.containerPosition -= size - previous
     }
     // Hide off-screen pre-loaded views from the accessibility tree so
     // screen-reader swipe-next does not wander into them (which would land
@@ -2149,9 +2164,17 @@ export class Paginator extends HTMLElement {
     #destroyView(index) {
         const view = this.#views.get(index)
         if (!view) return
+        // Dropping a view before the primary moves the text in view by its
+        // size, and scroll anchoring doesn't follow a vertical strip. Shift by
+        // that size rather than re-anchor: #anchor lags a scroll in progress.
+        const shift = this.scrolled && this.#vertical && index < this.#primaryIndex
+            && this.#views.has(this.#primaryIndex)
+            ? view.element.getBoundingClientRect()[this.sideProp] : 0
         view.destroy()
         this.#container.removeChild(view.element)
         this.#views.delete(index)
+        this.#viewSizes.delete(index)
+        if (shift) this.containerPosition += shift
         this.#padLastPage()
         this.sections[index]?.unload?.()
     }
@@ -3542,12 +3565,21 @@ export class Paginator extends HTMLElement {
                     ({ left: viewSize - right, right: viewSize - left })
                 : f => f
     }
-    async #scrollToRect(rect, reason) {
+    // The loaded view whose document holds an element or range anchor
+    #viewOfAnchor(anchor) {
+        const doc = (anchor?.startContainer ?? anchor)?.ownerDocument
+        if (!doc) return null
+        for (const [index, view] of this.#views)
+            if (view.document === doc) return { index, view }
+        return null
+    }
+    async #scrollToRect(rect, reason, owner) {
         if (this.scrolled) {
-            // rect is in iframe-local coordinates; add view offset
-            // to convert to container scroll coordinates
-            const localOffset = this.#getRectMapper()(rect).left - 3
-            const viewOffset = this.#getViewOffset(this.#primaryIndex)
+            // rect is local to the anchor's own view: mirror it through that
+            // view's size, not every mounted view's (readest#7555), and add
+            // that view's offset to get container coordinates.
+            const localOffset = this.#getRectMapper(owner?.view ?? this.#primaryView)(rect).left - 3
+            const viewOffset = this.#getViewOffset(owner?.index ?? this.#primaryIndex)
             return this.#scrollTo(viewOffset + localOffset, reason)
         }
         // rect is in iframe-local coordinates. Convert to container
@@ -3771,7 +3803,7 @@ export class Paginator extends HTMLElement {
             if (!rect) return this.scrolled
                 ? this.#scrollTo(this.#getViewOffset(this.#primaryIndex), reason)
                 : this.#scrollToPage(this.#getPagesBeforeView(this.#primaryIndex), reason)
-            await this.#scrollToRect(rect, reason)
+            await this.#scrollToRect(rect, reason, this.#viewOfAnchor(anchor))
             // focus the element when navigating with keyboard or screen reader
             if (reason === 'navigation' && !isTypingOutside()) {
                 let node = anchor.focus ? anchor : undefined
@@ -4155,6 +4187,14 @@ export class Paginator extends HTMLElement {
                 this.#applyStyles(doc)
                 await yieldToFrame()
                 if (this.#views.get(index) !== view || view.document !== doc) return
+                // A section in the other writing mode can't sit beside the primary one.
+                // Drop it before host listeners read its direction as the book's.
+                const { vertical } = getDirection(doc)
+                this.#directionCache.set(index, vertical)
+                if (vertical !== this.#vertical) {
+                    this.#destroyView(index)
+                    return
+                }
                 this.dispatchEvent(new CustomEvent('load',
                     { detail: { doc, index: this.#spineOf(index) } }))
             }
@@ -4188,16 +4228,15 @@ export class Paginator extends HTMLElement {
                 this.#destroyView(index)
                 return
             }
-            // Cache direction for future preload boundary checks
-            if (view.document) {
-                const dir = getDirection(view.document)
-                this.#directionCache.set(index, dir.vertical)
-                // Destroy views with a different writing-mode immediately.
-                // Mixed-direction views corrupt scroll/page calculations.
-                if (dir.vertical !== this.#vertical) {
-                    this.#destroyView(index)
-                    return
-                }
+            // Check again after the host's 'load' listeners: they can change
+            // the section's writing mode (e.g. by repairing namespaced
+            // attributes a book's selectors match). Mixed-direction views
+            // corrupt scroll/page calculations.
+            const { vertical } = getDirection(view.document)
+            this.#directionCache.set(index, vertical)
+            if (vertical !== this.#vertical) {
+                this.#destroyView(index)
+                return
             }
             // Keep the previously visible content anchored: the new view added
             // `addedSize` px above it, so the scroll position must grow by the
