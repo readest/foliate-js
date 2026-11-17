@@ -322,9 +322,21 @@ const endInsideChild = (node, offset) => {
     return [node, offset]
 }
 
+// The same for a range's start, which read back as the element's start pulls
+// in everything before it: WebKit reports a selection that starts right after
+// an inline element as (parent, i), and its highlight was drawn from the start
+// of the paragraph (readest/readest#7482). Move such a start to the start of
+// the child after it, or into the child before it when there is none. A start
+// at (element, 0) already reads back as itself.
+const startInsideChild = (node, offset) => {
+    if (!isElementNode(node) || offset === 0) return [node, offset]
+    const next = node.childNodes[offset]
+    if ((isTextNode(next) || isElementNode(next)) && !isInertNode(next)) return [next, 0]
+    return endInsideChild(node, offset)
+}
+
 export const fromRange = (range, filter) => {
-    const { startContainer, startOffset } = range
-    const start = nodeToParts(startContainer, startOffset, filter)
+    const start = nodeToParts(...startInsideChild(range.startContainer, range.startOffset), filter)
     if (range.collapsed) return toString([start])
     const end = nodeToParts(...endInsideChild(range.endContainer, range.endOffset), filter)
     return buildRange([start], [end])
