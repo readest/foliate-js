@@ -12,7 +12,8 @@ const isSuper = el => {
     return verticalAlign === 'super'
         || verticalAlign === 'top'
         || verticalAlign === 'text-top'
-        || /^\d/.test(verticalAlign)
+        // a raised offset; `0px` is the baseline
+        || parseFloat(verticalAlign) > 0
 }
 
 const refTypes = ['biblioref', 'glossref', 'noteref']
@@ -268,8 +269,12 @@ export class FootnoteHandler extends EventTarget {
         }
         else if (this.detectFootnotes && (maybe() || check)) {
             e.preventDefault()
+            // `check` guards a link the caller guessed is a note reference.
+            // A superscript marker confirms it on its own, and checking it
+            // would reject a note body with rich formatting.
+            const strict = check && !maybe()
             return Promise.resolve(book.resolveHref(href)).then(({ index, anchor }) => {
-                const target = { index, anchor: doc => extractFootnote(doc, anchor), check, reference: a }
+                const target = { index, anchor: doc => extractFootnote(doc, anchor), check: strict, reference: a }
                 return this.#showFragment(book, target, href)
             })
         }

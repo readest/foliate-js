@@ -207,6 +207,37 @@ const getFontScale = doc => {
     return fontScale > 0 ? fontScale : 1
 }
 
+// pdf.js ends every printed line with a <br>, but Blink lays a <br> out in the
+// text layer's own line flow whatever its CSS position: they stack down the
+// layer's left edge, one line each, whichever line they end. A press in the
+// margin then resolves to one of them, a spot in the text far from the pointer,
+// and a selection across lines gets boxes at the page edge that the reader
+// anchors its popup and handles to (readest #7505). Wrapped in a positioned
+// span, a <br> leaves that flow and sits at the end of its line, and it still
+// breaks the line in copied text. Measured after the text layer is laid out;
+// a rotated page keeps pdf.js's layout.
+const placeLineBreaks = container => {
+    const box = container.getBoundingClientRect()
+    if (!box.width || !box.height || Number(container.dataset.mainRotation)) return
+    const breaks = []
+    for (const br of container.querySelectorAll('br')) {
+        let line = br.previousElementSibling
+        while (line?.localName === 'br') line = line.previousElementSibling
+        const rect = line?.getBoundingClientRect()
+        const x = !rect ? box.left
+            : getComputedStyle(line).direction === 'rtl' ? rect.left : rect.right
+        breaks.push([br, (x - box.left) / box.width, ((rect?.top ?? box.top) - box.top) / box.height])
+    }
+    for (const [br, x, y] of breaks) {
+        const end = br.ownerDocument.createElement('span')
+        end.className = 'endOfLine'
+        end.style.left = `${x * 100}%`
+        end.style.top = `${y * 100}%`
+        br.replaceWith(end)
+        end.append(br)
+    }
+}
+
 let textLayerBuilderCSS = null
 let annotationLayerBuilderCSS = null
 
@@ -967,6 +998,7 @@ const render = async (page, doc, zoom, pageColors) => {
     const fontScale = getFontScale(doc)
     if (fontScale !== 1) container.style.setProperty('--text-scale-factor',
         `calc(var(--total-scale-factor) * var(--min-font-size) / ${fontScale})`)
+    placeLineBreaks(container)
 
     // hide "offscreen" canvases appended to document when rendering text layer
     // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/pdf_viewer.css#L51-L58
