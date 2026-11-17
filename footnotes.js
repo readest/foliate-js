@@ -12,7 +12,8 @@ const isSuper = el => {
     return verticalAlign === 'super'
         || verticalAlign === 'top'
         || verticalAlign === 'text-top'
-        || /^\d/.test(verticalAlign)
+        // a raised offset; `0px` is the baseline
+        || parseFloat(verticalAlign) > 0
 }
 
 const refTypes = ['biblioref', 'glossref', 'noteref']
