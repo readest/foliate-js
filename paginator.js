@@ -4188,6 +4188,16 @@ export class Paginator extends HTMLElement {
                 this.#destroyView(index)
                 return
             }
+            // Check again after the host's 'load' listeners: they can change
+            // the section's writing mode (e.g. by repairing namespaced
+            // attributes a book's selectors match). Mixed-direction views
+            // corrupt scroll/page calculations.
+            const { vertical } = getDirection(view.document)
+            this.#directionCache.set(index, vertical)
+            if (vertical !== this.#vertical) {
+                this.#destroyView(index)
+                return
+            }
             // Keep the previously visible content anchored: the new view added
             // `addedSize` px above it, so the scroll position must grow by the
             // same amount. This corrects the browser's scroll-anchoring
