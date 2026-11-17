@@ -1556,7 +1556,6 @@ export class Paginator extends HTMLElement {
     #rtl = false
     #marginTop = 0
     #marginBottom = 0
-    #marginLeft = 0
     #marginRight = 0
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
     #justAnchored = false
@@ -2325,7 +2324,6 @@ export class Paginator extends HTMLElement {
         const marginLeft = parseFloat(style.getPropertyValue('--_margin-left'))
         this.#marginTop = marginTop
         this.#marginBottom = marginBottom
-        this.#marginLeft = marginLeft
         this.#marginRight = marginRight
 
         // Compute the column count from the host (Paginator) size rather than
@@ -3510,21 +3508,16 @@ export class Paginator extends HTMLElement {
     #getRectMapper(view) {
         if (this.scrolled) {
             const size = view ? view.element.getBoundingClientRect()[this.sideProp] : this.#renderedViewSize
-            // Vertical text stacks its columns along the block axis, so the
-            // distance from a section's start is measured against the
-            // block-end padding — the right-hand page margin, which is what
-            // `scrolled()` writes into `padding-right`. Subtracting the
-            // inline-axis margin top/bottom there (the horizontal branch's
-            // fudge, where the page's top margin really does sit above the
-            // text) left every fragment jump about
-            // `marginRight - marginTop` px into the section: the reader opened
-            // a chapter from the table of contents a few dozen pixels in, and
-            // the first page turn back only undid that residue instead of
-            // reaching the previous chapter.
+            const marginTop = this.#marginTop
+            const marginBottom = this.#marginBottom
+            // A vertical section starts after its right padding (see
+            // `scrolled()`). Shift both edges by it: a stretched rect would
+            // count text before an anchor as visible.
+            const marginRight = this.#marginRight
             return this.#vertical
                 ? ({ left, right }) =>
-                    ({ left: size - right - this.#marginRight, right: size - left - this.#marginLeft })
-                : ({ top, bottom }) => ({ left: top - this.#marginTop, right: bottom - this.#marginBottom })
+                    ({ left: size - right - marginRight, right: size - left - marginRight })
+                : ({ top, bottom }) => ({ left: top - marginTop, right: bottom - marginBottom })
         }
         // For RTL the mapper mirrors a rect within the iframe-local
         // coordinate space of the *target view* (each view is a separate
