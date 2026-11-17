@@ -3534,12 +3534,21 @@ export class Paginator extends HTMLElement {
                     ({ left: viewSize - right, right: viewSize - left })
                 : f => f
     }
-    async #scrollToRect(rect, reason) {
+    // The loaded view whose document holds an element or range anchor
+    #viewOfAnchor(anchor) {
+        const doc = (anchor?.startContainer ?? anchor)?.ownerDocument
+        if (!doc) return null
+        for (const [index, view] of this.#views)
+            if (view.document === doc) return { index, view }
+        return null
+    }
+    async #scrollToRect(rect, reason, owner) {
         if (this.scrolled) {
-            // rect is in iframe-local coordinates; add view offset
-            // to convert to container scroll coordinates
-            const localOffset = this.#getRectMapper()(rect).left - 3
-            const viewOffset = this.#getViewOffset(this.#primaryIndex)
+            // rect is local to the anchor's own view: mirror it through that
+            // view's size, not every mounted view's (readest#7555), and add
+            // that view's offset to get container coordinates.
+            const localOffset = this.#getRectMapper(owner?.view ?? this.#primaryView)(rect).left - 3
+            const viewOffset = this.#getViewOffset(owner?.index ?? this.#primaryIndex)
             return this.#scrollTo(viewOffset + localOffset, reason)
         }
         // rect is in iframe-local coordinates. Convert to container
@@ -3763,7 +3772,7 @@ export class Paginator extends HTMLElement {
             if (!rect) return this.scrolled
                 ? this.#scrollTo(this.#getViewOffset(this.#primaryIndex), reason)
                 : this.#scrollToPage(this.#getPagesBeforeView(this.#primaryIndex), reason)
-            await this.#scrollToRect(rect, reason)
+            await this.#scrollToRect(rect, reason, this.#viewOfAnchor(anchor))
             // focus the element when navigating with keyboard or screen reader
             if (reason === 'navigation' && !isTypingOutside()) {
                 let node = anchor.focus ? anchor : undefined
