@@ -2055,8 +2055,11 @@ export class Paginator extends HTMLElement {
     // which left detecting the primary view to the debounced scroll listener.
     #anchorRelocatedAt = null
     // The reason of a page turn's relocate that waits for the turned page to
-    // paint (#scrollTo); #flushRelocate runs it early when needed.
+    // paint (#scrollTo), or of a section's first display (#display);
+    // #flushRelocate runs it early when needed.
     #turnRelocate = null
+    // Set while #display scrolls to its anchor: the relocate waits.
+    #revealing = false
     // What #paintPaginatedBackground last painted, to skip painting it again.
     #paintedBackground = null
     #scrollLocked = false
@@ -4778,6 +4781,11 @@ export class Paginator extends HTMLElement {
             && Math.abs(this.containerPosition - this.#anchorRelocatedAt) < 1
     }
     #afterScroll(reason) {
+        // A section's first display relocates once its page is painted (#display)
+        if (this.#revealing) {
+            this.#turnRelocate = reason
+            return
+        }
         this.#relocatedAt = this.#anchorRelocatedAt = null
         // In multi-view, detect which section is primary
         if (this.#views.size > 1 && reason !== 'anchor' && reason !== 'navigation') {
@@ -4931,10 +4939,26 @@ export class Paginator extends HTMLElement {
         if (count !== this.#goToCount) return
         const resolvedAnchor = (typeof anchor === 'function'
             ? anchor(primaryView.document) : anchor) ?? 0
-        await this.#scrollToAnchor(resolvedAnchor, select ? 'selection' : 'navigation', false, focus)
+        // Show the page before measuring it, as a page turn does: the visible
+        // range, its CFI and the host's relocate handlers change nothing on
+        // it, and they take a few hundred ms on a Kindle.
+        this.#revealing = true
+        try {
+            await this.#scrollToAnchor(resolvedAnchor, select ? 'selection' : 'navigation', false, focus)
+        } finally {
+            this.#revealing = false
+        }
         if (hasFocus && this.#bookMayTakeFocus()) this.focusView()
         // Reveal content now that primary section is positioned
+        if (!this.scrolled && this.#turnRelocate != null) this.#replaceBackground()
         this.#container.style.opacity = '1'
+        if (this.#turnRelocate != null) {
+            await yieldToFrame()
+            // (a navigation meanwhile has run it already)
+            this.#flushRelocate()
+            // a later jump took over while the page painted: it goes on from here
+            if (count !== this.#goToCount) return
+        }
         this.#rendered = true
         // Emit stabilized so listeners can react, but keep #stabilizing
         // true until fill completes to prevent the debounced scroll
