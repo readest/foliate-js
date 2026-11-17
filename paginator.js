@@ -4147,6 +4147,14 @@ export class Paginator extends HTMLElement {
                 this.#applyStyles(doc)
                 await yieldToFrame()
                 if (this.#views.get(index) !== view || view.document !== doc) return
+                // A section in the other writing mode can't sit beside the primary one.
+                // Drop it before host listeners read its direction as the book's.
+                const { vertical } = getDirection(doc)
+                this.#directionCache.set(index, vertical)
+                if (vertical !== this.#vertical) {
+                    this.#destroyView(index)
+                    return
+                }
                 this.dispatchEvent(new CustomEvent('load',
                     { detail: { doc, index: this.#spineOf(index) } }))
             }
@@ -4179,17 +4187,6 @@ export class Paginator extends HTMLElement {
             if (!view.document?.documentElement || !view.document.body) {
                 this.#destroyView(index)
                 return
-            }
-            // Cache direction for future preload boundary checks
-            if (view.document) {
-                const dir = getDirection(view.document)
-                this.#directionCache.set(index, dir.vertical)
-                // Destroy views with a different writing-mode immediately.
-                // Mixed-direction views corrupt scroll/page calculations.
-                if (dir.vertical !== this.#vertical) {
-                    this.#destroyView(index)
-                    return
-                }
             }
             // Keep the previously visible content anchored: the new view added
             // `addedSize` px above it, so the scroll position must grow by the
