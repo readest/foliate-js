@@ -244,8 +244,12 @@ export class FootnoteHandler extends EventTarget {
         }
         else if (this.detectFootnotes && (maybe() || check)) {
             e.preventDefault()
+            // `check` guards a link the caller guessed is a note reference.
+            // A superscript marker confirms it on its own, and checking it
+            // would reject a note body with rich formatting.
+            const strict = check && !maybe()
             return Promise.resolve(book.resolveHref(href)).then(({ index, anchor }) => {
-                const target = { index, anchor: doc => extractFootnote(doc, anchor), check }
+                const target = { index, anchor: doc => extractFootnote(doc, anchor), check: strict }
                 return this.#showFragment(book, target, href)
             })
         }
