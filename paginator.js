@@ -3556,13 +3556,7 @@ export class Paginator extends HTMLElement {
         if (this.scrolled) {
             // rect is in iframe-local coordinates; add view offset
             // to convert to container scroll coordinates
-            // The `- 3` keeps a hairline of the previous column from peeking
-            // in at the edge, but at a section start it would leave a 3px
-            // residue that `#scrollPrev` reads as "there is still something to
-            // rewind": the first turn back at a chapter head would spend
-            // itself on those 3px instead of crossing into the previous
-            // section. Clamp at the origin.
-            const localOffset = Math.max(0, this.#getRectMapper()(rect).left - 3)
+            const localOffset = this.#getRectMapper()(rect).left - 3
             const viewOffset = this.#getViewOffset(this.#primaryIndex)
             return this.#scrollTo(viewOffset + localOffset, reason)
         }
