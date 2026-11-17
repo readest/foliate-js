@@ -951,11 +951,8 @@ class View {
         const sidePaddingLeft = marginLeft / 2 + gap / 2
         const sidePaddingRight = marginRight / 2 + gap / 2
         setStyles(doc.documentElement, {
-            // Vertical text keeps the left/right margins as the block-axis page
-            // margins, exactly as `columnize` does: the strip scrolls along the
-            // block axis, so the section's first and last lines are the only
-            // place they can show, and without them every section head is glued
-            // to the container edge no matter what the reader sets.
+            // The strip scrolls along a vertical section's block axis, so its
+            // side margins can only show before its first and after its last line.
             'padding': vertical
                 ? `${marginTop * 1.5}px ${marginRight}px ${marginBottom * 1.5}px ${marginLeft}px`
                 : `0px ${sidePaddingRight}px 0px ${sidePaddingLeft}px`,
