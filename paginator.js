@@ -1585,8 +1585,11 @@ export class Paginator extends HTMLElement {
     // which left detecting the primary view to the debounced scroll listener.
     #anchoredAt = null
     // The reason of a page turn's relocate that waits for the turned page to
-    // paint (#scrollTo); #flushRelocate runs it early when needed.
+    // paint (#scrollTo), or of a section's first display (#display);
+    // #flushRelocate runs it early when needed.
     #pendingRelocate = null
+    // Set while #display scrolls to its anchor: the relocate waits.
+    #revealing = false
     // What #paintPaginatedBackground last painted, to skip painting it again.
     #paintedBackground = null
     #scrollLocked = false
@@ -3885,6 +3888,11 @@ export class Paginator extends HTMLElement {
             && Math.abs(this.containerPosition - this.#anchoredAt) < 1
     }
     #afterScroll(reason) {
+        // A section's first display relocates once its page is painted (#display)
+        if (this.#revealing) {
+            this.#pendingRelocate = reason
+            return
+        }
         this.#relocatedAt = this.#anchoredAt = null
         // In multi-view, detect which section is primary
         if (this.#views.size > 1 && reason !== 'anchor' && reason !== 'navigation') {
@@ -4020,10 +4028,24 @@ export class Paginator extends HTMLElement {
         }
         const resolvedAnchor = (typeof anchor === 'function'
             ? anchor(primaryView.document) : anchor) ?? 0
-        await this.scrollToAnchor(resolvedAnchor, select)
+        // Show the page before measuring it, as a page turn does: the visible
+        // range, its CFI and the host's relocate handlers change nothing on
+        // it, and they take a few hundred ms on a Kindle.
+        this.#revealing = true
+        try {
+            await this.scrollToAnchor(resolvedAnchor, select)
+        } finally {
+            this.#revealing = false
+        }
         if (hasFocus && !isTypingOutside()) this.focusView()
         // Reveal content now that primary section is positioned
+        if (!this.scrolled && this.#pendingRelocate != null) this.#replaceBackground()
         this.#container.style.opacity = '1'
+        if (this.#pendingRelocate != null) {
+            await yieldToFrame()
+            // (a navigation meanwhile has run it already)
+            this.#flushRelocate()
+        }
         this.#rendered = true
         // Emit stabilized so listeners can react, but keep #stabilizing
         // true until fill completes to prevent the debounced scroll
