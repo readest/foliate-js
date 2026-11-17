@@ -1539,6 +1539,10 @@ export class Paginator extends HTMLElement {
     #header
     #footer
     #views = new Map() // Map<sectionIndex, View>
+    // Last measured size of each view along the scroll axis, so a section that
+    // grows after it is already in the strip can be told apart from one that
+    // has just been inserted at its final size.
+    #viewSizes = new Map()
     #primaryIndex = -1
     // Internally `index` is a render unit: a whole section, or one chunk of a
     // section too big to render whole. Spine indices only cross the public API.
@@ -2105,9 +2109,17 @@ export class Paginator extends HTMLElement {
                 // The primary view, or one before it, reflowed: what the
                 // last relocate measured may no longer be on the page.
                 if (index <= this.#primaryIndex) this.#relocatedAt = null
+                if (this.scrolled) {
+                    // A section that grew after it was already in the strip
+                    // slides the reader's text along the scroll axis. Fold the
+                    // growth into the offset before the frame paints, the same
+                    // way the insertion itself does below.
+                    this.#keepReadingPositionOnStripChange(index, false)
+                    return
+                }
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
-                if (this.#filling || this.#stabilizing || this.scrolled) return
+                if (this.#filling || this.#stabilizing) return
                 if (this.#primaryIndex === index)
                     this.#scrollToAnchor(this.#anchor)
             },
@@ -2118,8 +2130,37 @@ export class Paginator extends HTMLElement {
         const nextEntry = sorted[myPos + 1]
         if (nextEntry) this.#container.insertBefore(view.element, nextEntry[1].element)
         else this.#container.append(view.element)
+        // Compensate now, not after the section has loaded: the element takes
+        // its place in the strip (at the default page width) before the
+        // section's own layout arrives, and the frame in between gets painted.
+        // Correcting only after `load` resolved showed as the text jumping a
+        // whole section-width away and back on every preload — the "screen
+        // jumping around" a continuously scrolled vertical book produced when
+        // it restored a chapter head and then buffered the chapters behind it.
+        this.#keepReadingPositionOnStripChange(index, true)
         this.#syncA11y()
         return view
+    }
+    // Scrolled mode lays every loaded section out in one strip, so a section
+    // that changes size *before* the primary view slides everything from there
+    // on along the scroll axis while the container offset stands still: the
+    // text the reader is looking at ends up somewhere else. The browser only
+    // anchors the block axis, and not at all at the scroll origin, so fold the
+    // change into the offset here. A view at or after the primary moves nothing
+    // the reader can see, and neither does anything while the book is paginated.
+    #keepReadingPositionOnStripChange(index, inserted) {
+        if (!this.scrolled || !this.#views.has(this.#primaryIndex)) return
+        const view = this.#views.get(index)
+        if (!view) return
+        const size = view.element.getBoundingClientRect()[this.sideProp]
+        const previous = this.#viewSizes.get(index)
+        this.#viewSizes.set(index, size)
+        if (index >= this.#primaryIndex) return
+        // A view that has just been inserted adds its whole width in front of
+        // the primary; one that was already there only adds the growth.
+        const delta = inserted ? size : previous == null ? 0 : size - previous
+        if (Math.abs(delta) > 0.5)
+            this.containerPosition += (this.#vertical ? -1 : 1) * delta
     }
     // Hide off-screen pre-loaded views from the accessibility tree so
     // screen-reader swipe-next does not wander into them (which would land
@@ -2146,9 +2187,26 @@ export class Paginator extends HTMLElement {
     #destroyView(index) {
         const view = this.#views.get(index)
         if (!view) return
+        // Scrolled mode lays every loaded section out in one strip, so dropping
+        // a view that sits *before* the primary pulls the content the reader is
+        // looking at towards the viewport start while the scroll offset stays
+        // put: they end up that far from the text they were on. Scroll
+        // anchoring does not cover it (it is suppressed at the scroll origin,
+        // and the removal happens while #filling is set). Re-anchor instead of
+        // adding the removed width back: the logical anchor is what the
+        // viewport is supposed to sit on, and after a restore it may still be
+        // unsatisfied — the padding-shift arithmetic would then preserve the
+        // pre-restore position and cement the drift rather than undo it.
+        // A view at or after the primary moves nothing the reader is looking
+        // at; so does a removal that takes the primary with it, where the
+        // caller repositions afterwards.
+        const reanchor = this.scrolled && index < this.#primaryIndex
+            && this.#views.has(this.#primaryIndex)
         view.destroy()
         this.#container.removeChild(view.element)
         this.#views.delete(index)
+        this.#viewSizes.delete(index)
+        if (reanchor) this.#scrollToAnchor(this.#anchor)
         this.#padLastPage()
         this.sections[index]?.unload?.()
     }
@@ -4123,10 +4181,14 @@ export class Paginator extends HTMLElement {
             const view = this.#createView(index)
             const compensatePrepend = () => {
                 if (!isPrepend) return
+                // The insertion itself was already compensated by #createView;
+                // what is left is the growth from the placeholder width to the
+                // section's real one.
                 const addedSize = view.element.getBoundingClientRect()[this.sideProp]
                 const correction = startBefore + addedSize - this.#renderedStart
                 if (Math.abs(correction) > 0.5)
                     this.containerPosition += (this.#vertical ? -1 : 1) * correction
+                this.#viewSizes.set(index, addedSize)
             }
             // The empty view is already viewport-sized. Anchor its insertion
             // before yielding to the iframe load, or the placeholder paints a
