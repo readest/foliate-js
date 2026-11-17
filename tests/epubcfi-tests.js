@@ -255,3 +255,16 @@ const XHTML = str => parser.parseFromString(str, 'application/xhtml+xml')
         console.assert(a === text, `expected ${text}, got ${a}`)
     }
 }
+
+{
+    // a range that starts before a cfi-skip wrapper, which has no step of its own
+    const page = XHTML(`<html xmlns="http://www.w3.org/1999/xhtml"><head><title></title></head><body>
+<p>Alpha <b>bravo</b><span cfi-skip="">charlie</span> delta</p>
+</body></html>`)
+    const p = page.querySelector('p')
+    const range = page.createRange()
+    range.setStart(p, 2)
+    range.setEnd(page.querySelector('span').firstChild, 7)
+    const a = CFI.toRange(page, CFI.parse(CFI.fromRange(range))).toString()
+    console.assert(a === 'charlie', `expected charlie, got ${a}`)
+}

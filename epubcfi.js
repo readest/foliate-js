@@ -327,12 +327,15 @@ const endInsideChild = (node, offset) => {
 // an inline element as (parent, i), and its highlight was drawn from the start
 // of the paragraph (readest/readest#7482). Move such a start to the start of
 // the child after it, or into the child before it when there is none. A start
-// at (element, 0) already reads back as itself.
+// at (element, 0) already reads back as itself. A cfi-skip wrapper has no step
+// of its own, so a start on one moves to the start of its first child.
 const startInsideChild = (node, offset) => {
     if (!isElementNode(node) || offset === 0) return [node, offset]
-    const next = node.childNodes[offset]
-    if ((isTextNode(next) || isElementNode(next)) && !isInertNode(next)) return [next, 0]
-    return endInsideChild(node, offset)
+    const isContent = x => (isTextNode(x) || isElementNode(x)) && !isInertNode(x)
+    let next = node.childNodes[offset]
+    if (!isContent(next)) return endInsideChild(node, offset)
+    while (isSkipNode(next) && isContent(next.firstChild)) next = next.firstChild
+    return [next, 0]
 }
 
 export const fromRange = (range, filter) => {
