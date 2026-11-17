@@ -951,8 +951,10 @@ class View {
         const sidePaddingLeft = marginLeft / 2 + gap / 2
         const sidePaddingRight = marginRight / 2 + gap / 2
         setStyles(doc.documentElement, {
+            // The strip scrolls along a vertical section's block axis, so its
+            // side margins can only show before its first and after its last line.
             'padding': vertical
-                ? `${marginTop * 1.5}px 0px ${marginBottom * 1.5}px 0px`
+                ? `${marginTop * 1.5}px ${marginRight}px ${marginBottom * 1.5}px ${marginLeft}px`
                 : `0px ${sidePaddingRight}px 0px ${sidePaddingLeft}px`,
             '--page-margin-top': `${vertical ? marginTop * 1.5 : marginTop}px`,
             '--page-margin-right': `${vertical ? marginRight : sidePaddingRight}px`,
@@ -1552,6 +1554,7 @@ export class Paginator extends HTMLElement {
     #rtl = false
     #marginTop = 0
     #marginBottom = 0
+    #marginRight = 0
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
     #justAnchored = false
     #locked = false // while true, prevent any further navigation
@@ -2341,6 +2344,7 @@ export class Paginator extends HTMLElement {
         const marginLeft = parseFloat(style.getPropertyValue('--_margin-left'))
         this.#marginTop = marginTop
         this.#marginBottom = marginBottom
+        this.#marginRight = marginRight
 
         // Compute the column count from the host (Paginator) size rather than
         // the #container size. The container width depends on --_column-count
@@ -3526,9 +3530,13 @@ export class Paginator extends HTMLElement {
             const size = view ? view.element.getBoundingClientRect()[this.sideProp] : this.#renderedViewSize
             const marginTop = this.#marginTop
             const marginBottom = this.#marginBottom
+            // A vertical section starts after its right padding (see
+            // `scrolled()`). Shift both edges by it: a stretched rect would
+            // count text before an anchor as visible.
+            const marginRight = this.#marginRight
             return this.#vertical
                 ? ({ left, right }) =>
-                    ({ left: size - right - marginTop, right: size - left - marginBottom })
+                    ({ left: size - right - marginRight, right: size - left - marginRight })
                 : ({ top, bottom }) => ({ left: top - marginTop, right: bottom - marginBottom })
         }
         // For RTL the mapper mirrors a rect within the iframe-local
