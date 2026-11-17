@@ -3534,9 +3534,7 @@ export class Paginator extends HTMLElement {
                     ({ left: viewSize - right, right: viewSize - left })
                 : f => f
     }
-    // Which loaded view's document an anchor (element or range) belongs to.
-    // The vertical scrolled mapper mirrors a rect across that view's own
-    // inline size, so it needs the view rather than the whole container.
+    // The loaded view whose document holds an element or range anchor
     #viewOfAnchor(anchor) {
         const doc = (anchor?.startContainer ?? anchor)?.ownerDocument
         if (!doc) return null
@@ -3546,16 +3544,9 @@ export class Paginator extends HTMLElement {
     }
     async #scrollToRect(rect, reason, owner) {
         if (this.scrolled) {
-            // rect is in iframe-local coordinates of the view holding the
-            // anchor; add that view's offset to convert to container scroll
-            // coordinates.
-            // Mirror through that view's own inline size: without an explicit
-            // view the mapper falls back to #renderedViewSize, the sum of
-            // every mounted section, so in a vertical book with continuous
-            // scrolling a TOC jump overshoots the section start by
-            // `total - own width` px -- several chapters deep, or past the
-            // end of short ones. With one section mounted the two numbers
-            // coincide, which is why no-continuous-scroll looked fine.
+            // rect is local to the anchor's own view: mirror it through that
+            // view's size, not every mounted view's (readest#7555), and add
+            // that view's offset to get container coordinates.
             const localOffset = this.#getRectMapper(owner?.view ?? this.#primaryView)(rect).left - 3
             const viewOffset = this.#getViewOffset(owner?.index ?? this.#primaryIndex)
             return this.#scrollTo(viewOffset + localOffset, reason)
