@@ -234,3 +234,24 @@ const XHTML = str => parser.parseFromString(str, 'application/xhtml+xml')
         console.assert(x === c, `compare ${a} and ${b}, expected ${c}, got ${x}`)
     }
 }
+
+{
+    // a range that starts between an element's children (readest/readest#7482)
+    const page = XHTML(`<html xmlns="http://www.w3.org/1999/xhtml"><head><title></title></head><body>
+<p>Alpha <em>bravo <b>charlie</b></em> delta <img alt=""/> echo</p>
+</body></html>`)
+    const p = page.querySelector('p')
+    const [, em, tail] = p.childNodes
+    for (const [startNode, startOffset, endNode, endOffset, text] of [
+        [p, 2, tail, 6, ' delta'],         // after the <em>
+        [em, 2, tail, 6, ' delta'],        // after the <em>'s last child
+        [em.lastChild, 1, tail, 6, ' delta'], // after a nested element's text
+        [p, 3, p, 5, ' echo'],             // before the <img>
+    ]) {
+        const range = page.createRange()
+        range.setStart(startNode, startOffset)
+        range.setEnd(endNode, endOffset)
+        const a = CFI.toRange(page, CFI.parse(CFI.fromRange(range))).toString()
+        console.assert(a === text, `expected ${text}, got ${a}`)
+    }
+}
