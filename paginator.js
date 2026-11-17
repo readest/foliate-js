@@ -2149,7 +2149,9 @@ export class Paginator extends HTMLElement {
     // change into the offset here. A view at or after the primary moves nothing
     // the reader can see, and neither does anything while the book is paginated.
     #keepReadingPositionOnStripChange(index, inserted) {
-        if (!this.scrolled || !this.#views.has(this.#primaryIndex)) return
+        // Scroll anchoring already follows a horizontal strip (scrollTop);
+        // compensating there too moves the text twice.
+        if (!this.scrolled || !this.#vertical || !this.#views.has(this.#primaryIndex)) return
         const view = this.#views.get(index)
         if (!view) return
         const size = view.element.getBoundingClientRect()[this.sideProp]
@@ -2159,8 +2161,7 @@ export class Paginator extends HTMLElement {
         // A view that has just been inserted adds its whole width in front of
         // the primary; one that was already there only adds the growth.
         const delta = inserted ? size : previous == null ? 0 : size - previous
-        if (Math.abs(delta) > 0.5)
-            this.containerPosition += (this.#vertical ? -1 : 1) * delta
+        if (Math.abs(delta) > 0.5) this.containerPosition -= delta
     }
     // Hide off-screen pre-loaded views from the accessibility tree so
     // screen-reader swipe-next does not wander into them (which would land
