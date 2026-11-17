@@ -2187,26 +2187,17 @@ export class Paginator extends HTMLElement {
     #destroyView(index) {
         const view = this.#views.get(index)
         if (!view) return
-        // Scrolled mode lays every loaded section out in one strip, so dropping
-        // a view that sits *before* the primary pulls the content the reader is
-        // looking at towards the viewport start while the scroll offset stays
-        // put: they end up that far from the text they were on. Scroll
-        // anchoring does not cover it (it is suppressed at the scroll origin,
-        // and the removal happens while #filling is set). Re-anchor instead of
-        // adding the removed width back: the logical anchor is what the
-        // viewport is supposed to sit on, and after a restore it may still be
-        // unsatisfied — the padding-shift arithmetic would then preserve the
-        // pre-restore position and cement the drift rather than undo it.
-        // A view at or after the primary moves nothing the reader is looking
-        // at; so does a removal that takes the primary with it, where the
-        // caller repositions afterwards.
-        const reanchor = this.scrolled && index < this.#primaryIndex
+        // Dropping a view before the primary moves the text in view by its
+        // size, and scroll anchoring doesn't follow a vertical strip. Shift by
+        // that size rather than re-anchor: #anchor lags a scroll in progress.
+        const shift = this.scrolled && this.#vertical && index < this.#primaryIndex
             && this.#views.has(this.#primaryIndex)
+            ? view.element.getBoundingClientRect()[this.sideProp] : 0
         view.destroy()
         this.#container.removeChild(view.element)
         this.#views.delete(index)
         this.#viewSizes.delete(index)
-        if (reanchor) this.#scrollToAnchor(this.#anchor)
+        if (shift) this.containerPosition += shift
         this.#padLastPage()
         this.sections[index]?.unload?.()
     }
