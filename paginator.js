@@ -558,17 +558,34 @@ const getVisibleRange = (doc, start, end, mapRect) => {
     }
 
     // we're only interested in the first and last visible nodes
-    const from = nodes[0] ?? doc.body
+    let from = nodes[0] ?? doc.body
     const to = nodes[nodes.length - 1] ?? from
 
     // find the offset at which visibility changes
-    const startOffset = from.nodeType === 1 ? 0
-        : bisectNode(doc, from, (a, b) => {
+    const findStart = node => node.nodeType === 1 ? 0
+        : bisectNode(doc, node, (a, b) => {
             const p = mapRect(getBoundingClientRect(a))
             const q = mapRect(getBoundingClientRect(b))
             if (p.right < start && q.left > start) return 0
             return q.left > start ? -1 : 1
         })
+    let startOffset = findStart(from)
+    // A text node can pass the overlap test above with none of its characters
+    // in view: with no gap between columns, a line of the previous page ends on
+    // the page edge, or its hanging space runs past it. A range starting at its
+    // end anchors on the previous page (readest#7631), so when its last
+    // character ends before the page (within a pixel of layout rounding),
+    // start at the next visible node.
+    const endsBefore = node => {
+        const last = node.nodeValue.trimEnd().length
+        return last > 0 && mapRect(getBoundingClientRect(
+            makeRange(doc, node, last - 1, last))).right < start + 1
+    }
+    for (let i = 1; from.nodeType !== 1 && startOffset === from.nodeValue.length
+        && i < nodes.length && endsBefore(from); i++) {
+        from = nodes[i]
+        startOffset = findStart(from)
+    }
     const endOffset = to.nodeType === 1 ? 0
         : bisectNode(doc, to, (a, b) => {
             const p = mapRect(getBoundingClientRect(a))
