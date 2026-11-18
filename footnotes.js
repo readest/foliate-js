@@ -40,21 +40,20 @@ const getReferencedType = el => {
 }
 
 const isInline = 'a, span, sup, sub, em, strong, i, b, small, big'
+const isBlockWrapper = el => el?.matches(isInline)
+    && Array.from(el.children).some(child => !child.matches(isInline))
 const extractFootnote = (doc, anchor) => {
     let el = anchor(doc)
     const target = el
-    let outerInline = null
+    // an inline target can wrap a whole note's blocks
+    // (`<span id><div>54</div><p>…</p></span>`, FB2 converted to EPUB)
+    if (isBlockWrapper(target)) return target
     while (el.matches(isInline)) {
         const parent = el.parentElement
         if (!parent) break
-        outerInline = el
         el = parent
     }
     if (el === doc.body) {
-        // an inline element in the body can wrap a whole note's blocks
-        // (`<span id><div>54</div><p>…</p></span>`, FB2 converted to EPUB)
-        if (Array.from(outerInline?.children ?? []).some(child => !child.matches(isInline)))
-            return outerInline
         const sibling = target.nextElementSibling
         if (sibling && !sibling.matches(isInline)) return sibling
         throw new Error('Failed to extract footnote')
@@ -87,9 +86,23 @@ const hasLocalBacklink = (note, reference, section, targetHref) => {
 // with its reference's own number, followed by its text, confirms the
 // reference as a backlink would
 const isNumberedInlineNote = (note, reference) => {
-    if (!note.matches(isInline)) return false
+    if (!isBlockWrapper(note)) return false
     const number = reference?.textContent?.match(/[0-9０-９]+/)?.[0]
-    const match = note.textContent.trim()
+    // the number's block can end with no whitespace before the note's
+    // text, so put a space where the text moves to another block
+    const blockOf = node => {
+        let el = node.parentElement
+        while (el !== note && el.matches(isInline)) el = el.parentElement
+        return el
+    }
+    const walker = note.ownerDocument.createTreeWalker(note, 4 /* SHOW_TEXT */)
+    let text = '', lastBlock = null
+    while (walker.nextNode()) {
+        const block = blockOf(walker.currentNode)
+        text += (lastBlock && block !== lastBlock ? ' ' : '') + walker.currentNode.data
+        lastBlock = block
+    }
+    const match = text.trim()
         .match(/^[（(［[【]?\s*([0-9０-９]+)\s*[）)］\]】]?[.、．\s]+\S/)
     return !!number && match?.[1] === number
 }
