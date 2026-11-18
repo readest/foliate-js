@@ -97,12 +97,18 @@ const isInline = 'a, span, sup, sub, em, strong, i, b, small, big'
 const extractFootnote = (doc, anchor) => {
     let el = anchor(doc)
     const target = el
+    let outerInline = null
     while (el.matches(isInline)) {
         const parent = el.parentElement
         if (!parent) break
+        outerInline = el
         el = parent
     }
     if (el === doc.body) {
+        // an inline element in the body can wrap a whole note's blocks
+        // (`<span id><div>54</div><p>…</p></span>`, FB2 converted to EPUB)
+        if (Array.from(outerInline?.children ?? []).some(child => !child.matches(isInline)))
+            return outerInline
         const sibling = target.nextElementSibling
         if (sibling && !sibling.matches(isInline)) return sibling
         throw new Error('Failed to extract footnote')
@@ -129,6 +135,17 @@ const hasLocalBacklink = (note, reference, section, targetHref) => {
         const [path, fragment] = resolved.split('#')
         return path === targetPath && fragment && ids.includes(fragment)
     })
+}
+
+// An inline element wrapping a note's blocks (see extractFootnote) that opens
+// with its reference's own number, followed by its text, confirms the
+// reference as a backlink would
+const isNumberedInlineNote = (note, reference) => {
+    if (!note.matches(isInline)) return false
+    const number = reference?.textContent?.match(/[0-9０-９]+/)?.[0]
+    const match = note.textContent.trim()
+        .match(/^[（(［[【]?\s*([0-9０-９]+)\s*[）)］\]】]?[.、．\s]+\S/)
+    return !!number && match?.[1] === number
 }
 
 const isTextish = node => node?.nodeType === 3 || node?.nodeType === 4
@@ -255,7 +272,8 @@ export class FootnoteHandler extends EventTarget {
                             range = doc.createRange()
                             range.selectNodeContents(el.closest('.note'))
                         } else if (check && el.children.length > 3) {
-                            if (!hasLocalBacklink(el, reference, book.sections[index], href)) {
+                            if (!hasLocalBacklink(el, reference, book.sections[index], href)
+                                && !isNumberedInlineNote(el, reference)) {
                                 reject(new Error('Failed to locate footnote content'))
                                 return
                             }
@@ -263,7 +281,7 @@ export class FootnoteHandler extends EventTarget {
                             range.selectNode(el)
                         } else if (el.querySelector('a')) {
                             range = getFootnoteRange(doc, el)
-                        } else if (check) {
+                        } else if (check && !isNumberedInlineNote(el, reference)) {
                             reject(new Error('Failed to locate footnote content'))
                             return
                         } else {
