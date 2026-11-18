@@ -1651,6 +1651,9 @@ export class Paginator extends HTMLElement {
     // Target page offset of the turn a touch took over: a tap or a short drag
     // settles there instead of on the page the turn started from.
     #interruptedSnapTarget = null
+    // Bumped by every programmatic scroll, so a WebKit clamp re-apply from an
+    // earlier turn (startCssAnimateScroll) doesn't land on top of it.
+    #scrollGen = 0
     // Horizontal drag offset (px) applied to the views while a finger tracks
     // a page turn on a vertical book; consumed as the slide's start position
     // when the turn commits, or settled back to 0 when it doesn't.
@@ -3709,6 +3712,7 @@ export class Paginator extends HTMLElement {
         if (!anim) return null
         this.#activeScrollAnim = null
         anim.interruptId = ++this.#slideTurnId
+        anim.interruptGen = this.#scrollGen
         anim.interrupt(mode)
         this.#isAnimating = false
         this.#bgAnimContext = null
@@ -3748,6 +3752,7 @@ export class Paginator extends HTMLElement {
         }
         // Any other scroll supersedes a turn a touch froze.
         this.#interruptedSnapTarget = null
+        const gen = ++this.#scrollGen
         // Near-equality, not exact: on fractional device-pixel-ratio screens
         // (e.g. 2.75) the container scroll rests a sub-pixel off the page
         // offset, and an exact check made every same-page settle miss this
@@ -3866,8 +3871,9 @@ export class Paginator extends HTMLElement {
                 {
                     // Re-apply a clamped offset only while no newer turn has
                     // taken over since.
-                    shouldReapplyClamp: interrupted =>
-                        this.#slideTurnId === (interrupted ? anim.interruptId : id),
+                    shouldReapplyClamp: interrupted => interrupted
+                        ? this.#slideTurnId === anim.interruptId && this.#scrollGen === anim.interruptGen
+                        : this.#slideTurnId === id && this.#scrollGen === gen,
                 },
             )
             return this.#trackScrollAnim(anim, id, offset, reason)
@@ -4518,6 +4524,7 @@ export class Paginator extends HTMLElement {
         if (!section) return
         this.#interruptedSnapTarget = null
         this.#interruptScrollAnim('abort')
+        this.#scrollGen++
         // Check if the target section has a different writing-mode.
         // If direction changes, we must destroy all views and do a full
         // rebuild via #display — mixed-direction views cannot coexist.
