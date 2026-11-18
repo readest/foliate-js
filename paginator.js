@@ -3623,6 +3623,8 @@ export class Paginator extends HTMLElement {
         }
         if (state?.blocked) {
             this.#touchScrolled = false
+            // A second finger may have joined a touch that took over a turn.
+            this.#resumeInterruptedTurn()
             return
         }
 
