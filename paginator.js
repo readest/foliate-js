@@ -160,6 +160,7 @@ export const startCssAnimateScroll = (element, scrollProp, startValue, endValue,
 
         // Apply final (or interrupted on-screen) scroll position
         element[scrollProp] = targetPos
+        const landed = element[scrollProp]
         // Translating the children shrank the container's scrollable overflow
         // by the animated distance, and WebKit (iOS 18) still reports that
         // shrunken extent when the transforms are cleared in this same task —
@@ -167,14 +168,15 @@ export const startCssAnimateScroll = (element, scrollProp, startValue, endValue,
         // beyond the target and is invisible; on the last page of the book,
         // where the target *is* the maximum scroll offset, it lands a full page
         // short and the page visibly snaps back (readest#5663).
-        if (Math.abs(element[scrollProp] - targetPos) > 0.5) {
+        if (Math.abs(landed - targetPos) > 0.5) {
             // Forcing a layout here is not enough — the extent it reports is
             // restored, but the scroll clamp still uses the stale one for the
             // rest of the task. The next frame is past the compositor's
-            // animation teardown, so re-apply there.
+            // animation teardown, so re-apply there, keeping whatever a
+            // finger has dragged since.
             requestAnimationFrame(() => {
                 if (!shouldReapplyClamp || shouldReapplyClamp(interrupted))
-                    element[scrollProp] = targetPos
+                    element[scrollProp] = targetPos + (element[scrollProp] - landed)
                 resolve(interrupted)
             })
             return targetPos
@@ -3862,10 +3864,10 @@ export class Paginator extends HTMLElement {
                 300,
                 [],
                 {
-                    // Re-apply a clamped offset only while no touch or newer
-                    // turn has taken over since.
-                    shouldReapplyClamp: interrupted => !this.#touchScrolled
-                        && this.#slideTurnId === (interrupted ? anim.interruptId : id),
+                    // Re-apply a clamped offset only while no newer turn has
+                    // taken over since.
+                    shouldReapplyClamp: interrupted =>
+                        this.#slideTurnId === (interrupted ? anim.interruptId : id),
                 },
             )
             return this.#trackScrollAnim(anim, id, offset, reason)
