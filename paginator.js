@@ -813,6 +813,11 @@ class View {
     get contentPages() {
         return this.#contentPages
     }
+    // Whether the iframe shows the section this view loaded and laid out.
+    // Until then it holds its initial about:blank, then the incoming section.
+    get rendered() {
+        return this.#loadedDoc != null && this.document === this.#loadedDoc
+    }
     async load(src, data, afterLoad, beforeRender, waitForIdle) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
         return new Promise(resolve => {
@@ -1573,6 +1578,9 @@ export class Paginator extends HTMLElement {
     // the primary view: the container's debounced scroll listener then has
     // nothing left to do at that position.
     #relocatedAt = null
+    // A scroll that landed on a view still loading, with nothing to report
+    // there yet: `{ reason }`, relocated once that view renders.
+    #pendingRelocate = null
     #scrollLocked = false
     #subpixelOffset = 0
     #isAnimating = false
@@ -3879,12 +3887,18 @@ export class Paginator extends HTMLElement {
             const center = this.#renderedStart + this.size / 2
             let fallback
             let collapsed
+            let loading
             for (const [index, v] of this.#sortedViews) {
                 if (!v.document) continue
                 const off = this.#getViewOffset(index)
                 const vSize = v.element.getBoundingClientRect()[this.sideProp]
                 // Skip views entirely outside the viewport
                 if (off + vSize <= this.#renderedStart || off >= this.#renderedEnd) continue
+                // A view still loading shows nothing yet, but it will
+                if (!v.rendered) {
+                    loading ??= index
+                    continue
+                }
                 const range = getVisibleRange(v.document,
                     this.#renderedStart - off, this.#renderedEnd - off,
                     this.#getRectMapper(v))
@@ -3905,8 +3919,9 @@ export class Paginator extends HTMLElement {
                 if (coversCenter) return { range, index }
                 fallback ??= { range, index }
             }
-            return fallback ?? collapsed
+            return fallback ?? (loading != null ? { index: loading } : collapsed)
         }
+        if (!targetView.rendered) return { index: this.#primaryIndex }
         const range = getVisibleRange(targetView.document,
             this.#renderedStart - viewOffset,
             this.#renderedEnd - viewOffset,
@@ -4002,7 +4017,18 @@ export class Paginator extends HTMLElement {
             this.#syncA11y()
         }
         const { range, index: visibleIndex } = this.#getVisibleRange() || {}
-        if (!range) return
+        if (!range) {
+            // A turn or scroll can outrun a section's load onto its blank
+            // placeholder: relocate once it renders. Paginated, keep the
+            // reader at its start for any re-anchoring, as a navigation would.
+            if (visibleIndex != null) {
+                this.#pendingRelocate ??= { reason }
+                if (!this.scrolled && reason !== 'selection'
+                    && reason !== 'navigation' && reason !== 'anchor') this.#anchor = 0
+            }
+            return
+        }
+        this.#pendingRelocate = null
         this.#lastVisibleRange = range
         // Anchor and navigation relocates skip primary detection, which the
         // debounced scroll listener still provides.
@@ -4250,6 +4276,14 @@ export class Paginator extends HTMLElement {
                     attach: overlayer => view.overlayer = overlayer,
                 },
             }))
+            // A turn or scroll that outran a view's load relocates now.
+            // Scrolled, from where the reader is. Paginated, from the view's
+            // start: a page before it can show its first column, blank then.
+            if (this.#pendingRelocate) {
+                const { reason } = this.#pendingRelocate
+                if (this.scrolled) this.#afterScroll(reason)
+                else if (index === this.#primaryIndex) this.#scrollToAnchor(this.#anchor, reason)
+            }
         } catch (e) {
             console.warn(e)
             console.warn(new Error(`Failed to load adjacent section ${index}`))
