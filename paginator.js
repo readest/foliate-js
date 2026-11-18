@@ -4681,13 +4681,26 @@ export class Paginator extends HTMLElement {
     }
     setStyles(styles) {
         this.#styles = styles
+        // In scrolled mode onExpand leaves the scroll offset alone, so a
+        // restyle that reflows the text (a font size change) would keep the
+        // offset and lose the text in view. Re-anchor to it once reflowed.
+        const restyled = this.#primaryView
+        const visible = this.scrolled && restyled ? this.#getVisibleRange()?.range : null
+        const sizeBefore = visible ? restyled.element.getBoundingClientRect()[this.sideProp] : 0
+        const reflows = []
         for (const [, view] of this.#views) {
             if (!this.#styleMap.has(view.document)) continue
             this.#applyStyles(view.document)
 
             // needed because the resize observer doesn't work in Firefox
-            fontsReady(view.document).then(() => view.expand())
+            reflows.push(fontsReady(view.document).then(() => view.expand()))
         }
+        if (visible) Promise.all(reflows).then(() => {
+            if (!this.scrolled || this.#primaryView !== restyled
+                || !visible.startContainer.isConnected) return
+            const size = restyled.element.getBoundingClientRect()[this.sideProp]
+            if (Math.abs(size - sizeBefore) > 0.5) this.#scrollToAnchor(visible)
+        })
 
         // NOTE: needs `requestAnimationFrame` in Chromium
         const primaryView = this.#primaryView
