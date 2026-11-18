@@ -2178,11 +2178,14 @@ export class Paginator extends HTMLElement {
         const shift = this.scrolled && this.#vertical && index < this.#primaryIndex
             && this.#views.has(this.#primaryIndex)
             ? view.element.getBoundingClientRect()[this.sideProp] : 0
+        // Shift from the offset before the removal: at the strip end the
+        // browser clamps the offset to the shorter strip, which already moved it.
+        const position = shift ? this.containerPosition : 0
         view.destroy()
         this.#container.removeChild(view.element)
         this.#views.delete(index)
         this.#viewSizes.delete(index)
-        if (shift) this.containerPosition += shift
+        if (shift) this.containerPosition = position + shift
         this.#padLastPage()
         this.sections[index]?.unload?.()
     }
