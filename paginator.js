@@ -3716,10 +3716,10 @@ export class Paginator extends HTMLElement {
             const viewOffset = this.#getViewOffset(owner?.index ?? this.#primaryIndex)
             return this.#scrollTo(viewOffset + localOffset, reason)
         }
-        // rect is in iframe-local coordinates. Convert to container
-        // coordinates by adding the primary view's offset.
-        const localOffset = this.#getRectMapper()(rect).left
-        const viewOffset = this.#getViewOffset(this.#primaryIndex)
+        // rect is local to the anchor's own view (a focused element can sit in
+        // a preloaded neighbor): add that view's offset, not the primary's.
+        const localOffset = this.#getRectMapper(owner?.view)(rect).left
+        const viewOffset = this.#getViewOffset(owner?.index ?? this.#primaryIndex)
         const containerOffset = viewOffset + localOffset
         return this.#scrollToPage(Math.floor(containerOffset / this.size + 0.01), reason)
     }
@@ -3966,7 +3966,9 @@ export class Paginator extends HTMLElement {
     async scrollToAnchor(anchor, select, smooth) {
         return this.#scrollToAnchor(anchor, select ? 'selection' : 'navigation', smooth)
     }
-    async #scrollToAnchor(anchor, reason = 'anchor', smooth = false, focus = false) {
+    // `focus` is `{ from }`, the element that held focus when the navigation
+    // began, or null to leave focus alone.
+    async #scrollToAnchor(anchor, reason = 'anchor', smooth = false, focus = null) {
         this.#anchor = anchor
         const rects = uncollapse(anchor)?.getClientRects?.()
         // if anchor is an element or a range
@@ -3986,8 +3988,9 @@ export class Paginator extends HTMLElement {
                 : this.#scrollToPage(this.#getPagesBeforeView(this.#primaryIndex), reason)
             await this.#scrollToRect(rect, reason, this.#viewOfAnchor(anchor))
             // focus the destination of a navigation the user asked for, so
-            // keyboard and screen-reader users land there
-            if (focus) {
+            // keyboard and screen-reader users land there, unless they moved
+            // focus somewhere else while it loaded
+            if (focus && (document.activeElement === focus.from || this.#bookMayTakeFocus())) {
                 let node = anchor.focus ? anchor : undefined
                 if (!node && anchor.startContainer) {
                     node = anchor.startContainer
@@ -4538,7 +4541,8 @@ export class Paginator extends HTMLElement {
     #canGoToIndex(index) {
         return index >= 0 && index <= this.sections.length - 1
     }
-    async #goTo({ index, anchor, select, focus }) {
+    async #goTo({ index, anchor, select, focus: wantsFocus }) {
+        const focus = wantsFocus ? { from: document.activeElement } : null
         if (this.#pagePreview) await this.#pagePreview
         const section = this.sections[index]
         if (!section) return
