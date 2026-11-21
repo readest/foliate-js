@@ -4018,14 +4018,23 @@ export class Paginator extends HTMLElement {
     // Focus the destination of a navigation the user asked for, so keyboard
     // and screen-reader users land there, unless they moved focus somewhere
     // else while it loaded. Without an element or range (a TOC entry for a
-    // section's start), the destination is where the page now starts.
+    // section's start), the destination is where the target section's
+    // visible part starts, even when a short section leaves the viewport's
+    // centre to the next one.
     #focusDestination(focus, anchor) {
         if (!focus || (document.activeElement !== focus.from && !this.#bookMayTakeFocus())) return
-        let node = anchor?.focus ? anchor
-            : (anchor?.startContainer ?? this.#getVisibleRange()?.range?.startContainer)
+        let node = anchor?.focus ? anchor : anchor?.startContainer
+        if (!node) {
+            const view = this.#primaryView
+            const offset = this.#getViewOffset(this.#primaryIndex)
+            node = view?.document && getVisibleRange(view.document,
+                this.#renderedStart - offset, this.#renderedEnd - offset,
+                this.#getRectMapper(view))?.startContainer
+        }
         if (node?.nodeType === Node.TEXT_NODE) node = node.parentElement
         if (!node?.focus) return
-        node.tabIndex = -1
+        // a link or button keeps its place in the tab order
+        if (node.tabIndex < 0) node.tabIndex = -1
         node.style.outline = 'none'
         node.focus({ preventScroll: true })
     }
