@@ -6,6 +6,8 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 // (readest#1711): one huge document takes minutes to lay out and paint.
 const CHUNK_THRESHOLD = 512 * 1024
 const CHUNK_SIZE = 256 * 1024
+// Marks the empty blocks that move a page break to the next spread
+const SPREAD_SPACER = 'data-foliate-spread-spacer'
 const SECTION_SWIPE_DISTANCE = 48
 // Finger travel past a single-section boundary before the next chapter loads.
 const SECTION_PULL_SLOP = 8
@@ -837,10 +839,13 @@ class View {
     #layout = {}
     #contentPages = 0
     #bgImageSize = null
+    #breakTargets = []
     fontReady = Promise.resolve()
-    constructor({ container, onExpand }) {
+    constructor({ container, onExpand, continued }) {
         this.container = container
         this.onExpand = onExpand
+        // Whether the next view continues this section (a chunk of a huge one)
+        this.continued = continued
         this.#iframe.setAttribute('part', 'filter')
         this.#element.append(this.#iframe)
         Object.assign(this.#element.style, {
@@ -1144,7 +1149,106 @@ class View {
         })
         this.setImageSize(availableWidth, availableHeight)
         this.#demoteUnfragmentableBoxes(availableHeight)
+        this.#breakTargets = this.#columnCount > 1 ? this.#findBreakTargets() : []
+        if (this.#columnCount === 1)
+            for (const spacer of doc.querySelectorAll(`[${SPREAD_SPACER}]`)) spacer.remove()
         this.expand()
+    }
+    // The blocks a forced column break puts at the start of a page: those that
+    // break before themselves, and those after one that breaks after itself.
+    #findBreakTargets() {
+        const doc = this.document
+        const view = doc.defaultView
+        const isBlock = el => {
+            const { display, position, float } = view.getComputedStyle(el)
+            return /^(block|flex|grid|table|list-item|flow-root)/.test(display)
+                && float === 'none' && (position === 'static' || position === 'relative')
+        }
+        // Only the elements a rule or a style attribute can give a break:
+        // computing the style of every element takes ~20 ms in a big section
+        const selectors = ['[style*="break" i]']
+        const visit = rules => {
+            for (const rule of rules) {
+                if (rule.styleSheet) visit(rule.styleSheet.cssRules)
+                else if (rule.cssRules && !rule.selectorText) visit(rule.cssRules)
+                else if (rule.style?.breakBefore === 'column' || rule.style?.breakAfter === 'column')
+                    selectors.push(rule.selectorText)
+            }
+        }
+        for (const sheet of doc.styleSheets) {
+            try { visit(sheet.cssRules) } catch { /* cross-origin sheet */ }
+        }
+        const candidates = new Set()
+        for (const selector of selectors) {
+            // a pseudo-element selector, say, matches no element
+            try { for (const el of doc.body.querySelectorAll(selector)) candidates.add(el) } catch {}
+        }
+        const targets = new Set()
+        for (const el of candidates) {
+            if (el.hasAttribute(SPREAD_SPACER)) continue
+            const { breakBefore, breakAfter } = view.getComputedStyle(el)
+            if (breakBefore === 'column' && isBlock(el)) targets.add(el)
+            if (breakAfter !== 'column' || !isBlock(el)) continue
+            let node = el
+            while (node !== doc.body && !node.nextElementSibling) node = node.parentElement
+            let next = node === doc.body ? null : node.nextElementSibling
+            while (next?.hasAttribute(SPREAD_SPACER)) next = next.nextElementSibling
+            if (next && isBlock(next)) targets.add(next)
+        }
+        // Several selectors' matches, and the targets after breaks, come out
+        // of document order
+        return [...targets].sort((a, b) =>
+            a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
+    }
+    // In a spread, a forced break starts the next spread rather than the next
+    // page, as facing pages do in print (readest#6873): a block it would put on
+    // a later page of a spread gets empty pages before it, one spacer each.
+    // Spacers are invisible to CFIs. Runs on every expand, and leaves the
+    // document alone once each target starts a spread.
+    #alignBreakTargets(columnSize) {
+        const doc = this.document
+        const root = doc.documentElement
+        const pageOf = el => {
+            const rect = el.getClientRects()[0]
+            if (!rect) return null
+            const rootRect = root.getBoundingClientRect()
+            const offset = this.#vertical ? rect.top - rootRect.top
+                : this.#rtl ? rootRect.right - rect.right : rect.left - rootRect.left
+            return Math.floor(offset * this.#zoom / columnSize + 0.01)
+        }
+        const spacersBefore = el => {
+            const spacers = []
+            for (let s = el.previousElementSibling; s?.hasAttribute(SPREAD_SPACER);
+                s = s.previousElementSibling) spacers.push(s)
+            return spacers
+        }
+        for (const el of this.#breakTargets) {
+            if (!el.isConnected) continue
+            const page = pageOf(el)
+            if (page == null) continue
+            const spacers = spacersBefore(el)
+            const unpadded = page - spacers.length
+            const needed = (this.#columnCount - unpadded % this.#columnCount) % this.#columnCount
+            if (needed === spacers.length) continue
+            for (const spacer of spacers.slice(needed)) spacer.remove()
+            for (let i = spacers.length; i < needed; i++) {
+                const spacer = doc.createElement('div')
+                spacer.setAttribute(SPREAD_SPACER, '')
+                spacer.setAttribute('cfi-inert', '')
+                spacer.setAttribute('aria-hidden', 'true')
+                setStylesImportant(spacer, {
+                    'display': 'block', 'height': '0', 'margin': '0', 'padding': '0',
+                    'border': '0', 'break-before': 'column', 'break-after': 'column',
+                })
+                el.before(spacer)
+            }
+            // A break that doesn't move the block (inside a flex or grid box,
+            // say) can't be padded
+            if (pageOf(el) !== unpadded + needed) {
+                for (const spacer of spacersBefore(el)) spacer.remove()
+                this.#breakTargets = this.#breakTargets.filter(t => t !== el)
+            }
+        }
     }
     // Atomic inline-level boxes (inline-block / inline-flex / inline-grid /
     // inline-table) cannot be fragmented across columns. When an EPUB declares
@@ -1319,6 +1423,8 @@ class View {
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
             const otherSide = this.#vertical ? 'width' : 'height'
+            const columnSize = this.#size / this.#columnCount
+            if (this.#breakTargets.length) this.#alignBreakTargets(columnSize)
             const contentRect = this.#contentRange.getBoundingClientRect()
             const rootRect = documentElement.getBoundingClientRect()
             // offset caused by column break at the start of the page
@@ -1326,13 +1432,13 @@ class View {
             const contentStart = this.#vertical ? 0
                 : this.#rtl ? rootRect.right - contentRect.right : contentRect.left - rootRect.left
             const contentSize = (contentStart + contentRect[side]) * this.#zoom
-            // Size content by individual columns, not full spreads.
-            // This allows adjacent sections to share a spread when a
-            // section doesn't fill all available columns.
-            const columnSize = this.#size / this.#columnCount
             const pageCount = Math.ceil(contentSize / columnSize)
             this.#contentPages = pageCount
-            const expandedSize = pageCount * columnSize
+            // A section fills whole spreads, so the next one starts a spread
+            // (readest#6873). A chunk of a huge section is sized by columns:
+            // the next chunk continues beside it.
+            const expandedSize = (this.continued?.() ? pageCount
+                : Math.ceil(pageCount / this.#columnCount) * this.#columnCount) * columnSize
             this.#element.style.padding = '0'
             this.#iframe.style[side] = `${expandedSize}px`
             this.#element.style[side] = `${expandedSize}px`
@@ -2187,6 +2293,14 @@ export class Paginator extends HTMLElement {
             if (doc && view.document === doc) return { ...target, index: i }
         return { ...target, index: unit }
     }
+    // Whether a later chunk of the same section has something to show
+    #continuesSection(index) {
+        const { spine, chunk, count } = this.#units[index] ?? {}
+        if (!(chunk < count - 1)) return false
+        const split = this.#splits.get(spine)
+        for (let c = chunk + 1; c < count; c++) if (!split?.isEmpty(c)) return true
+        return false
+    }
     #createView(index) {
         // Destroy existing view for this index if any
         const existing = this.#views.get(index)
@@ -2197,6 +2311,7 @@ export class Paginator extends HTMLElement {
         }
         const view = new View({
             container: this,
+            continued: () => this.#continuesSection(index),
             onExpand: () => {
                 this.#padLastPage()
                 // The primary view, or one before it, reflowed: what the
@@ -2658,10 +2773,10 @@ export class Paginator extends HTMLElement {
         // rounding, which can leave a half page a hair under half (readest#7303).
         return Math.ceil(this.#renderedViewSize / this.size - 0.01)
     }
-    // Sections are sized by columns so the next one can start beside the
-    // previous one's end, which leaves the book's last section ending partway
-    // into a page. Pad the views to whole pages, or the browser clamps the
-    // turn to the last page short of it (readest#7303).
+    // A chunk of a huge section is sized by columns so the next chunk can
+    // start beside its end, so the loaded views can end partway into a page.
+    // Pad them to whole pages, or the browser clamps the turn to the last page
+    // short of it (readest#7303).
     #padLastPage() {
         const padding = this.scrolled || !this.size ? 0
             : this.#renderedPages * this.size - this.#renderedViewSize
