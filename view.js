@@ -236,9 +236,10 @@ export class View extends HTMLElement {
     history = new History()
     constructor() {
         super()
-        this.history.addEventListener('popstate', ({ detail }) => {
-            const resolved = this.resolveNavigation(detail.state)
-            this.renderer.goTo(resolved)
+        this.history.addEventListener('popstate', async ({ detail }) => {
+            // a book can resolve a target asynchronously (KF8's resolveHref)
+            const resolved = await this.resolveNavigation(detail.state)
+            this.renderer.goTo({ ...resolved, focus: true })
         })
     }
     async open(book) {
@@ -383,7 +384,7 @@ export class View extends HTMLElement {
                     }
                 }
                 Promise.resolve(this.#emit('link', { a, href: internalHref }, true))
-                    .then(x => x ? this.goTo(internalHref) : null)
+                    .then(x => x ? this.goTo(internalHref, { focus: true }) : null)
                     .catch(e => console.error(e))
             }
         })
@@ -534,10 +535,14 @@ export class View extends HTMLElement {
             console.error(`Could not resolve target ${target}`)
         }
     }
-    async goTo(target) {
-        const resolved = this.resolveNavigation(target)
+    // `focus` moves focus to the destination: pass it for a navigation the
+    // user asked for (a TOC entry, a link), never for one that runs on its own
+    // (restoring the reading position, sync, read aloud).
+    async goTo(target, { focus = false } = {}) {
         try {
-            await this.renderer.goTo(resolved)
+            // a book can resolve a target asynchronously (KF8's resolveHref)
+            const resolved = await this.resolveNavigation(target)
+            await this.renderer.goTo(focus ? { ...resolved, focus } : resolved)
             this.history.pushState(target)
             return resolved
         } catch(e) {
