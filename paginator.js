@@ -1646,6 +1646,8 @@ export class Paginator extends HTMLElement {
     #touchScrolled
     #singleSectionTurnPending = false
     #lastVisibleRange
+    // Container position #lastVisibleRange was measured at
+    #visibleRangeAt = null
     // Container position the last #afterScroll measured, if it also detected
     // the primary view: the container's debounced scroll listener then has
     // nothing left to do at that position.
@@ -2018,12 +2020,18 @@ export class Paginator extends HTMLElement {
                     this.#scrollToAnchor(selRange)
                 }
             })
+            // Focusing an element on another page (Tab, a screen reader)
+            // scrolls the container to wherever the element sits, between
+            // pages. Turn to its page instead. Focus that scrolled nothing,
+            // such as the window becoming active again, stays put.
             doc.addEventListener('focusin', e => {
-                if (this.scrolled) return null
-                if (this.#container && this.#container.contains(e.target)) {
-                    // NOTE: `requestAnimationFrame` is needed in WebKit
-                    requestAnimationFrame(() => this.#scrollToAnchor(e.target))
-                }
+                if (this.scrolled || e.target === doc.body) return
+                // NOTE: `requestAnimationFrame` is needed in WebKit
+                requestAnimationFrame(() => {
+                    if (this.#visibleRangeAt != null
+                        && Math.abs(this.containerPosition - this.#visibleRangeAt) >= 1)
+                        this.#scrollToAnchor(e.target)
+                })
             })
         })
 
@@ -3957,7 +3965,7 @@ export class Paginator extends HTMLElement {
     async scrollToAnchor(anchor, select, smooth) {
         return this.#scrollToAnchor(anchor, select ? 'selection' : 'navigation', smooth)
     }
-    async #scrollToAnchor(anchor, reason = 'anchor', smooth = false) {
+    async #scrollToAnchor(anchor, reason = 'anchor', smooth = false, focus = false) {
         this.#anchor = anchor
         const rects = uncollapse(anchor)?.getClientRects?.()
         // if anchor is an element or a range
@@ -3976,8 +3984,9 @@ export class Paginator extends HTMLElement {
                 ? this.#scrollTo(this.#getViewOffset(this.#primaryIndex), reason)
                 : this.#scrollToPage(this.#getPagesBeforeView(this.#primaryIndex), reason)
             await this.#scrollToRect(rect, reason, this.#viewOfAnchor(anchor))
-            // focus the element when navigating with keyboard or screen reader
-            if (reason === 'navigation' && !isTypingOutside()) {
+            // focus the destination of a navigation the user asked for, so
+            // keyboard and screen-reader users land there
+            if (focus && !isTypingOutside()) {
                 let node = anchor.focus ? anchor : undefined
                 if (!node && anchor.startContainer) {
                     node = anchor.startContainer
@@ -4194,6 +4203,7 @@ export class Paginator extends HTMLElement {
         }
         this.#pendingRelocate = null
         this.#lastVisibleRange = range
+        this.#visibleRangeAt = this.containerPosition
         // Anchor and navigation relocates skip primary detection, which the
         // debounced scroll listener still provides.
         if (reason !== 'anchor' && reason !== 'navigation')
@@ -4253,7 +4263,7 @@ export class Paginator extends HTMLElement {
     async #display(promise) {
         this.#stabilizing = true
         this.#container.style.opacity = '0'
-        const { index, src, data, anchor, onLoad, select } = await promise
+        const { index, src, data, anchor, onLoad, select, focus } = await promise
         this.#primaryIndex = index
         this.#syncA11y()
         const hasFocus = this.#primaryView?.document?.hasFocus()
@@ -4314,8 +4324,8 @@ export class Paginator extends HTMLElement {
         }
         const resolvedAnchor = (typeof anchor === 'function'
             ? anchor(primaryView.document) : anchor) ?? 0
-        await this.scrollToAnchor(resolvedAnchor, select)
-        if (hasFocus && !isTypingOutside()) this.focusView()
+        await this.#scrollToAnchor(resolvedAnchor, select ? 'selection' : 'navigation', false, focus)
+        if (hasFocus && this.#bookMayTakeFocus()) this.focusView()
         // Reveal content now that primary section is positioned
         this.#container.style.opacity = '1'
         this.#rendered = true
@@ -4527,7 +4537,7 @@ export class Paginator extends HTMLElement {
     #canGoToIndex(index) {
         return index >= 0 && index <= this.sections.length - 1
     }
-    async #goTo({ index, anchor, select }) {
+    async #goTo({ index, anchor, select, focus }) {
         if (this.#pagePreview) await this.#pagePreview
         const section = this.sections[index]
         if (!section) return
@@ -4595,10 +4605,10 @@ export class Paginator extends HTMLElement {
                     await this.#loadAdjacentSection(prevIdx)
             }
             if (!this.scrolled) await loadPrev()
-            await this.scrollToAnchor(resolvedAnchor, select)
+            await this.#scrollToAnchor(resolvedAnchor, select ? 'selection' : 'navigation', false, focus)
             if (this.scrolled) await loadPrev()
             if (blank) this.#container.style.opacity = '1'
-            if (hasFocus && !isTypingOutside()) this.focusView()
+            if (hasFocus && this.#bookMayTakeFocus()) this.focusView()
             // Load remaining adjacent sections progressively;
             // keep #stabilizing true until fill completes
             this.#fillPromise = this.#fillVisibleArea()
@@ -4632,7 +4642,7 @@ export class Paginator extends HTMLElement {
             await this.#display(Promise.resolve(section.load())
                 .then(async src => {
                     const data = await section.loadContent?.()
-                    return { index, src, data, anchor, onLoad, select }
+                    return { index, src, data, anchor, onLoad, select, focus }
                 }).catch(e => {
                     console.warn(e)
                     console.warn(new Error(`Failed to load section ${index}`))
@@ -4885,6 +4895,14 @@ export class Paginator extends HTMLElement {
         if (primaryView) {
             requestAnimationFrame(() => this.#replaceBackground())
         }
+    }
+    // A section load can drop the focus the book had. Give it back only
+    // when nothing else took it meanwhile: a dialog, the sidebar or a text
+    // field that holds it keeps it.
+    #bookMayTakeFocus() {
+        const active = document.activeElement
+        return !active || active === document.body || active === document.documentElement
+            || active === this || active === this.getRootNode()?.host
     }
     focusView() {
         this.#primaryView?.document?.defaultView?.focus()
