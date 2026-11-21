@@ -6,7 +6,8 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 // (readest#1711): one huge document takes minutes to lay out and paint.
 const CHUNK_THRESHOLD = 512 * 1024
 const CHUNK_SIZE = 256 * 1024
-// Marks the empty blocks that move a page break to the next spread
+// Marks the empty blocks that move a page break to the next spread. They are
+// `foliate-spacer` elements, so the book's type selectors don't match them.
 const SPREAD_SPACER = 'data-foliate-spread-spacer'
 const SECTION_SWIPE_DISTANCE = 48
 // Finger travel past a single-section boundary before the next chapter loads.
@@ -1171,7 +1172,9 @@ class View {
             for (const rule of rules) {
                 if (rule.styleSheet) visit(rule.styleSheet.cssRules)
                 else if (rule.cssRules && !rule.selectorText) visit(rule.cssRules)
-                else if (rule.style?.breakBefore === 'column' || rule.style?.breakAfter === 'column')
+                else if (rule.style?.breakBefore === 'column' || rule.style?.breakAfter === 'column'
+                    // a value from a custom property is only known per element
+                    || /break-(before|after)\s*:[^;]*var\(/i.test(rule.style?.cssText))
                     selectors.push(rule.selectorText)
             }
         }
@@ -1203,11 +1206,24 @@ class View {
     // In a spread, a forced break starts the next spread rather than the next
     // page, as facing pages do in print (readest#6873): a block it would put on
     // a later page of a spread gets empty pages before it, one spacer each.
-    // Spacers are invisible to CFIs. Runs on every expand, and leaves the
-    // document alone once each target starts a spread.
+    // Spacers are invisible to CFIs. They go before the outermost element the
+    // block starts, which keeps the block's `:first-child`; a sibling selector
+    // (`h2 + p`, `:nth-child()`) across the spacer stops matching. Runs on
+    // every expand, and leaves the document alone once each target starts a
+    // spread.
     #alignBreakTargets(columnSize) {
         const doc = this.document
         const root = doc.documentElement
+        const startsParent = el => {
+            for (let n = el.parentElement.firstChild; n !== el; n = n.nextSibling)
+                if (n.nodeType === Node.ELEMENT_NODE
+                    || n.nodeType === Node.TEXT_NODE && n.textContent.trim()) return false
+            return true
+        }
+        const anchorOf = el => {
+            while (el.parentElement !== doc.body && startsParent(el)) el = el.parentElement
+            return el
+        }
         const pageOf = el => {
             const rect = el.getClientRects()[0]
             if (!rect) return null
@@ -1226,13 +1242,14 @@ class View {
             if (!el.isConnected) continue
             const page = pageOf(el)
             if (page == null) continue
-            const spacers = spacersBefore(el)
+            const anchor = anchorOf(el)
+            const spacers = spacersBefore(anchor)
             const unpadded = page - spacers.length
             const needed = (this.#columnCount - unpadded % this.#columnCount) % this.#columnCount
             if (needed === spacers.length) continue
             for (const spacer of spacers.slice(needed)) spacer.remove()
             for (let i = spacers.length; i < needed; i++) {
-                const spacer = doc.createElement('div')
+                const spacer = doc.createElement('foliate-spacer')
                 spacer.setAttribute(SPREAD_SPACER, '')
                 spacer.setAttribute('cfi-inert', '')
                 spacer.setAttribute('aria-hidden', 'true')
@@ -1240,12 +1257,12 @@ class View {
                     'display': 'block', 'height': '0', 'margin': '0', 'padding': '0',
                     'border': '0', 'break-before': 'column', 'break-after': 'column',
                 })
-                el.before(spacer)
+                anchor.before(spacer)
             }
             // A break that doesn't move the block (inside a flex or grid box,
             // say) can't be padded
             if (pageOf(el) !== unpadded + needed) {
-                for (const spacer of spacersBefore(el)) spacer.remove()
+                for (const spacer of spacersBefore(anchor)) spacer.remove()
                 this.#breakTargets = this.#breakTargets.filter(t => t !== el)
             }
         }
