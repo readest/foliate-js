@@ -236,8 +236,9 @@ export class View extends HTMLElement {
     history = new History()
     constructor() {
         super()
-        this.history.addEventListener('popstate', ({ detail }) => {
-            const resolved = this.resolveNavigation(detail.state)
+        this.history.addEventListener('popstate', async ({ detail }) => {
+            // a book can resolve a target asynchronously (KF8's resolveHref)
+            const resolved = await this.resolveNavigation(detail.state)
             this.renderer.goTo({ ...resolved, focus: true })
         })
     }
@@ -538,8 +539,9 @@ export class View extends HTMLElement {
     // user asked for (a TOC entry, a link), never for one that runs on its own
     // (restoring the reading position, sync, read aloud).
     async goTo(target, { focus = false } = {}) {
-        const resolved = this.resolveNavigation(target)
         try {
+            // a book can resolve a target asynchronously (KF8's resolveHref)
+            const resolved = await this.resolveNavigation(target)
             await this.renderer.goTo(focus ? { ...resolved, focus } : resolved)
             this.history.pushState(target)
             return resolved
