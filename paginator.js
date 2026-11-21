@@ -57,13 +57,6 @@ export const fontsReady = doc => {
     })
 }
 
-// A text field outside the book, such as a note typed while Read Aloud turns
-// the page, keeps its focus when a navigation ends
-const isTypingOutside = () => {
-    const el = document.activeElement
-    return !!el && (el.isContentEditable || el.localName === 'textarea' || el.localName === 'input')
-}
-
 const debounce = (f, wait, immediate) => {
     let timeout
     return (...args) => {
@@ -3986,7 +3979,7 @@ export class Paginator extends HTMLElement {
             await this.#scrollToRect(rect, reason, this.#viewOfAnchor(anchor))
             // focus the destination of a navigation the user asked for, so
             // keyboard and screen-reader users land there
-            if (focus && !isTypingOutside()) {
+            if (focus) {
                 let node = anchor.focus ? anchor : undefined
                 if (!node && anchor.startContainer) {
                     node = anchor.startContainer
