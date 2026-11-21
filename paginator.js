@@ -3985,7 +3985,7 @@ export class Paginator extends HTMLElement {
                 : this.#scrollToPage(this.#getPagesBeforeView(this.#primaryIndex), reason)
             await this.#scrollToRect(rect, reason, this.#viewOfAnchor(anchor))
             // focus the element when navigating with keyboard or screen reader
-            if (reason === 'navigation' && !isTypingOutside()) {
+            if (reason === 'navigation' && !isTypingOutside() && this.#bookHoldsTopFocus()) {
                 let node = anchor.focus ? anchor : undefined
                 if (!node && anchor.startContainer) {
                     node = anchor.startContainer
@@ -4323,7 +4323,7 @@ export class Paginator extends HTMLElement {
         const resolvedAnchor = (typeof anchor === 'function'
             ? anchor(primaryView.document) : anchor) ?? 0
         await this.scrollToAnchor(resolvedAnchor, select)
-        if (hasFocus && !isTypingOutside()) this.focusView()
+        if (hasFocus && !isTypingOutside() && this.#bookHoldsTopFocus()) this.focusView()
         // Reveal content now that primary section is positioned
         this.#container.style.opacity = '1'
         this.#rendered = true
@@ -4606,7 +4606,7 @@ export class Paginator extends HTMLElement {
             await this.scrollToAnchor(resolvedAnchor, select)
             if (this.scrolled) await loadPrev()
             if (blank) this.#container.style.opacity = '1'
-            if (hasFocus && !isTypingOutside()) this.focusView()
+            if (hasFocus && !isTypingOutside() && this.#bookHoldsTopFocus()) this.focusView()
             // Load remaining adjacent sections progressively;
             // keep #stabilizing true until fill completes
             this.#fillPromise = this.#fillVisibleArea()
@@ -4893,6 +4893,19 @@ export class Paginator extends HTMLElement {
         if (primaryView) {
             requestAnimationFrame(() => this.#replaceBackground())
         }
+    }
+    // `hasFocus` above is a snapshot taken before a load that can take a while.
+    // By the time it is acted on, a layer above the reader — the settings
+    // dialog, a menu, a text field — may own the focus. Pulling it back into
+    // the book's iframe would strand that layer's keys: a keydown inside the
+    // iframe never reaches the top document, so its Escape (to close Settings,
+    // say) would never arrive.
+    #bookHoldsTopFocus() {
+        const doc = this.ownerDocument
+        const active = doc?.activeElement
+        if (!active || active === doc.body || active === doc.documentElement) return true
+        const view = this.getRootNode()?.host
+        return !!view && (active === view || view.contains(active))
     }
     focusView() {
         this.#primaryView?.document?.defaultView?.focus()
