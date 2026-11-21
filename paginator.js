@@ -4025,9 +4025,11 @@ export class Paginator extends HTMLElement {
         }
         if (node?.nodeType === Node.TEXT_NODE) node = node.parentElement
         if (!node?.focus) return
-        // a link or button keeps its place in the tab order
-        if (node.tabIndex < 0) node.tabIndex = -1
-        node.style.outline = 'none'
+        // a link or button keeps its place in the tab order and its focus ring
+        if (node.tabIndex < 0) {
+            node.tabIndex = -1
+            node.style.outline = 'none'
+        }
         node.focus({ preventScroll: true })
     }
     // Get the pixel offset of a view within the container
