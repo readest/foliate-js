@@ -311,11 +311,16 @@ const nodeToParts = (node, offset, filter) => {
 // as its start. As a range's end that drops everything before it: a selection
 // dragged past the last line of a PDF text layer ends after the layer's last
 // child and came back collapsed (readest/readest#6578). Move such an end into
-// the child before it.
+// the child before it, past any inert one (a spread spacer before a page
+// break, readest/readest#6873).
 const endInsideChild = (node, offset) => {
     while (isElementNode(node) && offset > 0) {
         const child = node.childNodes[offset - 1]
-        if (!(isTextNode(child) || isElementNode(child)) || isInertNode(child)) break
+        if (isInertNode(child)) {
+            offset--
+            continue
+        }
+        if (!(isTextNode(child) || isElementNode(child))) break
         node = child
         offset = isTextNode(child) ? child.nodeValue.length : child.childNodes.length
     }
