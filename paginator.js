@@ -1163,11 +1163,13 @@ class View {
     #findBreakTargets() {
         const doc = this.document
         const view = doc.defaultView
-        const isBlock = el => {
+        const inFlow = el => {
             const { display, position, float } = view.getComputedStyle(el)
-            return /^(block|flex|grid|table|list-item|flow-root)/.test(display)
+            return display !== 'none' && display !== 'contents'
                 && float === 'none' && (position === 'static' || position === 'relative')
         }
+        const isBlock = el => inFlow(el)
+            && /^(block|flex|grid|table|list-item|flow-root)/.test(view.getComputedStyle(el).display)
         // Only the elements a rule or a style attribute can give a break:
         // computing the style of every element takes ~20 ms in a big section
         const selectors = ['[style*="break" i]']
@@ -1199,7 +1201,8 @@ class View {
             while (node !== doc.body && !node.nextElementSibling) node = node.parentElement
             let next = node === doc.body ? null : node.nextElementSibling
             while (next?.hasAttribute(SPREAD_SPACER)) next = next.nextElementSibling
-            if (next && isBlock(next)) targets.add(next)
+            // inline content after the break starts the page in an anonymous block
+            if (next && inFlow(next)) targets.add(next)
         }
         // Several selectors' matches, and the targets after breaks, come out
         // of document order
