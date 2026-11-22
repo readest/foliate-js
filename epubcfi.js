@@ -337,7 +337,10 @@ const endInsideChild = (node, offset) => {
 const startInsideChild = (node, offset) => {
     if (!isElementNode(node) || offset === 0) return [node, offset]
     const isContent = x => (isTextNode(x) || isElementNode(x)) && !isInertNode(x)
-    let next = node.childNodes[offset]
+    // past any inert child (a spread spacer before a page break)
+    let i = offset
+    while (node.childNodes[i] && isInertNode(node.childNodes[i])) i++
+    let next = node.childNodes[i]
     if (!isContent(next)) return endInsideChild(node, offset)
     while (isSkipNode(next) && isContent(next.firstChild)) next = next.firstChild
     return [next, 0]
