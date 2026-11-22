@@ -6,6 +6,9 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 // (readest#1711): one huge document takes minutes to lay out and paint.
 const CHUNK_THRESHOLD = 512 * 1024
 const CHUNK_SIZE = 256 * 1024
+// Marks the empty blocks that move a page break to the next spread. They are
+// `foliate-spacer` elements, so the book's type selectors don't match them.
+const SPREAD_SPACER = 'data-foliate-spread-spacer'
 const SECTION_SWIPE_DISTANCE = 48
 // Finger travel past a single-section boundary before the next chapter loads.
 const SECTION_PULL_SLOP = 8
@@ -837,10 +840,16 @@ class View {
     #layout = {}
     #contentPages = 0
     #bgImageSize = null
+    #breakTargets = []
+    // Blank pages, possibly half of one, before the content: see expand()
+    #lead = 0
     fontReady = Promise.resolve()
-    constructor({ container, onExpand }) {
+    constructor({ container, onExpand, spread }) {
         this.container = container
         this.onExpand = onExpand
+        // Where the view starts in the strip and its spine spread property:
+        // () => ({ startColumn, pageSpread, continued })
+        this.spread = spread
         this.#iframe.setAttribute('part', 'filter')
         this.#element.append(this.#iframe)
         Object.assign(this.#element.style, {
@@ -880,6 +889,10 @@ class View {
     }
     get contentPages() {
         return this.#contentPages
+    }
+    // Whole blank pages before the content
+    get leadPages() {
+        return Math.floor(this.#lead)
     }
     // Whether the iframe shows the section this view loaded and laid out.
     // Until then it holds its initial about:blank, then the incoming section.
@@ -1013,6 +1026,9 @@ class View {
     scrolled({ width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth }) {
         const vertical = this.#vertical
         const doc = this.document
+        this.#removeSpacers()
+        this.#lead = 0
+        doc.documentElement.style.transform = ''
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': 'auto',
@@ -1144,7 +1160,148 @@ class View {
         })
         this.setImageSize(availableWidth, availableHeight)
         this.#demoteUnfragmentableBoxes(availableHeight)
+        // a break the new styles no longer apply mustn't keep its spacers
+        this.#removeSpacers()
+        if (this.#columnCount > 1) this.#breakTargets = this.#findBreakTargets()
         this.expand()
+    }
+    // Only a layout of several pages to a spread has spacers
+    #removeSpacers() {
+        this.#breakTargets = []
+        for (const spacer of this.document.querySelectorAll(`[${SPREAD_SPACER}]`)) spacer.remove()
+    }
+    // The blocks a forced column break puts at the start of a page: those that
+    // break before themselves, and those after one that breaks after itself.
+    #findBreakTargets() {
+        const doc = this.document
+        const view = doc.defaultView
+        const inFlow = el => {
+            const { display, position, float } = view.getComputedStyle(el)
+            return display !== 'none' && display !== 'contents'
+                && float === 'none' && (position === 'static' || position === 'relative')
+        }
+        const isBlock = el => inFlow(el)
+            && /^(block|flex|grid|table|list-item|flow-root)/.test(view.getComputedStyle(el).display)
+        // Only the elements a rule or a style attribute can give a break:
+        // computing the style of every element takes ~20 ms in a big section
+        const selectors = ['[style*="break" i]']
+        const visit = rules => {
+            for (const rule of rules) {
+                if (rule.styleSheet) visit(rule.styleSheet.cssRules)
+                else if (rule.cssRules && !rule.selectorText) visit(rule.cssRules)
+                else if (rule.style?.breakBefore === 'column' || rule.style?.breakAfter === 'column'
+                    // a value from a custom property is only known per element
+                    || /break-(before|after)\s*:[^;]*var\(/i.test(rule.style?.cssText))
+                    selectors.push(rule.selectorText)
+            }
+        }
+        for (const sheet of doc.styleSheets) {
+            try { visit(sheet.cssRules) } catch { /* cross-origin sheet */ }
+        }
+        const candidates = new Set()
+        for (const selector of selectors) {
+            // a pseudo-element selector, say, matches no element
+            try { for (const el of doc.body.querySelectorAll(selector)) candidates.add(el) } catch {}
+        }
+        // The first shown, in-flow element or non-blank text after `el` and
+        // its descendants
+        const nextContent = el => {
+            let node = el
+            for (;;) {
+                while (node !== doc.body && !node.nextSibling) node = node.parentNode
+                if (node === doc.body) return null
+                node = node.nextSibling
+                if (node.nodeType === Node.ELEMENT_NODE
+                    ? !node.hasAttribute(SPREAD_SPACER) && inFlow(node) && node.getClientRects().length
+                    : node.nodeType === Node.TEXT_NODE && node.textContent.trim()) return node
+            }
+        }
+        const targets = new Set()
+        for (const el of candidates) {
+            if (el.hasAttribute(SPREAD_SPACER)) continue
+            const { breakBefore, breakAfter } = view.getComputedStyle(el)
+            if (breakBefore === 'column' && isBlock(el)) targets.add(el)
+            if (breakAfter !== 'column' || !isBlock(el)) continue
+            // inline content or text after the break starts the page in an
+            // anonymous block
+            const next = nextContent(el)
+            if (next) targets.add(next)
+        }
+        // Several selectors' matches, and the targets after breaks, come out
+        // of document order
+        return [...targets].sort((a, b) =>
+            a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
+    }
+    // In a spread, a forced break starts the next spread rather than the next
+    // page, as facing pages do in print (readest#6873): a block it would put on
+    // a later page of a spread gets empty pages before it, one spacer each.
+    // Spacers are invisible to CFIs. They go before the outermost element the
+    // block starts, which keeps the block's `:first-child`; a sibling selector
+    // (`h2 + p`, `:nth-child()`) across the spacer stops matching. Runs on
+    // every expand, and leaves the document alone once each target starts a
+    // spread.
+    #alignBreakTargets(columnSize, firstColumn) {
+        const doc = this.document
+        const root = doc.documentElement
+        const startsParent = el => {
+            for (let n = el.parentElement.firstChild; n !== el; n = n.nextSibling)
+                if (n.nodeType === Node.ELEMENT_NODE
+                    || n.nodeType === Node.TEXT_NODE && n.textContent.trim()) return false
+            return true
+        }
+        const anchorOf = el => {
+            while (el.parentElement !== doc.body && startsParent(el)) el = el.parentElement
+            return el
+        }
+        const rectsOf = node => {
+            if (node.nodeType !== Node.TEXT_NODE) return node.getClientRects()
+            const range = doc.createRange()
+            range.selectNodeContents(node)
+            return range.getClientRects()
+        }
+        const pageOf = node => {
+            const rect = rectsOf(node)[0]
+            if (!rect) return null
+            const rootRect = root.getBoundingClientRect()
+            const offset = this.#vertical ? rect.top - rootRect.top
+                : this.#rtl ? rootRect.right - rect.right : rect.left - rootRect.left
+            return Math.floor(offset * this.#zoom / columnSize + 0.01)
+        }
+        const spacersBefore = el => {
+            const spacers = []
+            for (let s = el.previousElementSibling; s?.hasAttribute(SPREAD_SPACER);
+                s = s.previousElementSibling) spacers.push(s)
+            return spacers
+        }
+        for (const el of this.#breakTargets) {
+            if (!el.isConnected) continue
+            const page = pageOf(el)
+            if (page == null) continue
+            const anchor = anchorOf(el)
+            const spacers = spacersBefore(anchor)
+            const unpadded = page - spacers.length
+            const needed = (this.#columnCount - (firstColumn + unpadded) % this.#columnCount)
+                % this.#columnCount
+            if (needed === spacers.length) continue
+            for (const spacer of spacers.slice(needed)) spacer.remove()
+            for (let i = spacers.length; i < needed; i++) {
+                const spacer = doc.createElement('foliate-spacer')
+                spacer.setAttribute(SPREAD_SPACER, '')
+                spacer.setAttribute('cfi-inert', '')
+                spacer.setAttribute('aria-hidden', 'true')
+                setStylesImportant(spacer, {
+                    'display': 'block', 'height': '0', 'margin': '0', 'padding': '0',
+                    'border': '0', 'break-before': 'column', 'break-after': 'column',
+                })
+                anchor.before(spacer)
+            }
+            // A break that doesn't move the block (inside a flex or grid box,
+            // say) can't be padded
+            if (pageOf(el) !== unpadded + needed) {
+                for (const spacer of spacersBefore(anchor)) spacer.remove()
+                this.#breakTargets = this.#breakTargets.filter(t => t !== el)
+            }
+        }
     }
     // Atomic inline-level boxes (inline-block / inline-flex / inline-grid /
     // inline-table) cannot be fragmented across columns. When an EPUB declares
@@ -1319,6 +1476,16 @@ class View {
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
             const otherSide = this.#vertical ? 'width' : 'height'
+            const columnSize = this.#size / this.#columnCount
+            const count = this.#columnCount
+            const { startColumn = 0, pageSpread, continued } = this.spread?.() ?? {}
+            // A spine page-spread property puts the section's first page on
+            // that side of a spread (the left page is the first one, or the
+            // right one right to left); `center` starts a spread
+            const toSpread = (count - startColumn % count) % count
+            const secondPage = pageSpread === (this.#rtl ? 'left' : 'right') ? 1 : 0
+            const lead = count > 1 && pageSpread ? (toSpread + secondPage) % count : 0
+            if (this.#breakTargets.length) this.#alignBreakTargets(columnSize, startColumn + lead)
             const contentRect = this.#contentRange.getBoundingClientRect()
             const rootRect = documentElement.getBoundingClientRect()
             // offset caused by column break at the start of the page
@@ -1329,10 +1496,22 @@ class View {
             // Size content by individual columns, not full spreads.
             // This allows adjacent sections to share a spread when a
             // section doesn't fill all available columns.
-            const columnSize = this.#size / this.#columnCount
             const pageCount = Math.ceil(contentSize / columnSize)
             this.#contentPages = pageCount
-            const expandedSize = pageCount * columnSize
+            // A `center` section has its spreads to itself, and one shorter
+            // than a spread sits in the middle of it (readest#6676)
+            const center = count > 1 && pageSpread === 'center' && !continued
+            this.#lead = lead + (center && pageCount < count ? (count - pageCount) / 2 : 0)
+            const columns = center
+                ? Math.ceil((startColumn + lead + pageCount) / count) * count - startColumn
+                : lead + pageCount
+            const expandedSize = columns * columnSize
+            // Shift the content past the blank pages. The document's own rects
+            // include the shift, so selections and anchors map as before.
+            const shift = this.#lead * columnSize
+            documentElement.style.transform = !shift ? ''
+                : this.#vertical ? `translateY(${shift}px)`
+                : `translateX(${this.#rtl ? -shift : shift}px)`
             this.#element.style.padding = '0'
             this.#iframe.style[side] = `${expandedSize}px`
             this.#element.style[side] = `${expandedSize}px`
@@ -2187,6 +2366,46 @@ export class Paginator extends HTMLElement {
             if (doc && view.document === doc) return { ...target, index: i }
         return { ...target, index: unit }
     }
+    // Where a view starts in the strip, in pages, and the spread property of
+    // the section it starts (a later chunk starts none)
+    #viewSpread(index) {
+        const unit = this.#units[index]
+        return {
+            startColumn: Math.round(this.#getViewOffset(index) / (this.size / this.columnCount)),
+            pageSpread: unit?.chunk === 0 ? this.sections[index]?.pageSpread : undefined,
+            continued: this.#continuesSection(index),
+        }
+    }
+    // A view that changed its number of pages moves every later view's start
+    // and so the side of a spread each later page falls on: lay those out
+    // again, in order (#viewSpread)
+    #viewColumns = new Map()
+    #relayingOut = false
+    #layOutViewsAfter(index) {
+        if (this.scrolled || this.columnCount < 2 || this.#relayingOut) return
+        const columns = Math.round(this.#views.get(index)?.element
+            .getBoundingClientRect()[this.sideProp] / (this.size / this.columnCount))
+        if (this.#views.has(index) && this.#viewColumns.get(index) === columns) return
+        if (this.#views.has(index)) this.#viewColumns.set(index, columns)
+        this.#relayingOut = true
+        try {
+            for (const [i, view] of this.#sortedViews) if (i > index) {
+                view.expand()
+                this.#viewColumns.set(i, Math.round(view.element
+                    .getBoundingClientRect()[this.sideProp] / (this.size / this.columnCount)))
+            }
+        } finally {
+            this.#relayingOut = false
+        }
+    }
+    // Whether a later chunk of the same section has something to show
+    #continuesSection(index) {
+        const { spine, chunk, count } = this.#units[index] ?? {}
+        if (!(chunk < count - 1)) return false
+        const split = this.#splits.get(spine)
+        for (let c = chunk + 1; c < count; c++) if (!split?.isEmpty(c)) return true
+        return false
+    }
     #createView(index) {
         // Destroy existing view for this index if any
         const existing = this.#views.get(index)
@@ -2197,7 +2416,9 @@ export class Paginator extends HTMLElement {
         }
         const view = new View({
             container: this,
+            spread: () => this.#viewSpread(index),
             onExpand: () => {
+                this.#layOutViewsAfter(index)
                 this.#padLastPage()
                 // The primary view, or one before it, reflowed: what the
                 // last relocate measured may no longer be on the page.
@@ -2270,6 +2491,8 @@ export class Paginator extends HTMLElement {
         this.#container.removeChild(view.element)
         this.#views.delete(index)
         this.#viewSizes.delete(index)
+        this.#viewColumns.delete(index)
+        this.#layOutViewsAfter(index)
         if (shift) this.containerPosition = position + shift
         this.#padLastPage()
         this.sections[index]?.unload?.()
@@ -4010,7 +4233,8 @@ export class Paginator extends HTMLElement {
         // content pages must still settle so #scrollBounds gets seeded.
         if (!textPages) return this.#scrollToPage(pagesBeforePrimary, reason)
         // textPages is in column units; convert to spread page for scrolling
-        const newColumn = Math.round(anchor * (textPages - 1))
+        // past the blank pages a spine spread property puts before the text
+        const newColumn = Math.round(anchor * (textPages - 1)) + primaryView.leadPages
         const newSpreadPage = Math.floor(newColumn / this.columnCount)
         await this.#scrollToPage(pagesBeforePrimary + newSpreadPage, reason, smooth)
         this.#focusDestination(focus)
@@ -4257,7 +4481,7 @@ export class Paginator extends HTMLElement {
             this.#header.style.visibility = page > 0 ? 'visible' : 'hidden'
             // page is in spread units, textPages is in column units
             const localPage = page - pagesBeforePrimary
-            const localColumn = localPage * this.columnCount
+            const localColumn = localPage * this.columnCount - primaryView.leadPages
             detail.fraction = textPages > 0 ? Math.max(0, Math.min(1, localColumn / textPages)) : 0
             detail.size = textPages > 0 ? this.columnCount / textPages : 1
             if (reason === 'container-scroll' && localPage === 0) return
