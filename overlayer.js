@@ -175,6 +175,13 @@ export class Overlayer {
                 if (subRange.compareBoundaryPoints(Range.END_TO_END, range) > 0) {
                     subRange.setEnd(range.endContainer, range.endOffset)
                 }
+                // A range can start at the very end of a text node or end at
+                // the very start of one, as a selection that starts at an
+                // inline element does in Chromium. That piece holds no text,
+                // yet its zero-width rect sat at the previous text's end, so a
+                // note bubble, drawn at the first rect, landed on the previous
+                // note's bubble (readest/readest#7800).
+                if (subRange.collapsed) continue
             } else subRange.selectNode(node)
             splitRanges.push(subRange)
         }
