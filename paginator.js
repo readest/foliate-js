@@ -1151,8 +1151,9 @@ class View {
         })
         this.setImageSize(availableWidth, availableHeight)
         this.#demoteUnfragmentableBoxes(availableHeight)
+        // a break the new styles no longer apply mustn't keep its spacers
+        this.#removeSpacers()
         if (this.#columnCount > 1) this.#breakTargets = this.#findBreakTargets()
-        else this.#removeSpacers()
         this.expand()
     }
     // Only a layout of several pages to a spread has spacers
@@ -1193,18 +1194,28 @@ class View {
             // a pseudo-element selector, say, matches no element
             try { for (const el of doc.body.querySelectorAll(selector)) candidates.add(el) } catch {}
         }
+        // The first element or non-blank text after `el` and its descendants
+        const nextContent = el => {
+            let node = el
+            for (;;) {
+                while (node !== doc.body && !node.nextSibling) node = node.parentNode
+                if (node === doc.body) return null
+                node = node.nextSibling
+                if (node.nodeType === Node.ELEMENT_NODE
+                    ? !node.hasAttribute(SPREAD_SPACER)
+                    : node.nodeType === Node.TEXT_NODE && node.textContent.trim()) return node
+            }
+        }
         const targets = new Set()
         for (const el of candidates) {
             if (el.hasAttribute(SPREAD_SPACER)) continue
             const { breakBefore, breakAfter } = view.getComputedStyle(el)
             if (breakBefore === 'column' && isBlock(el)) targets.add(el)
             if (breakAfter !== 'column' || !isBlock(el)) continue
-            let node = el
-            while (node !== doc.body && !node.nextElementSibling) node = node.parentElement
-            let next = node === doc.body ? null : node.nextElementSibling
-            while (next?.hasAttribute(SPREAD_SPACER)) next = next.nextElementSibling
-            // inline content after the break starts the page in an anonymous block
-            if (next && inFlow(next)) targets.add(next)
+            // inline content or text after the break starts the page in an
+            // anonymous block
+            const next = nextContent(el)
+            if (next && (next.nodeType === Node.TEXT_NODE || inFlow(next))) targets.add(next)
         }
         // Several selectors' matches, and the targets after breaks, come out
         // of document order
@@ -1232,8 +1243,14 @@ class View {
             while (el.parentElement !== doc.body && startsParent(el)) el = el.parentElement
             return el
         }
-        const pageOf = el => {
-            const rect = el.getClientRects()[0]
+        const rectsOf = node => {
+            if (node.nodeType !== Node.TEXT_NODE) return node.getClientRects()
+            const range = doc.createRange()
+            range.selectNodeContents(node)
+            return range.getClientRects()
+        }
+        const pageOf = node => {
+            const rect = rectsOf(node)[0]
             if (!rect) return null
             const rootRect = root.getBoundingClientRect()
             const offset = this.#vertical ? rect.top - rootRect.top
