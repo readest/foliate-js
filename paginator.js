@@ -841,12 +841,15 @@ class View {
     #contentPages = 0
     #bgImageSize = null
     #breakTargets = []
+    // Blank pages, possibly half of one, before the content: see expand()
+    #lead = 0
     fontReady = Promise.resolve()
-    constructor({ container, onExpand, continued }) {
+    constructor({ container, onExpand, spread }) {
         this.container = container
         this.onExpand = onExpand
-        // Whether the next view continues this section (a chunk of a huge one)
-        this.continued = continued
+        // Where the view starts in the strip and its spine spread property:
+        // () => ({ startColumn, pageSpread, continued })
+        this.spread = spread
         this.#iframe.setAttribute('part', 'filter')
         this.#element.append(this.#iframe)
         Object.assign(this.#element.style, {
@@ -886,6 +889,10 @@ class View {
     }
     get contentPages() {
         return this.#contentPages
+    }
+    // Whole blank pages before the content
+    get leadPages() {
+        return Math.floor(this.#lead)
     }
     // Whether the iframe shows the section this view loaded and laid out.
     // Until then it holds its initial about:blank, then the incoming section.
@@ -1020,6 +1027,8 @@ class View {
         const vertical = this.#vertical
         const doc = this.document
         this.#removeSpacers()
+        this.#lead = 0
+        doc.documentElement.style.transform = ''
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': 'auto',
@@ -1229,7 +1238,7 @@ class View {
     // (`h2 + p`, `:nth-child()`) across the spacer stops matching. Runs on
     // every expand, and leaves the document alone once each target starts a
     // spread.
-    #alignBreakTargets(columnSize) {
+    #alignBreakTargets(columnSize, firstColumn) {
         const doc = this.document
         const root = doc.documentElement
         const startsParent = el => {
@@ -1269,7 +1278,8 @@ class View {
             const anchor = anchorOf(el)
             const spacers = spacersBefore(anchor)
             const unpadded = page - spacers.length
-            const needed = (this.#columnCount - unpadded % this.#columnCount) % this.#columnCount
+            const needed = (this.#columnCount - (firstColumn + unpadded) % this.#columnCount)
+                % this.#columnCount
             if (needed === spacers.length) continue
             for (const spacer of spacers.slice(needed)) spacer.remove()
             for (let i = spacers.length; i < needed; i++) {
@@ -1465,7 +1475,15 @@ class View {
             const side = this.#vertical ? 'height' : 'width'
             const otherSide = this.#vertical ? 'width' : 'height'
             const columnSize = this.#size / this.#columnCount
-            if (this.#breakTargets.length) this.#alignBreakTargets(columnSize)
+            const count = this.#columnCount
+            const { startColumn = 0, pageSpread, continued } = this.spread?.() ?? {}
+            // A spine page-spread property puts the section's first page on
+            // that side of a spread (the left page is the first one, or the
+            // right one right to left); `center` starts a spread
+            const toSpread = (count - startColumn % count) % count
+            const secondPage = pageSpread === (this.#rtl ? 'left' : 'right') ? 1 : 0
+            const lead = count > 1 && pageSpread ? (toSpread + secondPage) % count : 0
+            if (this.#breakTargets.length) this.#alignBreakTargets(columnSize, startColumn + lead)
             const contentRect = this.#contentRange.getBoundingClientRect()
             const rootRect = documentElement.getBoundingClientRect()
             // offset caused by column break at the start of the page
@@ -1473,13 +1491,25 @@ class View {
             const contentStart = this.#vertical ? 0
                 : this.#rtl ? rootRect.right - contentRect.right : contentRect.left - rootRect.left
             const contentSize = (contentStart + contentRect[side]) * this.#zoom
+            // Size content by individual columns, not full spreads.
+            // This allows adjacent sections to share a spread when a
+            // section doesn't fill all available columns.
             const pageCount = Math.ceil(contentSize / columnSize)
             this.#contentPages = pageCount
-            // A section fills whole spreads, so the next one starts a spread
-            // (readest#6873). A chunk of a huge section is sized by columns:
-            // the next chunk continues beside it.
-            const expandedSize = (this.continued?.() ? pageCount
-                : Math.ceil(pageCount / this.#columnCount) * this.#columnCount) * columnSize
+            // A `center` section has its spreads to itself, and one shorter
+            // than a spread sits in the middle of it (readest#6676)
+            const center = count > 1 && pageSpread === 'center' && !continued
+            this.#lead = lead + (center && pageCount < count ? (count - pageCount) / 2 : 0)
+            const columns = center
+                ? Math.ceil((startColumn + lead + pageCount) / count) * count - startColumn
+                : lead + pageCount
+            const expandedSize = columns * columnSize
+            // Shift the content past the blank pages. The document's own rects
+            // include the shift, so selections and anchors map as before.
+            const shift = this.#lead * columnSize
+            documentElement.style.transform = !shift ? ''
+                : this.#vertical ? `translateY(${shift}px)`
+                : `translateX(${this.#rtl ? -shift : shift}px)`
             this.#element.style.padding = '0'
             this.#iframe.style[side] = `${expandedSize}px`
             this.#element.style[side] = `${expandedSize}px`
@@ -2333,6 +2363,38 @@ export class Paginator extends HTMLElement {
             if (doc && view.document === doc) return { ...target, index: i }
         return { ...target, index: unit }
     }
+    // Where a view starts in the strip, in pages, and the spread property of
+    // the section it starts (a later chunk starts none)
+    #viewSpread(index) {
+        const unit = this.#units[index]
+        return {
+            startColumn: Math.round(this.#getViewOffset(index) / (this.size / this.columnCount)),
+            pageSpread: unit?.chunk === 0 ? this.sections[index]?.pageSpread : undefined,
+            continued: this.#continuesSection(index),
+        }
+    }
+    // A view that changed its number of pages moves every later view's start
+    // and so the side of a spread each later page falls on: lay those out
+    // again, in order (#viewSpread)
+    #viewColumns = new Map()
+    #relayingOut = false
+    #layOutViewsAfter(index) {
+        if (this.scrolled || this.columnCount < 2 || this.#relayingOut) return
+        const columns = Math.round(this.#views.get(index)?.element
+            .getBoundingClientRect()[this.sideProp] / (this.size / this.columnCount))
+        if (this.#views.has(index) && this.#viewColumns.get(index) === columns) return
+        if (this.#views.has(index)) this.#viewColumns.set(index, columns)
+        this.#relayingOut = true
+        try {
+            for (const [i, view] of this.#sortedViews) if (i > index) {
+                view.expand()
+                this.#viewColumns.set(i, Math.round(view.element
+                    .getBoundingClientRect()[this.sideProp] / (this.size / this.columnCount)))
+            }
+        } finally {
+            this.#relayingOut = false
+        }
+    }
     // Whether a later chunk of the same section has something to show
     #continuesSection(index) {
         const { spine, chunk, count } = this.#units[index] ?? {}
@@ -2351,8 +2413,9 @@ export class Paginator extends HTMLElement {
         }
         const view = new View({
             container: this,
-            continued: () => this.#continuesSection(index),
+            spread: () => this.#viewSpread(index),
             onExpand: () => {
+                this.#layOutViewsAfter(index)
                 this.#padLastPage()
                 // The primary view, or one before it, reflowed: what the
                 // last relocate measured may no longer be on the page.
@@ -2425,6 +2488,8 @@ export class Paginator extends HTMLElement {
         this.#container.removeChild(view.element)
         this.#views.delete(index)
         this.#viewSizes.delete(index)
+        this.#viewColumns.delete(index)
+        this.#layOutViewsAfter(index)
         if (shift) this.containerPosition = position + shift
         this.#padLastPage()
         this.sections[index]?.unload?.()
@@ -2812,10 +2877,10 @@ export class Paginator extends HTMLElement {
         // rounding, which can leave a half page a hair under half (readest#7303).
         return Math.ceil(this.#renderedViewSize / this.size - 0.01)
     }
-    // A chunk of a huge section is sized by columns so the next chunk can
-    // start beside its end, so the loaded views can end partway into a page.
-    // Pad them to whole pages, or the browser clamps the turn to the last page
-    // short of it (readest#7303).
+    // Sections are sized by columns so the next one can start beside the
+    // previous one's end, which leaves the book's last section ending partway
+    // into a page. Pad the views to whole pages, or the browser clamps the
+    // turn to the last page short of it (readest#7303).
     #padLastPage() {
         const padding = this.scrolled || !this.size ? 0
             : this.#renderedPages * this.size - this.#renderedViewSize
@@ -4160,7 +4225,8 @@ export class Paginator extends HTMLElement {
         // content pages must still settle so #scrollBounds gets seeded.
         if (!textPages) return this.#scrollToPage(pagesBeforePrimary, reason)
         // textPages is in column units; convert to spread page for scrolling
-        const newColumn = Math.round(anchor * (textPages - 1))
+        // past the blank pages a spine spread property puts before the text
+        const newColumn = Math.round(anchor * (textPages - 1)) + primaryView.leadPages
         const newSpreadPage = Math.floor(newColumn / this.columnCount)
         await this.#scrollToPage(pagesBeforePrimary + newSpreadPage, reason, smooth)
         this.#focusDestination(focus)
@@ -4407,7 +4473,7 @@ export class Paginator extends HTMLElement {
             this.#header.style.visibility = page > 0 ? 'visible' : 'hidden'
             // page is in spread units, textPages is in column units
             const localPage = page - pagesBeforePrimary
-            const localColumn = localPage * this.columnCount
+            const localColumn = localPage * this.columnCount - primaryView.leadPages
             detail.fraction = textPages > 0 ? Math.max(0, Math.min(1, localColumn / textPages)) : 0
             detail.size = textPages > 0 ? this.columnCount / textPages : 1
             if (reason === 'container-scroll' && localPage === 0) return
