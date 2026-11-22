@@ -1246,7 +1246,8 @@ const getPageSpread = properties => {
             return 'left'
         if (p === 'page-spread-right' || p === 'rendition:page-spread-right')
             return 'right'
-        if (p === 'rendition:page-spread-center') return 'center'
+        if (p === 'page-spread-center' || p === 'rendition:page-spread-center')
+            return 'center'
     }
 }
 
@@ -1411,6 +1412,14 @@ ${doc.querySelector('parsererror').innerText}`)
                 .find(section => section.linear !== 'no').pageSpread ??=
                     this.dir === 'rtl' ? 'left' : 'right'
         }
+        // A reflowable book's cover page has a spread to itself, centred, as a
+        // printed cover does, unless its spine item places it (readest#6676)
+        const first = this.sections.find(section => section.linear !== 'no')
+        const coverHref = [...this.landmarks ?? [], ...this.resources.guide ?? []]
+            .find(item => item.type?.includes('cover'))?.href?.split('#')[0]
+        if (this.rendition?.layout !== 'pre-paginated' && first && !first.pageSpread
+            && (first.id === coverHref || /cover/i.test(first.id.split('/').pop())))
+            first.pageSpread = 'center'
         return this
     }
     async loadDocument(item) {
