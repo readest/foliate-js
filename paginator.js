@@ -1019,6 +1019,7 @@ class View {
     scrolled({ width, height, marginTop, marginRight, marginBottom, marginLeft, gap, columnWidth }) {
         const vertical = this.#vertical
         const doc = this.document
+        this.#removeSpacers()
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
             'column-width': 'auto',
@@ -1150,10 +1151,14 @@ class View {
         })
         this.setImageSize(availableWidth, availableHeight)
         this.#demoteUnfragmentableBoxes(availableHeight)
-        this.#breakTargets = this.#columnCount > 1 ? this.#findBreakTargets() : []
-        if (this.#columnCount === 1)
-            for (const spacer of doc.querySelectorAll(`[${SPREAD_SPACER}]`)) spacer.remove()
+        if (this.#columnCount > 1) this.#breakTargets = this.#findBreakTargets()
+        else this.#removeSpacers()
         this.expand()
+    }
+    // Only a layout of several pages to a spread has spacers
+    #removeSpacers() {
+        this.#breakTargets = []
+        for (const spacer of this.document.querySelectorAll(`[${SPREAD_SPACER}]`)) spacer.remove()
     }
     // The blocks a forced column break puts at the start of a page: those that
     // break before themselves, and those after one that breaks after itself.
