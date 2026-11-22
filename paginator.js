@@ -1192,7 +1192,8 @@ class View {
             // a pseudo-element selector, say, matches no element
             try { for (const el of doc.body.querySelectorAll(selector)) candidates.add(el) } catch {}
         }
-        // The first element or non-blank text after `el` and its descendants
+        // The first shown, in-flow element or non-blank text after `el` and
+        // its descendants
         const nextContent = el => {
             let node = el
             for (;;) {
@@ -1200,7 +1201,7 @@ class View {
                 if (node === doc.body) return null
                 node = node.nextSibling
                 if (node.nodeType === Node.ELEMENT_NODE
-                    ? !node.hasAttribute(SPREAD_SPACER)
+                    ? !node.hasAttribute(SPREAD_SPACER) && inFlow(node) && node.getClientRects().length
                     : node.nodeType === Node.TEXT_NODE && node.textContent.trim()) return node
             }
         }
@@ -1213,7 +1214,7 @@ class View {
             // inline content or text after the break starts the page in an
             // anonymous block
             const next = nextContent(el)
-            if (next && (next.nodeType === Node.TEXT_NODE || inFlow(next))) targets.add(next)
+            if (next) targets.add(next)
         }
         // Several selectors' matches, and the targets after breaks, come out
         // of document order
