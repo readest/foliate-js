@@ -819,7 +819,8 @@ const setStylesImportant = (el, styles) => {
 }
 
 // The space above an image that opens its section with no text before it:
-// the top margins (adjoining ones collapse to the largest), borders and
+// the top margins (adjoining ones collapse to the largest; a border, a
+// padding or a new formatting context keeps them apart), borders and
 // paddings of the blocks it opens, and its own top margin. At the start of a
 // section none of that can go to a previous page, so an image clamped to the
 // page height ends below the page: WebKit cuts its bottom onto the next page,
@@ -836,11 +837,14 @@ const getLeadingSpace = (doc, el) => {
         blocks.unshift(node)
     let space = 0, margin = 0
     for (const node of blocks) {
-        const { display, marginTop, borderTopWidth, paddingTop } = win.getComputedStyle(node)
+        const { display, overflowX, overflowY, marginTop, borderTopWidth, paddingTop }
+            = win.getComputedStyle(node)
         if (display === 'inline' || display === 'contents') continue
         margin = Math.max(margin, parseFloat(marginTop) || 0)
         const edge = (parseFloat(borderTopWidth) || 0) + (parseFloat(paddingTop) || 0)
-        if (edge) {
+        const ownContext = (display !== 'block' && display !== 'list-item')
+            || ![overflowX, overflowY].every(o => o === 'visible' || o === 'clip')
+        if (edge || ownContext) {
             space += margin + edge
             margin = 0
         }
@@ -853,7 +857,8 @@ class View {
     #element = document.createElement('div')
     #iframe = document.createElement('iframe')
     #contentRange = document.createRange()
-    #topAlignedImage = null
+    // the opening image top-aligned to fit, with its own inline alignment
+    #topAligned = null
     #overlayer
     #vertical = false
     #rtl = false
@@ -1380,8 +1385,11 @@ class View {
             el.style.removeProperty('max-width')
             el.style.removeProperty('max-height')
         }
-        this.#topAlignedImage?.style.removeProperty('vertical-align')
-        this.#topAlignedImage = null
+        if (this.#topAligned) {
+            const { el, value, priority } = this.#topAligned
+            el.style.setProperty('vertical-align', value, priority)
+            this.#topAligned = null
+        }
         // Read every element's style before writing any of them. The margins
         // below are resolved values, so reading one flushes layout, and writing
         // the previous element's clamp dirtied it again — interleaving the two
@@ -1439,8 +1447,10 @@ class View {
                 'box-sizing': 'border-box',
             })
             if (fitFirst && el === first) {
+                this.#topAligned = { el,
+                    value: el.style.getPropertyValue('vertical-align'),
+                    priority: el.style.getPropertyPriority('vertical-align') }
                 setStylesImportant(el, { 'vertical-align': 'top' })
-                this.#topAlignedImage = el
             }
             if (applyFullscreen) {
                 setStylesImportant(doc.documentElement, {
