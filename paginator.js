@@ -878,16 +878,26 @@ const getLeadingSpace = (doc, el) => {
             positive = negative = 0
         }
     }
-    return space + positive + negative + (parseFloat(win.getComputedStyle(el).marginTop) || 0)
+    // an inline image's own margin sits inside its line; a block one's joins
+    // the margins of the blocks it opens
+    const { display, marginTop } = win.getComputedStyle(el)
+    const margin = parseFloat(marginTop) || 0
+    if (display.startsWith('inline')) return space + positive + negative + margin
+    return space + Math.max(positive, margin) + Math.min(negative, margin)
 }
+
+// The first image shown in the flow of a section
+const getOpeningImage = (doc, els = doc.body.querySelectorAll('img, svg, video, canvas')) =>
+    [...els].find(el => el.getClientRects().length && inFlow(el, doc.body))
 
 class View {
     #observer = new ResizeObserver(() => this.expand())
     #element = document.createElement('div')
     #iframe = document.createElement('iframe')
     #contentRange = document.createRange()
-    // the opening image top-aligned to fit, with its own inline alignment
-    #topAligned = null
+    // the opening image fitted to its first page, with the clamp and the
+    // inline alignment it had before
+    #fitted = null
     #overlayer
     #vertical = false
     #rtl = false
@@ -1408,16 +1418,12 @@ class View {
         // column rule and paints on top of the next column's text
         // (readest/readest#6041).
         const els = doc.body.querySelectorAll('img, svg, video, canvas')
+        this.#unfitOpeningImage()
         // clear previous inline constraints so we read CSS-authored values,
         // not stale pixel values from a previous resize (#3634)
         for (const el of els) {
             el.style.removeProperty('max-width')
             el.style.removeProperty('max-height')
-        }
-        if (this.#topAligned) {
-            const { el, value, priority } = this.#topAligned
-            el.style.setProperty('vertical-align', value, priority)
-            this.#topAligned = null
         }
         // Read every element's style before writing any of them. The margins
         // below are resolved values, so reading one flushes layout, and writing
@@ -1437,7 +1443,7 @@ class View {
         }
         // The space above the first shown image in the flow, if it opens its
         // section
-        const first = [...els].find(el => el.getClientRects().length && inFlow(el, doc.body))
+        const first = getOpeningImage(doc, els)
         const leading = first && this.#column && !vertical && !applyFullscreen
             ? getLeadingSpace(doc, first) : 0
         // `100%` caps the border box, and the element's own margins sit
@@ -1533,21 +1539,40 @@ class View {
                 }
             }
         }
-        // An image that opens its section and fills the page gives up the
-        // space above it, and the descent of its line below it, to fit on the
-        // first page. Its height is read with the clamps above in place, so a
-        // width clamp that keeps it short counts; that costs one more layout,
-        // only for a section that opens with an image.
-        if (leading > 0 && parseFloat(doc.defaultView.getComputedStyle(first).height)
-            + leading > availableHeight) {
-            this.#topAligned = { el: first,
-                value: first.style.getPropertyValue('vertical-align'),
-                priority: first.style.getPropertyPriority('vertical-align') }
-            setStylesImportant(first, {
-                'max-height': `${height - marginTop - marginBottom - leading}px`,
-                'vertical-align': 'top',
-            })
-        }
+        this.#fitOpeningImage(first, leading)
+    }
+    // An image that opens its section and fills the page gives up the space
+    // above it, and the descent of its line below it, to fit on the first
+    // page. Its height is read with the clamps in place, so a width clamp
+    // that keeps it short counts; that costs one more layout, only for a
+    // section that opens with an image.
+    #fitOpeningImage(first, leading) {
+        const { height, marginTop, marginBottom } = this.#layout
+        const pageHeight = height - marginTop - marginBottom
+        if (!(leading > 0) || parseFloat(
+            this.document.defaultView.getComputedStyle(first).height) + leading <= pageHeight) return
+        const { style } = first
+        this.#fitted = { el: first, clamp: style.getPropertyValue('max-height'),
+            value: style.getPropertyValue('vertical-align'),
+            priority: style.getPropertyPriority('vertical-align') }
+        setStylesImportant(first, { 'max-height': `${pageHeight - leading}px`, 'vertical-align': 'top' })
+    }
+    #unfitOpeningImage() {
+        if (!this.#fitted) return
+        const { el, clamp, value, priority } = this.#fitted
+        el.style.setProperty('max-height', clamp, 'important')
+        el.style.setProperty('vertical-align', value, priority)
+        this.#fitted = null
+    }
+    // A restyle can change the space above the opening image (a font size
+    // under margins in em) without a new layout, so fit it again
+    refitOpeningImage() {
+        const doc = this.document
+        if (!doc?.body || !this.#layout.height || !this.#column || this.#vertical
+            || doc.documentElement.hasAttribute('data-duokan-page-fullscreen')) return
+        this.#unfitOpeningImage()
+        const first = getOpeningImage(doc)
+        if (first) this.#fitOpeningImage(first, getLeadingSpace(doc, first))
     }
     get #zoom() {
         // Safari does not zoom the client rects, while Chrome, Edge and Firefox does
@@ -5203,7 +5228,10 @@ export class Paginator extends HTMLElement {
             this.#applyStyles(view.document)
 
             // needed because the resize observer doesn't work in Firefox
-            reflows.push(fontsReady(view.document).then(() => view.expand()))
+            reflows.push(fontsReady(view.document).then(() => {
+                view.refitOpeningImage()
+                view.expand()
+            }))
         }
         if (visible) Promise.all(reflows).then(() => {
             if (!this.scrolled || this.#primaryView !== restyled
