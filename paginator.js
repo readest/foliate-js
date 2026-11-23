@@ -818,11 +818,63 @@ const setStylesImportant = (el, styles) => {
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v, 'important')
 }
 
+// The space above an image that opens its section, with no shown text or
+// block before it: the top margins (adjoining ones collapse into the largest positive plus
+// the most negative; a border, a padding or a new formatting context keeps
+// them apart), borders and paddings of the blocks it opens, and its own top
+// margin. At the start of a
+// section none of that can go to a previous page, so an image clamped to the
+// page height ends below the page: WebKit cuts its bottom onto the next page,
+// and Chromium moves it there and leaves the first page blank
+// (readest/readest#6676).
+const getLeadingSpace = (doc, el) => {
+    const texts = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+    const range = doc.createRange()
+    for (let node; (node = texts.nextNode())
+        && el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING;) {
+        if (!node.data.trim()) continue
+        // text with no box (a hidden heading, a <style>) takes no space
+        range.selectNodeContents(node)
+        if (range.getClientRects().length) return 0
+    }
+    // after a block with a height there's a break before the image, and the
+    // engines move it whole to the next page, where its margin is dropped
+    const win = doc.defaultView
+    for (let node = el; node !== doc.body; node = node.parentElement)
+        for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
+            const { display } = win.getComputedStyle(sib)
+            if (!display.startsWith('inline') && display !== 'contents'
+                && sib.getBoundingClientRect().height) return 0
+        }
+    const blocks = []
+    for (let node = el.parentElement; node && node !== doc.documentElement; node = node.parentElement)
+        blocks.unshift(node)
+    let space = 0, positive = 0, negative = 0
+    for (const node of blocks) {
+        const { display, overflowX, overflowY, marginTop, borderTopWidth, paddingTop }
+            = win.getComputedStyle(node)
+        if (display === 'inline' || display === 'contents') continue
+        const margin = parseFloat(marginTop) || 0
+        positive = Math.max(positive, margin)
+        negative = Math.min(negative, margin)
+        const edge = (parseFloat(borderTopWidth) || 0) + (parseFloat(paddingTop) || 0)
+        const ownContext = (display !== 'block' && display !== 'list-item')
+            || ![overflowX, overflowY].every(o => o === 'visible' || o === 'clip')
+        if (edge || ownContext) {
+            space += positive + negative + edge
+            positive = negative = 0
+        }
+    }
+    return space + positive + negative + (parseFloat(win.getComputedStyle(el).marginTop) || 0)
+}
+
 class View {
     #observer = new ResizeObserver(() => this.expand())
     #element = document.createElement('div')
     #iframe = document.createElement('iframe')
     #contentRange = document.createRange()
+    // the opening image top-aligned to fit, with its own inline alignment
+    #topAligned = null
     #overlayer
     #vertical = false
     #rtl = false
@@ -1351,6 +1403,11 @@ class View {
             el.style.removeProperty('max-width')
             el.style.removeProperty('max-height')
         }
+        if (this.#topAligned) {
+            const { el, value, priority } = this.#topAligned
+            el.style.setProperty('vertical-align', value, priority)
+            this.#topAligned = null
+        }
         // Read every element's style before writing any of them. The margins
         // below are resolved values, so reading one flushes layout, and writing
         // the previous element's clamp dirtied it again — interleaving the two
@@ -1367,6 +1424,10 @@ class View {
             measured.push({ el, maxHeight, maxWidth,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
+        // The space above the first shown image, if it opens its section
+        const first = [...els].find(el => el.getClientRects().length)
+        const leading = first && this.#column && !vertical && !applyFullscreen
+            ? getLeadingSpace(doc, first) : 0
         // `100%` caps the border box, and the element's own margins sit
         // outside it, so an element the book sized at or past the column
         // still hangs its margins over the edge — the IDPF `trees` canvas
@@ -1459,6 +1520,21 @@ class View {
                     ancestor = ancestor.parentElement
                 }
             }
+        }
+        // An image that opens its section and fills the page gives up the
+        // space above it, and the descent of its line below it, to fit on the
+        // first page. Its height is read with the clamps above in place, so a
+        // width clamp that keeps it short counts; that costs one more layout,
+        // only for a section that opens with an image.
+        if (leading > 0 && parseFloat(doc.defaultView.getComputedStyle(first).height)
+            + leading > availableHeight) {
+            this.#topAligned = { el: first,
+                value: first.style.getPropertyValue('vertical-align'),
+                priority: first.style.getPropertyPriority('vertical-align') }
+            setStylesImportant(first, {
+                'max-height': `${height - marginTop - marginBottom - leading}px`,
+                'vertical-align': 'top',
+            })
         }
     }
     get #zoom() {
