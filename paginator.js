@@ -818,38 +818,46 @@ const setStylesImportant = (el, styles) => {
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v, 'important')
 }
 
-// The space above an image that opens its section with no text before it:
-// the top margins (adjoining ones collapse to the largest; a border, a
-// padding or a new formatting context keeps them apart), borders and
-// paddings of the blocks it opens, and its own top margin. At the start of a
+// The space above an image that opens its section with no shown text before
+// it: the top margins (adjoining ones collapse into the largest positive plus
+// the most negative; a border, a padding or a new formatting context keeps
+// them apart), borders and paddings of the blocks it opens, and its own top
+// margin. At the start of a
 // section none of that can go to a previous page, so an image clamped to the
 // page height ends below the page: WebKit cuts its bottom onto the next page,
 // and Chromium moves it there and leaves the first page blank
 // (readest/readest#6676).
 const getLeadingSpace = (doc, el) => {
     const texts = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+    const range = doc.createRange()
     for (let node; (node = texts.nextNode())
-        && el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING;)
-        if (node.data.trim() && !node.parentElement.closest('style, script')) return 0
+        && el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING;) {
+        if (!node.data.trim()) continue
+        // text with no box (a hidden heading, a <style>) takes no space
+        range.selectNodeContents(node)
+        if (range.getClientRects().length) return 0
+    }
     const win = doc.defaultView
     const blocks = []
     for (let node = el.parentElement; node && node !== doc.documentElement; node = node.parentElement)
         blocks.unshift(node)
-    let space = 0, margin = 0
+    let space = 0, positive = 0, negative = 0
     for (const node of blocks) {
         const { display, overflowX, overflowY, marginTop, borderTopWidth, paddingTop }
             = win.getComputedStyle(node)
         if (display === 'inline' || display === 'contents') continue
-        margin = Math.max(margin, parseFloat(marginTop) || 0)
+        const margin = parseFloat(marginTop) || 0
+        positive = Math.max(positive, margin)
+        negative = Math.min(negative, margin)
         const edge = (parseFloat(borderTopWidth) || 0) + (parseFloat(paddingTop) || 0)
         const ownContext = (display !== 'block' && display !== 'list-item')
             || ![overflowX, overflowY].every(o => o === 'visible' || o === 'clip')
         if (edge || ownContext) {
-            space += margin + edge
-            margin = 0
+            space += positive + negative + edge
+            positive = negative = 0
         }
     }
-    return space + margin + Math.max(0, parseFloat(win.getComputedStyle(el).marginTop) || 0)
+    return space + positive + negative + (parseFloat(win.getComputedStyle(el).marginTop) || 0)
 }
 
 class View {
