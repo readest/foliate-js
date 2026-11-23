@@ -3209,8 +3209,10 @@ export class Paginator extends HTMLElement {
                 const edgeIndex = dir < 0
                     ? sorted[0]?.[0] ?? this.#primaryIndex
                     : sorted[sorted.length - 1]?.[0] ?? this.#primaryIndex
-                // Book boundary: nowhere to go, settle the drag back.
-                if (this.#adjacentIndex(dir, edgeIndex) == null) return this.#settleDrag()
+                // Book boundary: nowhere to go, so land a caught turn or
+                // settle the drag back.
+                if (this.#adjacentIndex(dir, edgeIndex) == null) return interruptedTarget != null
+                    ? this.#scrollTo(interruptedTarget, 'snap') : this.#settleDrag()
                 this.#settleDrag(true)
             }
             return doGoTo()
@@ -4021,7 +4023,8 @@ export class Paginator extends HTMLElement {
         if (this.#layeredTurn && state?.layeredGesture === 'rejected'
             && !this.#vertical) return
         if (this.#vertical) {
-            this.#settleDrag()
+            // A touch that caught a turn still lets it finish.
+            if (!this.#resumeInterruptedTurn()) this.#settleDrag()
         } else if (wasScrolled && this.#scrollBounds) {
             this.#scrollTo(this.#scrollBounds[0], 'snap')
         }
