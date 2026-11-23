@@ -818,8 +818,8 @@ const setStylesImportant = (el, styles) => {
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v, 'important')
 }
 
-// The space above an image that opens its section with no shown text before
-// it: the top margins (adjoining ones collapse into the largest positive plus
+// The space above an image that opens its section, with no shown text or
+// block before it: the top margins (adjoining ones collapse into the largest positive plus
 // the most negative; a border, a padding or a new formatting context keeps
 // them apart), borders and paddings of the blocks it opens, and its own top
 // margin. At the start of a
@@ -837,7 +837,15 @@ const getLeadingSpace = (doc, el) => {
         range.selectNodeContents(node)
         if (range.getClientRects().length) return 0
     }
+    // after a block with a height there's a break before the image, and the
+    // engines move it whole to the next page, where its margin is dropped
     const win = doc.defaultView
+    for (let node = el; node !== doc.body; node = node.parentElement)
+        for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
+            const { display } = win.getComputedStyle(sib)
+            if (!display.startsWith('inline') && display !== 'contents'
+                && sib.getBoundingClientRect().height) return 0
+        }
     const blocks = []
     for (let node = el.parentElement; node && node !== doc.documentElement; node = node.parentElement)
         blocks.unshift(node)
