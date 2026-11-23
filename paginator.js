@@ -3101,7 +3101,9 @@ export class Paginator extends HTMLElement {
         // to the host's toolbar toggle, including a sideways lift-off flick.
         // Settle any horizontal drag started before the gesture turned vertical.
         if (this.#vertical && Math.abs(dx) <= Math.abs(dy)) {
-            this.#settleDrag()
+            // A touch that caught a turn still lets it finish.
+            if (interruptedTarget != null) this.#scrollTo(interruptedTarget, 'snap')
+            else this.#settleDrag()
             return
         }
         const horizontal = Math.abs(vx) * 2 > Math.abs(vy)
@@ -3116,7 +3118,11 @@ export class Paginator extends HTMLElement {
             // visibly follows the finger).
             const width = this.#container.getBoundingClientRect().width
             const forwardSign = this.#rtl ? 1 : -1
-            const dragged = this.#dragTranslateX
+            // A touch that took over an in-flight turn is judged, as in the
+            // horizontal branch below, from that turn's target page by the
+            // finger's own travel, not by where the views froze mid-slide.
+            const caught = interruptedTarget != null
+            const dragged = caught ? -dx : this.#dragTranslateX
             // Flick direction in translate space: a rightward finger (vx < 0)
             // drags the views right.
             const flick = Math.abs(vx) > 0.3 ? -Math.sign(vx) : 0
@@ -3129,7 +3135,10 @@ export class Paginator extends HTMLElement {
             } else {
                 turn = 0
             }
-            page = this.#renderedPage + turn * forwardSign
+            const base = caught
+                ? Math.round(Math.abs(interruptedTarget) / this.size)
+                : this.#renderedPage
+            page = base + turn * forwardSign
         } else {
             const velocity = vx
             const avgVelocity = dx / dt
