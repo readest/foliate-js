@@ -199,9 +199,12 @@ export class Overlayer {
             // 1.45 em with Noto Sans CJK, the fallback on a Chinese-locale
             // Linux without them, so highlights ran into the lines above and
             // below (readest/readest#7853). Keep each rect to its span's box.
+            // pdf.js sets `data-main-rotation` on every text layer it renders,
+            // so a book's own `textLayer` class is left alone.
             const { startContainer } = subRange
             const box = startContainer.nodeType === Node.TEXT_NODE
-                ? startContainer.parentElement?.closest('.textLayer span')?.getBoundingClientRect()
+                ? startContainer.parentElement
+                    ?.closest('.textLayer[data-main-rotation] span')?.getBoundingClientRect()
                 : null
             for (const textRect of subRange.getClientRects()) {
                 const rect = box ? {
