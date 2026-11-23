@@ -36,12 +36,14 @@ export const isFootnoteBacklink = a => {
     if (types.has('backlink') || roles.has('doc-backlink')) return true
     if (a.classList?.contains?.('backlink') || a.classList?.contains?.('footnote-backref') || a.classList?.contains?.('reversefootnote')) return true
     const text = a.textContent?.trim() ?? ''
-    return /^[（(［\[【〔〈〖]?\s*(?:(?:本文|解説|上)[へに]?)?(?:戻る|もどる|back|return|jump back)\s*[）)］\]】〕〉〗]?$/i.test(text)
+    return /^[（(［[【〔〈〖]?\s*(?:(?:本文|解説|上)[へに]?)?(?:戻る|もどる|back|return|jump back)\s*[）)］\]】〕〉〗]?$/i.test(text)
         || /^[\^↩↑←⏎]$/.test(text)
 }
 
 const FOOTNOTE_START_RE =
-    /^\s*(?:[（(［\[【〔〈〖]?\s*(?:[＊*※†‡]\s*[0-9０-９]*|(?:[a-zA-Z]{1,2}|(?:訳|原|編)?[注註](?:釈)?|Notes?)\s*[0-9０-９]+|[①-⑳㉑-㊿]|[0-9０-９]+)\s*[）)］\]】〕〉〗]?[.、．\s　])/
+    /^\s*(?:[（(［[【〔〈〖]?\s*(?:[＊*※†‡]\s*[0-9０-９]*|(?:[a-zA-Z]{1,2}|(?:訳|原|編)?[注註](?:釈)?|Notes?)\s*[0-9０-９]+|[①-⑳㉑-㊿]|[0-9０-９]+)\s*[）)］\]】〕〉〗]?[.、．\s\u3000])/
+
+const idPattern = id => id.replace(/\d+/g, '#')
 
 export const isNextFootnote = (next, el) => {
     if (!next) return false
@@ -50,9 +52,11 @@ export const isNextFootnote = (next, el) => {
     if (/\bdoc-(?:footnote|endnote|biblioentry)\b/.test(role)) return true
     const epubType = next.getAttribute?.('epub:type') ?? ''
     if (/\b(?:footnote|endnote|rearnote)\b/.test(epubType)) return true
-    if (next.id) {
-        if (!el?.id || (!next.id.startsWith(el.id) && !el.id.startsWith(next.id))) return true
-    }
+    // Another note's id is the note's own with a different number (fn1,
+    // fn2, fn10). A paragraph with an unrelated id of its own (p0042) or one
+    // that extends the note's (fn1-2) continues the note.
+    if (next.id && (!el?.id || (next.id !== el.id && idPattern(next.id) === idPattern(el.id))))
+        return true
     if (next.querySelector?.('a[id], a[name]')) return true
     if (FOOTNOTE_START_RE.test(next.textContent ?? '')) return true
     const anchors = Array.from(next.querySelectorAll?.('a') ?? [])
