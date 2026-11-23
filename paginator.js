@@ -837,13 +837,16 @@ const getLeadingSpace = (doc, el) => {
         range.selectNodeContents(node)
         if (range.getClientRects().length) return 0
     }
-    // after a block with a height there's a break before the image, and the
-    // engines move it whole to the next page, where its margin is dropped
+    // after a block in the flow with a height there's a break before the
+    // image, and the engines move it whole to the next page, where its margin
+    // is dropped. A positioned or floated box (the reader's skip link) isn't
+    // in the flow.
     const win = doc.defaultView
     for (let node = el; node !== doc.body; node = node.parentElement)
         for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
-            const { display } = win.getComputedStyle(sib)
+            const { display, position, float } = win.getComputedStyle(sib)
             if (!display.startsWith('inline') && display !== 'contents'
+                && position !== 'absolute' && position !== 'fixed' && float === 'none'
                 && sib.getBoundingClientRect().height) return 0
         }
     const blocks = []
