@@ -818,11 +818,42 @@ const setStylesImportant = (el, styles) => {
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v, 'important')
 }
 
+// The space above an image that opens its section with no text before it:
+// the top margins (adjoining ones collapse to the largest), borders and
+// paddings of the blocks it opens, and its own top margin. At the start of a
+// section none of that can go to a previous page, so an image clamped to the
+// page height ends below the page: WebKit cuts its bottom onto the next page,
+// and Chromium moves it there and leaves the first page blank
+// (readest/readest#6676).
+const getLeadingSpace = (doc, el) => {
+    const texts = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+    for (let node; (node = texts.nextNode())
+        && el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING;)
+        if (node.data.trim() && !node.parentElement.closest('style, script')) return 0
+    const win = doc.defaultView
+    const blocks = []
+    for (let node = el.parentElement; node && node !== doc.documentElement; node = node.parentElement)
+        blocks.unshift(node)
+    let space = 0, margin = 0
+    for (const node of blocks) {
+        const { display, marginTop, borderTopWidth, paddingTop } = win.getComputedStyle(node)
+        if (display === 'inline' || display === 'contents') continue
+        margin = Math.max(margin, parseFloat(marginTop) || 0)
+        const edge = (parseFloat(borderTopWidth) || 0) + (parseFloat(paddingTop) || 0)
+        if (edge) {
+            space += margin + edge
+            margin = 0
+        }
+    }
+    return space + margin + Math.max(0, parseFloat(win.getComputedStyle(el).marginTop) || 0)
+}
+
 class View {
     #observer = new ResizeObserver(() => this.expand())
     #element = document.createElement('div')
     #iframe = document.createElement('iframe')
     #contentRange = document.createRange()
+    #topAlignedImage = null
     #overlayer
     #vertical = false
     #rtl = false
@@ -1349,6 +1380,8 @@ class View {
             el.style.removeProperty('max-width')
             el.style.removeProperty('max-height')
         }
+        this.#topAlignedImage?.style.removeProperty('vertical-align')
+        this.#topAlignedImage = null
         // Read every element's style before writing any of them. The margins
         // below are resolved values, so reading one flushes layout, and writing
         // the previous element's clamp dirtied it again — interleaving the two
@@ -1365,6 +1398,13 @@ class View {
             measured.push({ el, maxHeight, maxWidth,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
+        // A page-tall image that opens its section gives up the space above
+        // it, and the descent of its line below it, to fit on the first page
+        const first = els[0]
+        const leading = first && this.#column && !vertical && !applyFullscreen
+            ? getLeadingSpace(doc, first) : 0
+        const fitFirst = leading > 0 && parseFloat(
+            doc.defaultView.getComputedStyle(first).height) + leading > availableHeight
         // `100%` caps the border box, and the element's own margins sit
         // outside it, so an element the book sized at or past the column
         // still hangs its margins over the edge — the IDPF `trees` canvas
@@ -1387,7 +1427,8 @@ class View {
                 'max-height': vertical
                     ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight
                         : fill(elMarginTop, elMarginBottom))
-                    : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))}px`,
+                    : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))
+                        - (fitFirst && el === first ? leading : 0)}px`,
                 'max-width': vertical
                     ? `${width - (applyFullscreen ? 0 : (marginLeft + marginRight))}px`
                     : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth
@@ -1397,6 +1438,10 @@ class View {
                 'break-inside': 'avoid',
                 'box-sizing': 'border-box',
             })
+            if (fitFirst && el === first) {
+                setStylesImportant(el, { 'vertical-align': 'top' })
+                this.#topAlignedImage = el
+            }
             if (applyFullscreen) {
                 setStylesImportant(doc.documentElement, {
                     position: 'relative',
