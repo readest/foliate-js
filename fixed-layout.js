@@ -1578,7 +1578,7 @@ export class FixedLayout extends HTMLElement {
                 return spread
             }
             if (pageSpread === 'center') {
-                const spread = last.left || last.right ? newSpread() : last
+                const spread = last.center || last.left || last.right ? newSpread() : last
                 spread.center = section
             }
             else if (pageSpread === 'left') {
