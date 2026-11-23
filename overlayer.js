@@ -192,14 +192,34 @@ export class Overlayer {
         const root = this.#doc.documentElement.getBoundingClientRect()
         const rects = []
         for (const subRange of this.#splitRange(range)) {
-            for (const rect of subRange.getClientRects()) {
+            // A PDF text layer (pdf.js) sets each run of text in a transparent
+            // span as tall as the PDF's glyphs, in whatever font the system
+            // gives its generic family. A text rect is as tall as that font's
+            // ascent plus descent: 1.1 em with Roboto or Liberation Sans, but
+            // 1.45 em with Noto Sans CJK, the fallback on a Chinese-locale
+            // Linux without them, so highlights ran into the lines above and
+            // below (readest/readest#7853). Keep each rect to its span's box.
+            // pdf.js sets `data-main-rotation` on every text layer it renders,
+            // so a book's own `textLayer` class is left alone.
+            const { startContainer } = subRange
+            const box = startContainer.nodeType === Node.TEXT_NODE
+                ? startContainer.parentElement
+                    ?.closest('.textLayer[data-main-rotation] span')?.getBoundingClientRect()
+                : null
+            for (const textRect of subRange.getClientRects()) {
+                const rect = box ? {
+                    left: Math.max(textRect.left, box.left),
+                    top: Math.max(textRect.top, box.top),
+                    right: Math.min(textRect.right, box.right),
+                    bottom: Math.min(textRect.bottom, box.bottom),
+                } : textRect
                 const scaled = {
                     left: rect.left * zoom,
                     top: rect.top * zoom,
                     right: rect.right * zoom,
                     bottom: rect.bottom * zoom,
-                    width: rect.width * zoom,
-                    height: rect.height * zoom,
+                    width: (rect.right - rect.left) * zoom,
+                    height: (rect.bottom - rect.top) * zoom,
                 }
                 scaled.page = pageOf(root, scaled)
                 rects.push(scaled)
