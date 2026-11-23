@@ -1417,8 +1417,9 @@ class View {
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
         // A page-tall image that opens its section gives up the space above
-        // it, and the descent of its line below it, to fit on the first page
-        const first = els[0]
+        // it, and the descent of its line below it, to fit on the first page.
+        // A hidden one before it doesn't count.
+        const first = [...els].find(el => el.getClientRects().length)
         const leading = first && this.#column && !vertical && !applyFullscreen
             ? getLeadingSpace(doc, first) : 0
         const fitFirst = leading > 0 && parseFloat(
