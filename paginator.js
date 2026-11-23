@@ -1416,14 +1416,10 @@ class View {
             measured.push({ el, maxHeight, maxWidth,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
-        // A page-tall image that opens its section gives up the space above
-        // it, and the descent of its line below it, to fit on the first page.
-        // A hidden one before it doesn't count.
+        // The space above the first shown image, if it opens its section
         const first = [...els].find(el => el.getClientRects().length)
         const leading = first && this.#column && !vertical && !applyFullscreen
             ? getLeadingSpace(doc, first) : 0
-        const fitFirst = leading > 0 && parseFloat(
-            doc.defaultView.getComputedStyle(first).height) + leading > availableHeight
         // `100%` caps the border box, and the element's own margins sit
         // outside it, so an element the book sized at or past the column
         // still hangs its margins over the edge — the IDPF `trees` canvas
@@ -1446,8 +1442,7 @@ class View {
                 'max-height': vertical
                     ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight
                         : fill(elMarginTop, elMarginBottom))
-                    : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))
-                        - (fitFirst && el === first ? leading : 0)}px`,
+                    : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))}px`,
                 'max-width': vertical
                     ? `${width - (applyFullscreen ? 0 : (marginLeft + marginRight))}px`
                     : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth
@@ -1457,12 +1452,6 @@ class View {
                 'break-inside': 'avoid',
                 'box-sizing': 'border-box',
             })
-            if (fitFirst && el === first) {
-                this.#topAligned = { el,
-                    value: el.style.getPropertyValue('vertical-align'),
-                    priority: el.style.getPropertyPriority('vertical-align') }
-                setStylesImportant(el, { 'vertical-align': 'top' })
-            }
             if (applyFullscreen) {
                 setStylesImportant(doc.documentElement, {
                     position: 'relative',
@@ -1523,6 +1512,21 @@ class View {
                     ancestor = ancestor.parentElement
                 }
             }
+        }
+        // An image that opens its section and fills the page gives up the
+        // space above it, and the descent of its line below it, to fit on the
+        // first page. Its height is read with the clamps above in place, so a
+        // width clamp that keeps it short counts; that costs one more layout,
+        // only for a section that opens with an image.
+        if (leading > 0 && parseFloat(doc.defaultView.getComputedStyle(first).height)
+            + leading > availableHeight) {
+            this.#topAligned = { el: first,
+                value: first.style.getPropertyValue('vertical-align'),
+                priority: first.style.getPropertyPriority('vertical-align') }
+            setStylesImportant(first, {
+                'max-height': `${height - marginTop - marginBottom - leading}px`,
+                'vertical-align': 'top',
+            })
         }
     }
     get #zoom() {
