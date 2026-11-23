@@ -211,12 +211,19 @@ export const startCssAnimateScroll = (element, scrollProp, startValue, endValue,
 // viewport shows only the page background, and the incoming page follows in
 // from the opposite edge. `startX` continues from a finger drag already in
 // progress; `isStale` lets a newer turn supersede this one: when it reports
-// true, this animation stops touching the DOM.
-const slideTurnAnimation = (element, scrollProp, endValue, exitSign, width, duration, isStale, onSwap, startX = 0) => new Promise(resolve => {
+// true, this animation stops touching the DOM. Like startCssAnimateScroll it
+// returns { targetOffset, promise, interrupt }: interrupt('visual') rests the
+// views where they are on screen and returns that translateX, 'abort' clears
+// them for the caller to place. The promise resolves true when interrupted.
+const slideTurnAnimation = (element, scrollProp, endValue, exitSign, width, duration, isStale, onSwap, startX = 0) => {
+    let resolve
+    const promise = new Promise(r => resolve = r)
+    const done = { targetOffset: endValue, promise, interrupt: () => 0 }
     const children = [...element.children]
     if (document.hidden || !children.length) {
         element[scrollProp] = endValue
-        return resolve()
+        resolve(false)
+        return done
     }
     const half = duration / 2
     const exitTarget = exitSign * width
@@ -229,13 +236,21 @@ const slideTurnAnimation = (element, scrollProp, endValue, exitSign, width, dura
             el.style.transform = transform
         }
     }
+    const cleanup = () => {
+        for (const el of children) {
+            el.style.willChange = ''
+            el.style.transition = ''
+            el.style.transform = ''
+        }
+    }
+    let timer
     for (const el of children) el.style.willChange = 'transform'
     // Phase 1: the outgoing page accelerates off-screen.
     setAll('none', `translateX(${startX}px)`)
     element.getBoundingClientRect()
     setAll(`transform ${exitDuration}ms cubic-bezier(0.55, 0, 1, 0.45)`, `translateX(${exitTarget}px)`)
-    setTimeout(() => {
-        if (isStale()) return resolve()
+    timer = setTimeout(() => {
+        if (isStale()) return resolve(true)
         // Midpoint: swap pages while everything is off-screen.
         element[scrollProp] = endValue
         onSwap?.()
@@ -243,17 +258,26 @@ const slideTurnAnimation = (element, scrollProp, endValue, exitSign, width, dura
         element.getBoundingClientRect()
         // Phase 2: the incoming page decelerates into place.
         setAll(`transform ${half}ms cubic-bezier(0, 0.55, 0.45, 1)`, 'translateX(0px)')
-        setTimeout(() => {
-            if (isStale()) return resolve()
-            for (const el of children) {
-                el.style.willChange = ''
-                el.style.transition = ''
-                el.style.transform = ''
-            }
-            resolve()
+        timer = setTimeout(() => {
+            if (isStale()) return resolve(true)
+            cleanup()
+            resolve(false)
         }, half + 20)
     }, exitDuration + 10)
-})
+    done.interrupt = (mode = 'visual') => {
+        clearTimeout(timer)
+        resolve(true)
+        if (mode === 'abort') {
+            cleanup()
+            return 0
+        }
+        const transform = getComputedStyle(children[0]).transform
+        const x = transform && transform !== 'none' ? new DOMMatrix(transform).m41 : 0
+        setAll('none', `translateX(${x}px)`)
+        return x
+    }
+    return done
+}
 
 // Layered page-turn styles (readest#555). The `slide` and `curl` turn styles
 // need the outgoing and incoming page on screen at once as separate layers,
@@ -3341,14 +3365,15 @@ export class Paginator extends HTMLElement {
             layeredHorizontalSampleTime: null,
         }
         if (replacementTouch || multiTouch) this.#touchScrolled = false
-        // A touch on a horizontal book takes over an in-flight push turn at
-        // the offset it shows on screen, so a quick second swipe drags from
-        // there instead of waiting out the first turn's 300ms. The release is
-        // then judged from the interrupted turn's target (see snap).
-        if (!this.#vertical && !this.scrolled && !this.#layeredTurn && this.#activeScrollAnim) {
+        // A touch takes over an in-flight push turn at the offset it shows on
+        // screen, so a quick second swipe drags from there instead of waiting
+        // out the first turn's 300ms, and a tap finishes it. A horizontal
+        // release is then judged from the interrupted turn's target (see snap).
+        if (!this.scrolled && !this.#layeredTurn && this.#activeScrollAnim) {
             const { targetOffset } = this.#interruptScrollAnim('visual')
             const { size } = this
-            if (size > 0) {
+            if (this.#vertical) this.#interruptedSnapTarget = targetOffset
+            else if (size > 0) {
                 const page = Math.round(Math.abs(targetOffset) / size)
                 const sorted = this.#sortedViews
                 const noPrev = this.#adjacentIndex(-1, sorted[0]?.[0] ?? this.#primaryIndex) == null
@@ -3849,10 +3874,10 @@ export class Paginator extends HTMLElement {
 
         if (!this.#touchScrolled) {
             // A tap that never dragged may still have taken over a mid-flight
-            // transform in #onTouchStart; put the views back to rest, or finish
-            // the push turn it froze.
-            if (this.#vertical && !this.scrolled && this.#dragTranslateX) this.#settleDrag()
-            else this.#resumeInterruptedTurn()
+            // transform in #onTouchStart; finish the push turn it froze, or put
+            // the views back to rest.
+            if (!this.#resumeInterruptedTurn()
+                && this.#vertical && !this.scrolled && this.#dragTranslateX) this.#settleDrag()
             return
         }
         this.#touchScrolled = false
@@ -4061,7 +4086,9 @@ export class Paginator extends HTMLElement {
         this.#activeScrollAnim = null
         anim.interruptId = ++this.#slideTurnId
         anim.interruptGen = this.#scrollGen
-        anim.interrupt(mode)
+        const x = anim.interrupt(mode)
+        // A vertical turn rests at a translateX, which a drag or the next turn continues from.
+        if (this.#vertical && !this.scrolled) this.#dragTranslateX = x
         this.#isAnimating = false
         this.#bgAnimContext = null
         return anim
@@ -4154,19 +4181,15 @@ export class Paginator extends HTMLElement {
                 // Continue from a finger drag already in progress.
                 const dragStartX = this.#dragTranslateX
                 this.#dragTranslateX = 0
-                return slideTurnAnimation(
+                const anim = slideTurnAnimation(
                     this.#container, this.scrollProp, offset, exitSign, width, 300,
                     () => id !== this.#slideTurnId,
                     // Reposition the background segments for the new scroll
                     // offset while both pages are off-screen.
                     () => this.#replaceBackground(),
                     dragStartX,
-                ).then(() => {
-                    if (id !== this.#slideTurnId) return
-                    this.#isAnimating = false
-                    this.#scrollBounds = [offset, this.atStart ? 0 : size, this.atEnd ? 0 : size]
-                    this.#afterScroll(reason)
-                })
+                )
+                return this.#trackScrollAnim(anim, id, offset, reason)
             }
             const id = ++this.#slideTurnId
             // Snapshot the invariant paint inputs once; every per-frame
