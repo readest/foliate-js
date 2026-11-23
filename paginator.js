@@ -818,24 +818,35 @@ const setStylesImportant = (el, styles) => {
     for (const [k, v] of Object.entries(styles)) style.setProperty(k, v, 'important')
 }
 
+// Whether a node is in the normal flow: no positioned or floated box holds it
+const inFlow = (node, body) => {
+    const win = body.ownerDocument.defaultView
+    for (let el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        el && el !== body; el = el.parentElement) {
+        const { position, float } = win.getComputedStyle(el)
+        if (position === 'absolute' || position === 'fixed' || float !== 'none') return false
+    }
+    return true
+}
+
 // The space above an image that opens its section, with no shown text or
-// block before it: the top margins (adjoining ones collapse into the largest positive plus
-// the most negative; a border, a padding or a new formatting context keeps
-// them apart), borders and paddings of the blocks it opens, and its own top
-// margin. At the start of a
-// section none of that can go to a previous page, so an image clamped to the
-// page height ends below the page: WebKit cuts its bottom onto the next page,
-// and Chromium moves it there and leaves the first page blank
-// (readest/readest#6676).
+// block in the flow before it: the top margins (adjoining ones collapse into
+// the largest positive plus the most negative; a border, a padding or a new
+// formatting context keeps them apart), borders and paddings of the blocks
+// it opens, and its own top margin. At the start of a section none of that
+// can go to a previous page, so an image clamped to the page height ends
+// below the page: WebKit cuts its bottom onto the next page, and Chromium
+// moves it there and leaves the first page blank (readest/readest#6676).
 const getLeadingSpace = (doc, el) => {
     const texts = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
     const range = doc.createRange()
     for (let node; (node = texts.nextNode())
         && el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING;) {
         if (!node.data.trim()) continue
-        // text with no box (a hidden heading, a <style>) takes no space
+        // text with no box (a hidden heading, a <style>) or out of the flow
+        // (a positioned label) takes no space above the image
         range.selectNodeContents(node)
-        if (range.getClientRects().length) return 0
+        if (range.getClientRects().length && inFlow(node, doc.body)) return 0
     }
     // after a block in the flow with a height there's a break before the
     // image, and the engines move it whole to the next page, where its margin
@@ -844,10 +855,9 @@ const getLeadingSpace = (doc, el) => {
     const win = doc.defaultView
     for (let node = el; node !== doc.body; node = node.parentElement)
         for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
-            const { display, position, float } = win.getComputedStyle(sib)
+            const { display } = win.getComputedStyle(sib)
             if (!display.startsWith('inline') && display !== 'contents'
-                && position !== 'absolute' && position !== 'fixed' && float === 'none'
-                && sib.getBoundingClientRect().height) return 0
+                && inFlow(sib, doc.body) && sib.getBoundingClientRect().height) return 0
         }
     const blocks = []
     for (let node = el.parentElement; node && node !== doc.documentElement; node = node.parentElement)
@@ -1425,8 +1435,9 @@ class View {
             measured.push({ el, maxHeight, maxWidth,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
-        // The space above the first shown image, if it opens its section
-        const first = [...els].find(el => el.getClientRects().length)
+        // The space above the first shown image in the flow, if it opens its
+        // section
+        const first = [...els].find(el => el.getClientRects().length && inFlow(el, doc.body))
         const leading = first && this.#column && !vertical && !applyFullscreen
             ? getLeadingSpace(doc, first) : 0
         // `100%` caps the border box, and the element's own margins sit
