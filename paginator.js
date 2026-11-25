@@ -1947,7 +1947,7 @@ export class Paginator extends HTMLElement {
     #marginBottom = 0
     #marginRight = 0
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
-    #justAnchored = false
+    #anchoredAt = null
     #locked = false // while true, prevent any further navigation
     #pagePreview = null
     #cancelPagePreview = null
@@ -2171,11 +2171,14 @@ export class Paginator extends HTMLElement {
 
         this.#observer.observe(this.#container)
         const scrolledScrollRelocate = () => {
-            // Skip entirely while stabilizing — preserve #justAnchored
-            // so the first post-stabilization fire still sees it.
             if (this.#stabilizing) return
-            if (this.#justAnchored) this.#justAnchored = false
-            else this.#afterScroll('scroll')
+            const anchoredAt = this.#anchoredAt
+            this.#anchoredAt = null
+            // Navigation or reflow may leave the offset unchanged, or its
+            // scroll event may coalesce with a reader's scroll. Ignore only
+            // the event that still ends at the position we already reported.
+            if (anchoredAt != null && Math.abs(this.containerPosition - anchoredAt) < 1) return
+            this.#afterScroll('scroll')
         }
         // Start time of the current unbroken run of scroll events, for the
         // periodic mid-scroll relocate below; null when no run is in progress.
@@ -4599,7 +4602,7 @@ export class Paginator extends HTMLElement {
             this.#relocatedAt = this.containerPosition
         // don't set new anchor if relocation was to scroll to anchor
         if (reason === 'selection' || reason === 'navigation' || reason === 'anchor')
-            this.#justAnchored = true
+            this.#anchoredAt = this.containerPosition
         // The scroll that re-anchoring itself performs (a resize re-render)
         // lands here through the debounced container scroll listener. Taking
         // the reflowed page's visible range as the new anchor then moves the
