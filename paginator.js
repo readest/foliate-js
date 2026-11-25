@@ -1933,9 +1933,7 @@ export class Paginator extends HTMLElement {
     #footer
     #views = new Map() // Map<sectionIndex, View>
     #viewSizes = new Map() // last measured size of each view, for its growth
-    // { anchor, at }: the anchor to restore once the primary's iframe takes a
-    // resize, and the scroll offset render() left for it
-    #anchorOnFrameResize = null
+    #anchorOnFrameResize = null // { anchor } to restore once the primary's iframe takes a resize
     #primaryIndex = -1
     // Internally `index` is a render unit: a whole section, or one chunk of a
     // section too big to render whole. Spine indices only cross the public API.
@@ -2570,12 +2568,10 @@ export class Paginator extends HTMLElement {
                 if (index <= this.#primaryIndex) this.#relocatedAt = null
                 this.#keepReadingPositionOnStripChange(index)
                 if (index === this.#primaryIndex && this.#anchorOnFrameResize) {
-                    const { anchor, at } = this.#anchorOnFrameResize
+                    const { anchor } = this.#anchorOnFrameResize
                     this.#anchorOnFrameResize = null
-                    // A jump or a scroll since that render moved the reader
-                    // on, though a scroll may not have relocated yet.
-                    if (anchor === this.#anchor && Math.abs(this.containerPosition - at) < 1)
-                        this.#scrollToAnchor(anchor)
+                    // A jump or a scroll since that render set its own anchor.
+                    if (anchor === this.#anchor) this.#scrollToAnchor(anchor)
                 }
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
@@ -2606,13 +2602,8 @@ export class Paginator extends HTMLElement {
         const size = view.element.getBoundingClientRect()[this.sideProp]
         const previous = this.#viewSizes.get(index)
         this.#viewSizes.set(index, size)
-        if (index < this.#primaryIndex && previous != null && Math.abs(size - previous) > 0.5) {
-            // The offset kept for a late re-anchor follows this scroll, not a reader's.
-            const kept = this.#anchorOnFrameResize
-            const followed = kept && Math.abs(this.containerPosition - kept.at) < 1
+        if (index < this.#primaryIndex && previous != null && Math.abs(size - previous) > 0.5)
             this.containerPosition += (this.#vertical ? -1 : 1) * (size - previous)
-            if (followed) kept.at = this.containerPosition
-        }
     }
     // Hide off-screen pre-loaded views from the accessibility tree so
     // screen-reader swipe-next does not wander into them (which would land
@@ -2959,9 +2950,17 @@ export class Paginator extends HTMLElement {
         // applied. Anchor again when the primary view expands at the new
         // width (readest#7896).
         const frame = primaryView.document?.defaultView
-        this.#anchorOnFrameResize = this.scrolled && !this.#vertical && frame?.frameElement
+        const kept = this.scrolled && !this.#vertical && frame?.frameElement
             && Math.abs(frame.frameElement.getBoundingClientRect().width - frame.innerWidth) > 1
-            ? { anchor: this.#anchor, at: this.containerPosition } : null
+            ? { anchor: this.#anchor } : null
+        this.#anchorOnFrameResize = kept
+        // A body capped at the column width may not rewrap at the new width,
+        // and then the primary doesn't expand for it. Forget the anchor two
+        // frames after the iframe takes the width, once that expand is over.
+        if (kept) frame.addEventListener('resize', () => requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+                if (this.#anchorOnFrameResize === kept) this.#anchorOnFrameResize = null
+            })), { once: true })
         this.#stabilizing = stabilizing
         this.dispatchEvent(new Event('stabilized'))
     }
