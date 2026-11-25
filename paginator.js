@@ -1933,7 +1933,9 @@ export class Paginator extends HTMLElement {
     #footer
     #views = new Map() // Map<sectionIndex, View>
     #viewSizes = new Map() // last measured size of each view, for its growth
-    #anchorOnFrameResize = null // anchor to restore once the primary's iframe takes a resize
+    // { anchor, at }: the anchor to restore once the primary's iframe takes a
+    // resize, and the scroll offset render() left for it
+    #anchorOnFrameResize = null
     #primaryIndex = -1
     // Internally `index` is a render unit: a whole section, or one chunk of a
     // section too big to render whole. Spine indices only cross the public API.
@@ -2568,10 +2570,12 @@ export class Paginator extends HTMLElement {
                 if (index <= this.#primaryIndex) this.#relocatedAt = null
                 this.#keepReadingPositionOnStripChange(index)
                 if (index === this.#primaryIndex && this.#anchorOnFrameResize) {
-                    const anchor = this.#anchorOnFrameResize
+                    const { anchor, at } = this.#anchorOnFrameResize
                     this.#anchorOnFrameResize = null
-                    // A jump or a scroll since that render set its own anchor.
-                    if (anchor === this.#anchor) this.#scrollToAnchor(anchor)
+                    // A jump or a scroll since that render moved the reader
+                    // on, though a scroll may not have relocated yet.
+                    if (anchor === this.#anchor && Math.abs(this.containerPosition - at) < 1)
+                        this.#scrollToAnchor(anchor)
                 }
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
@@ -2602,8 +2606,13 @@ export class Paginator extends HTMLElement {
         const size = view.element.getBoundingClientRect()[this.sideProp]
         const previous = this.#viewSizes.get(index)
         this.#viewSizes.set(index, size)
-        if (index < this.#primaryIndex && previous != null && Math.abs(size - previous) > 0.5)
+        if (index < this.#primaryIndex && previous != null && Math.abs(size - previous) > 0.5) {
+            // The offset kept for a late re-anchor follows this scroll, not a reader's.
+            const kept = this.#anchorOnFrameResize
+            const followed = kept && Math.abs(this.containerPosition - kept.at) < 1
             this.containerPosition += (this.#vertical ? -1 : 1) * (size - previous)
+            if (followed) kept.at = this.containerPosition
+        }
     }
     // Hide off-screen pre-loaded views from the accessibility tree so
     // screen-reader swipe-next does not wander into them (which would land
@@ -2952,7 +2961,7 @@ export class Paginator extends HTMLElement {
         const frame = primaryView.document?.defaultView
         this.#anchorOnFrameResize = this.scrolled && !this.#vertical && frame?.frameElement
             && Math.abs(frame.frameElement.getBoundingClientRect().width - frame.innerWidth) > 1
-            ? this.#anchor : null
+            ? { anchor: this.#anchor, at: this.containerPosition } : null
         this.#stabilizing = stabilizing
         this.dispatchEvent(new Event('stabilized'))
     }
