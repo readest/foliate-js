@@ -943,9 +943,11 @@ class View {
     // Blank pages, possibly half of one, before the content: see expand()
     #lead = 0
     fontReady = Promise.resolve()
-    constructor({ container, onExpand, spread }) {
+    constructor({ container, onExpand, beforeExpand, spread }) {
         this.container = container
         this.onExpand = onExpand
+        // Called before expand() gives the view its new size
+        this.beforeExpand = beforeExpand
         // Where the view starts in the strip and its spine spread property:
         // () => ({ startColumn, pageSpread, continued })
         this.spread = spread
@@ -1611,6 +1613,7 @@ class View {
         // Font-ready callbacks can run while a preload yields between phases.
         // Its range and page geometry are not initialized until first render.
         if (!this.document?.documentElement || this.document !== this.#loadedDoc) return
+        this.beforeExpand?.()
         const { documentElement } = this.document
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
@@ -1933,7 +1936,7 @@ export class Paginator extends HTMLElement {
     #footer
     #views = new Map() // Map<sectionIndex, View>
     #viewSizes = new Map() // last measured size of each view, for its growth
-    #anchorOnFrameResize = null // anchor to restore once the primary's iframe takes a resize
+    #anchorOnFrameResize = null // { anchor } to restore once the primary's iframe takes a resize
     #primaryIndex = -1
     // Internally `index` is a render unit: a whole section, or one chunk of a
     // section too big to render whole. Spine indices only cross the public API.
@@ -2557,18 +2560,23 @@ export class Paginator extends HTMLElement {
             this.#container.removeChild(existing.element)
             this.#views.delete(index)
         }
+        let offsetBeforeExpand = null
         const view = new View({
             container: this,
             spread: () => this.#viewSpread(index),
+            beforeExpand: () => {
+                offsetBeforeExpand = index < this.#primaryIndex && this.#foldsStripChange()
+                    ? this.containerPosition : null
+            },
             onExpand: () => {
                 this.#layOutViewsAfter(index)
                 this.#padLastPage()
                 // The primary view, or one before it, reflowed: what the
                 // last relocate measured may no longer be on the page.
                 if (index <= this.#primaryIndex) this.#relocatedAt = null
-                this.#keepReadingPositionOnStripChange(index)
+                this.#keepReadingPositionOnStripChange(index, offsetBeforeExpand)
                 if (index === this.#primaryIndex && this.#anchorOnFrameResize) {
-                    const anchor = this.#anchorOnFrameResize
+                    const { anchor } = this.#anchorOnFrameResize
                     this.#anchorOnFrameResize = null
                     // A jump or a scroll since that render set its own anchor.
                     if (anchor === this.#anchor) this.#scrollToAnchor(anchor)
@@ -2594,16 +2602,22 @@ export class Paginator extends HTMLElement {
     // not in a vertical one (scrollLeft), so fold the growth in there. WebKit
     // on iOS 16 has no scroll anchoring at all (readest#7896): fold it in for
     // a horizontal strip there too.
-    #keepReadingPositionOnStripChange(index) {
-        if (!this.scrolled || !this.#views.has(this.#primaryIndex)) return
-        if (!this.#vertical && getComputedStyle(this.#container).overflowAnchor === 'auto') return
+    #foldsStripChange() {
+        return this.scrolled && this.#views.has(this.#primaryIndex)
+            && (this.#vertical || getComputedStyle(this.#container).overflowAnchor !== 'auto')
+    }
+    #keepReadingPositionOnStripChange(index, offsetBefore) {
+        if (!this.#foldsStripChange()) return
         const view = this.#views.get(index)
         if (!view) return
         const size = view.element.getBoundingClientRect()[this.sideProp]
         const previous = this.#viewSizes.get(index)
         this.#viewSizes.set(index, size)
+        // Shift from the offset before the view's new size: at the strip end
+        // the browser clamps the offset to a shorter strip, which already moved it.
         if (index < this.#primaryIndex && previous != null && Math.abs(size - previous) > 0.5)
-            this.containerPosition += (this.#vertical ? -1 : 1) * (size - previous)
+            this.containerPosition = (offsetBefore ?? this.containerPosition)
+                + (this.#vertical ? -1 : 1) * (size - previous)
     }
     // Hide off-screen pre-loaded views from the accessibility tree so
     // screen-reader swipe-next does not wander into them (which would land
@@ -2950,9 +2964,17 @@ export class Paginator extends HTMLElement {
         // applied. Anchor again when the primary view expands at the new
         // width (readest#7896).
         const frame = primaryView.document?.defaultView
-        this.#anchorOnFrameResize = this.scrolled && !this.#vertical && frame?.frameElement
+        const kept = this.scrolled && !this.#vertical && frame?.frameElement
             && Math.abs(frame.frameElement.getBoundingClientRect().width - frame.innerWidth) > 1
-            ? this.#anchor : null
+            ? { anchor: this.#anchor } : null
+        this.#anchorOnFrameResize = kept
+        // A body capped at the column width may not rewrap at the new width,
+        // and then the primary doesn't expand for it. Forget the anchor two
+        // frames after the iframe takes the width, once that expand is over.
+        if (kept) frame.addEventListener('resize', () => requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+                if (this.#anchorOnFrameResize === kept) this.#anchorOnFrameResize = null
+            })), { once: true })
         this.#stabilizing = stabilizing
         this.dispatchEvent(new Event('stabilized'))
     }
