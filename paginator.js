@@ -2570,7 +2570,8 @@ export class Paginator extends HTMLElement {
                 if (index === this.#primaryIndex && this.#anchorOnFrameResize) {
                     const anchor = this.#anchorOnFrameResize
                     this.#anchorOnFrameResize = null
-                    this.#scrollToAnchor(anchor)
+                    // A jump or a scroll since that render set its own anchor.
+                    if (anchor === this.#anchor) this.#scrollToAnchor(anchor)
                 }
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
