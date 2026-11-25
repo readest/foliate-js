@@ -2575,7 +2575,10 @@ export class Paginator extends HTMLElement {
                 // last relocate measured may no longer be on the page.
                 if (index <= this.#primaryIndex) this.#relocatedAt = null
                 this.#keepReadingPositionOnStripChange(index, offsetBeforeExpand)
-                if (index === this.#primaryIndex && this.#anchorOnFrameResize) {
+                // An expand for another reason, a late image, can come before
+                // the iframe takes its new width: wait for the one at that width.
+                if (index === this.#primaryIndex && this.#anchorOnFrameResize
+                    && !this.#frameWidthStale(view)) {
                     const { anchor } = this.#anchorOnFrameResize
                     this.#anchorOnFrameResize = null
                     // A jump or a scroll since that render set its own anchor.
@@ -2964,19 +2967,30 @@ export class Paginator extends HTMLElement {
         // applied. Anchor again when the primary view expands at the new
         // width (readest#7896).
         const frame = primaryView.document?.defaultView
-        const kept = this.scrolled && !this.#vertical && frame?.frameElement
-            && Math.abs(frame.frameElement.getBoundingClientRect().width - frame.innerWidth) > 1
+        const kept = this.scrolled && !this.#vertical && this.#frameWidthStale(primaryView)
             ? { anchor: this.#anchor } : null
         this.#anchorOnFrameResize = kept
         // A body capped at the column width may not rewrap at the new width,
         // and then the primary doesn't expand for it. Forget the anchor two
         // frames after the iframe takes the width, once that expand is over.
-        if (kept) frame.addEventListener('resize', () => requestAnimationFrame(() =>
-            requestAnimationFrame(() => {
+        // An expand that changes the iframe's height fires a resize too.
+        const forgetOnWidth = () => {
+            if (this.#anchorOnFrameResize !== kept) return
+            if (this.#frameWidthStale(primaryView))
+                return frame.addEventListener('resize', forgetOnWidth, { once: true })
+            requestAnimationFrame(() => requestAnimationFrame(() => {
                 if (this.#anchorOnFrameResize === kept) this.#anchorOnFrameResize = null
-            })), { once: true })
+            }))
+        }
+        if (kept) frame.addEventListener('resize', forgetOnWidth, { once: true })
         this.#stabilizing = stabilizing
         this.dispatchEvent(new Event('stabilized'))
+    }
+    // Whether a view's iframe still has the reader's width from before a resize
+    #frameWidthStale(view) {
+        const frame = view.document?.defaultView
+        return !!frame?.frameElement
+            && Math.abs(frame.frameElement.getBoundingClientRect().width - frame.innerWidth) > 1
     }
     get scrolled() {
         return this.getAttribute('flow') === 'scrolled'
