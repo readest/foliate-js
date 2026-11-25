@@ -1933,6 +1933,7 @@ export class Paginator extends HTMLElement {
     #footer
     #views = new Map() // Map<sectionIndex, View>
     #viewSizes = new Map() // last measured size of each view, for its growth
+    #anchorOnFrameResize = null // anchor to restore once the primary's iframe takes a resize
     #primaryIndex = -1
     // Internally `index` is a render unit: a whole section, or one chunk of a
     // section too big to render whole. Spine indices only cross the public API.
@@ -1947,7 +1948,7 @@ export class Paginator extends HTMLElement {
     #marginBottom = 0
     #marginRight = 0
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
-    #justAnchored = false
+    #anchoredAt = null
     #locked = false // while true, prevent any further navigation
     #pagePreview = null
     #cancelPagePreview = null
@@ -2171,11 +2172,14 @@ export class Paginator extends HTMLElement {
 
         this.#observer.observe(this.#container)
         const scrolledScrollRelocate = () => {
-            // Skip entirely while stabilizing — preserve #justAnchored
-            // so the first post-stabilization fire still sees it.
             if (this.#stabilizing) return
-            if (this.#justAnchored) this.#justAnchored = false
-            else this.#afterScroll('scroll')
+            const anchoredAt = this.#anchoredAt
+            this.#anchoredAt = null
+            // Navigation or reflow may leave the offset unchanged, or its
+            // scroll event may coalesce with a reader's scroll. Ignore only
+            // the event that still ends at the position we already reported.
+            if (anchoredAt != null && Math.abs(this.containerPosition - anchoredAt) < 1) return
+            this.#afterScroll('scroll')
         }
         // Start time of the current unbroken run of scroll events, for the
         // periodic mid-scroll relocate below; null when no run is in progress.
@@ -2563,6 +2567,12 @@ export class Paginator extends HTMLElement {
                 // last relocate measured may no longer be on the page.
                 if (index <= this.#primaryIndex) this.#relocatedAt = null
                 this.#keepReadingPositionOnStripChange(index)
+                if (index === this.#primaryIndex && this.#anchorOnFrameResize) {
+                    const anchor = this.#anchorOnFrameResize
+                    this.#anchorOnFrameResize = null
+                    // A jump or a scroll since that render set its own anchor.
+                    if (anchor === this.#anchor) this.#scrollToAnchor(anchor)
+                }
                 // Only the primary view's resize should adjust scroll;
                 // non-primary views (preloaded/adjacent) must not scroll
                 if (this.#filling || this.#stabilizing || this.scrolled) return
@@ -2581,16 +2591,19 @@ export class Paginator extends HTMLElement {
     }
     // A view before the primary that grows moves the text in view along the
     // strip. Scroll anchoring follows that in a horizontal strip (scrollTop),
-    // not in a vertical one (scrollLeft), so fold the growth in there.
+    // not in a vertical one (scrollLeft), so fold the growth in there. WebKit
+    // on iOS 16 has no scroll anchoring at all (readest#7896): fold it in for
+    // a horizontal strip there too.
     #keepReadingPositionOnStripChange(index) {
-        if (!this.scrolled || !this.#vertical || !this.#views.has(this.#primaryIndex)) return
+        if (!this.scrolled || !this.#views.has(this.#primaryIndex)) return
+        if (!this.#vertical && getComputedStyle(this.#container).overflowAnchor === 'auto') return
         const view = this.#views.get(index)
         if (!view) return
         const size = view.element.getBoundingClientRect()[this.sideProp]
         const previous = this.#viewSizes.get(index)
         this.#viewSizes.set(index, size)
         if (index < this.#primaryIndex && previous != null && Math.abs(size - previous) > 0.5)
-            this.containerPosition -= size - previous
+            this.containerPosition += (this.#vertical ? -1 : 1) * (size - previous)
     }
     // Hide off-screen pre-loaded views from the accessibility tree so
     // screen-reader swipe-next does not wander into them (which would land
@@ -2932,6 +2945,14 @@ export class Paginator extends HTMLElement {
         // RAF deferral is only needed for initial display and mode switches
         // (handled by #display), not for resize re-renders.
         this.#scrollToAnchor(this.#anchor)
+        // WebKit on iOS 16 gives the iframes a narrower reader's width only
+        // after this render, so the text rewraps after the anchor above was
+        // applied. Anchor again when the primary view expands at the new
+        // width (readest#7896).
+        const frame = primaryView.document?.defaultView
+        this.#anchorOnFrameResize = this.scrolled && !this.#vertical && frame?.frameElement
+            && Math.abs(frame.frameElement.getBoundingClientRect().width - frame.innerWidth) > 1
+            ? this.#anchor : null
         this.#stabilizing = stabilizing
         this.dispatchEvent(new Event('stabilized'))
     }
@@ -4599,7 +4620,7 @@ export class Paginator extends HTMLElement {
             this.#relocatedAt = this.containerPosition
         // don't set new anchor if relocation was to scroll to anchor
         if (reason === 'selection' || reason === 'navigation' || reason === 'anchor')
-            this.#justAnchored = true
+            this.#anchoredAt = this.containerPosition
         // The scroll that re-anchoring itself performs (a resize re-render)
         // lands here through the debounced container scroll listener. Taking
         // the reflowed page's visible range as the new anchor then moves the
