@@ -4746,7 +4746,10 @@ export class Paginator extends HTMLElement {
             const sorted = this.#sortedViews
             const firstIndex = sorted[0]?.[0]
             if (firstIndex != null && index !== this.#adjacentIndex(-1, firstIndex)
-                && index !== this.#adjacentIndex(1, sorted.at(-1)[0])) return
+                && index !== this.#adjacentIndex(1, sorted.at(-1)[0])) {
+                section.unload?.()
+                return
+            }
             // Detect a prepend: a section being inserted *above* every currently
             // loaded view in scrolled mode. The browser suppresses scroll
             // anchoring while scrollTop is 0, so the inserted section would push
@@ -5031,10 +5034,8 @@ export class Paginator extends HTMLElement {
                 }
                 this.#clearViewsExcept(keep)
             }
-            const oldIndex = this.#primaryIndex
+            // The previous section was released when its view was destroyed.
             const onLoad = async detail => {
-                if (oldIndex >= 0 && !this.#views.has(oldIndex))
-                    this.sections[oldIndex]?.unload?.()
                 this.#applyStyles(detail.doc)
                 await yieldToFrame()
                 if (this.#views.get(index)?.document !== detail.doc) return
