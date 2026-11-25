@@ -5011,10 +5011,16 @@ export class Paginator extends HTMLElement {
             if (directionChanged) {
                 this.#destroyAllViews()
             } else {
+                // Keep the loaded views up to two sections away that join up
+                // with the target. One past a section that isn't loaded would
+                // sit straight against the target in the strip, and scrolling
+                // across that edge would skip the section (readest#7883).
                 const keep = new Set([index])
-                if (!this.noContinuousScroll) {
-                    for (const [i] of this.#views) {
-                        if (Math.abs(i - index) <= 2) keep.add(i)
+                if (!this.noContinuousScroll) for (const dir of [-1, 1]) {
+                    let i = this.#adjacentIndex(dir, index)
+                    while (i != null && Math.abs(i - index) <= 2 && this.#views.has(i)) {
+                        keep.add(i)
+                        i = this.#adjacentIndex(dir, i)
                     }
                 }
                 this.#clearViewsExcept(keep)
