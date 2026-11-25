@@ -4736,18 +4736,24 @@ export class Paginator extends HTMLElement {
         if (unit?.count > 1) await this.#splitSection(unit.spine)
         const section = this.sections[index]
         if (!section || section.linear === 'no') return
-        // Detect a prepend: a section being inserted *above* every currently
-        // loaded view in scrolled mode. The browser suppresses scroll
-        // anchoring while scrollTop is 0, so the inserted section would push
-        // the visible content down and the viewport would drift into the
-        // previous section (readest/readest#4112). Capture the scroll position
-        // before the insertion so it can be restored once the view renders.
-        const firstIndex = this.#sortedViews[0]?.[0]
-        const isPrepend = this.scrolled && firstIndex != null && index < firstIndex
         let startBefore = 0
         try {
             const src = await section.load()
             const data = await section.loadContent?.()
+            // A jump while the section loaded can leave it apart from the
+            // views now loaded. Joined on anyway, it would hide the sections
+            // between them (readest/readest#7883).
+            const sorted = this.#sortedViews
+            const firstIndex = sorted[0]?.[0]
+            if (firstIndex != null && index !== this.#adjacentIndex(-1, firstIndex)
+                && index !== this.#adjacentIndex(1, sorted.at(-1)[0])) return
+            // Detect a prepend: a section being inserted *above* every currently
+            // loaded view in scrolled mode. The browser suppresses scroll
+            // anchoring while scrollTop is 0, so the inserted section would push
+            // the visible content down and the viewport would drift into the
+            // previous section (readest/readest#4112). Capture the scroll position
+            // before the insertion so it can be restored once the view renders.
+            const isPrepend = this.scrolled && firstIndex != null && index < firstIndex
             startBefore = isPrepend ? this.#renderedStart : 0
             const view = this.#createView(index)
             const compensatePrepend = () => {
@@ -5011,10 +5017,16 @@ export class Paginator extends HTMLElement {
             if (directionChanged) {
                 this.#destroyAllViews()
             } else {
+                // Keep the loaded views up to two sections away that join up
+                // with the target. One past a section that isn't loaded would
+                // sit straight against the target in the strip, and scrolling
+                // across that edge would skip the section (readest#7883).
                 const keep = new Set([index])
-                if (!this.noContinuousScroll) {
-                    for (const [i] of this.#views) {
-                        if (Math.abs(i - index) <= 2) keep.add(i)
+                if (!this.noContinuousScroll) for (const dir of [-1, 1]) {
+                    let i = this.#adjacentIndex(dir, index)
+                    while (i != null && Math.abs(i - index) <= 2 && this.#views.has(i)) {
+                        keep.add(i)
+                        i = this.#adjacentIndex(dir, i)
                     }
                 }
                 this.#clearViewsExcept(keep)
