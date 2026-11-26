@@ -1460,13 +1460,26 @@ class View {
         // book marks each footnote with an inline <img>, so a volume kept in one
         // XHTML file reaches thousands of them and paged mode froze for minutes
         // (readest/readest#6155). Batched, the whole pass costs one layout.
+        const clippingHeights = new Map()
+        const getClippingHeight = parent => {
+            if (!clippingHeights.has(parent)) {
+                const { overflowY, paddingTop, paddingBottom } = doc.defaultView.getComputedStyle(parent)
+                const height = overflowY === 'hidden' || overflowY === 'clip'
+                    ? parent.clientHeight - parseFloat(paddingTop) - parseFloat(paddingBottom)
+                    : Infinity
+                clippingHeights.set(parent, height > 0 ? height : Infinity)
+            }
+            return clippingHeights.get(parent)
+        }
         const measured = []
         for (const el of els) {
             // preserve max size if they are already set in CSS
             const { maxHeight, maxWidth, marginLeft: elMarginLeft, marginRight: elMarginRight,
                 marginTop: elMarginTop, marginBottom: elMarginBottom }
                 = doc.defaultView.getComputedStyle(el)
-            measured.push({ el, maxHeight, maxWidth,
+            const clippingHeight = this.#column && !vertical && !applyFullscreen && el.localName === 'img'
+                ? getClippingHeight(el.parentElement) : Infinity
+            measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
         // The space above the first shown image in the flow, if it opens its
@@ -1484,7 +1497,10 @@ class View {
             return margins > 0 ? `calc(100% - ${margins}px)` : '100%'
         }
         for (const m of measured) {
-            const { el, elMarginLeft, elMarginRight, elMarginTop, elMarginBottom } = m
+            const { el, clippingHeight, elMarginLeft, elMarginRight, elMarginTop, elMarginBottom } = m
+            const verticalMargins = (parseFloat(elMarginTop) || 0) + (parseFloat(elMarginBottom) || 0)
+            // A publisher's clipping wrapper can be shorter than the page.
+            const imageHeight = Math.max(1, clippingHeight - Math.max(0, verticalMargins))
             let { maxHeight, maxWidth } = m
             if (parseInt(maxWidth) > availableWidth) {
                 maxWidth = `${availableWidth}px`
@@ -1496,7 +1512,7 @@ class View {
                 'max-height': vertical
                     ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight
                         : fill(elMarginTop, elMarginBottom))
-                    : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))}px`,
+                    : `${Math.min(height - (applyFullscreen ? 0 : (marginTop + marginBottom)), imageHeight)}px`,
                 'max-width': vertical
                     ? `${width - (applyFullscreen ? 0 : (marginLeft + marginRight))}px`
                     : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth
