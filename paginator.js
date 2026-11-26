@@ -1479,12 +1479,13 @@ class View {
                 = doc.defaultView.getComputedStyle(el)
             // Preserve crops that explicitly size or offset the image.
             const authoredHeight = el.style.height || el.style.blockSize || el.getAttribute('height')
-            const sized = authoredHeight && authoredHeight !== 'auto'
+            // A fluid height can need fitting even when the figure limits the width.
+            // For undeclared heights, keep smaller authored crops as they are.
+            const needsFitting = authoredHeight === 'auto'
+                || (!authoredHeight && parseFloat(imageHeight) >= availableHeight)
             const offsetByMargin = parseFloat(elMarginTop) < 0 || parseFloat(elMarginBottom) < 0
             const clippingHeight = this.#column && !vertical && !applyFullscreen
-                && el.localName === 'img' && position === 'static' && !sized && !offsetByMargin
-                // Keep smaller authored crops, including sizes set in stylesheets.
-                && parseFloat(imageHeight) >= availableHeight
+                && el.localName === 'img' && position === 'static' && needsFitting && !offsetByMargin
                 ? getClippingHeight(el.parentElement) : Infinity
             measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
