@@ -944,6 +944,9 @@ class View {
     // Blank pages, possibly half of one, before the content: see expand()
     #lead = 0
     fontReady = Promise.resolve()
+    // Settles when the load in progress ends, the view rendered or dropped
+    loading = Promise.resolve()
+    #endLoad = null
     constructor({ container, onExpand, beforeExpand, spread }) {
         this.container = container
         this.onExpand = onExpand
@@ -1003,7 +1006,8 @@ class View {
     }
     async load(src, data, afterLoad, beforeRender, waitForIdle) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
-        return new Promise(resolve => {
+        return this.loading = new Promise(resolve => {
+            this.#endLoad = resolve
             this.#iframe.addEventListener('load', async () => {
                 // A background fetch can finish after a swipe has started.
                 // Defer its style/layout work, not just the start of preloading.
@@ -1900,6 +1904,8 @@ class View {
     destroy() {
         if (this.document?.body) this.#observer.unobserve(this.document.body)
         this.destroyLoupe()
+        // A removed iframe never fires load
+        this.#endLoad?.()
     }
 }
 
@@ -5033,6 +5039,10 @@ export class Paginator extends HTMLElement {
         if (this.#pagePreview) await this.#pagePreview
         const section = this.sections[index]
         if (!section) return
+        // A preload of the target can still hold a blank document, which
+        // neither the anchor nor the writing direction can be read from
+        const preload = this.#views.get(index)
+        if (preload && !preload.rendered) await preload.loading
         this.#interruptedSnapTarget = null
         this.#interruptScrollAnim('abort')
         this.#scrollGen++
