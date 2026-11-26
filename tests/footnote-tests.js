@@ -59,3 +59,53 @@ const run = async ({ reference, backlink, accepts }) => {
 
 await run({ reference: '<a id="ref"></a><!-- Return marker --> <a href="#note">1</a>', backlink: '#ref', accepts: true })
 await run({ reference: '<a id="ref"></a>Unrelated text <a href="#note">1</a>', backlink: '#ref', accepts: false })
+
+// Cross-reference with check: true pointing to a rich note (>3 children) that carries a doc-backlink
+const runCrossref = async () => {
+    const html = `<!doctype html>
+        <p>First <a id="primary-ref" href="#note">1</a> and later <a href="#note">See note 1</a>.</p><hr>
+        <p id="note"><a href="#primary-ref" role="doc-backlink">1</a> Note: <em>first</em>, <em>second</em>, and <em>third</em>.</p>
+        <p id="next-note"><a href="#other" role="doc-backlink">2</a> Next note.</p>`
+    const source = parser.parseFromString(html, 'text/html')
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }))
+    const section = {
+        id: 'chapter.html', linear: 'yes', size: html.length,
+        load: () => url,
+        loadContent: () => html,
+        resolveHref: href => decodeURIComponent(`chapter.html${href}`),
+    }
+    const book = {
+        dir: 'ltr', sections: [section],
+        resolveHref(href) {
+            const [path, fragment] = href.split('#')
+            return path === section.id ? { index: 0, anchor: doc => doc.getElementById(fragment) } : null
+        },
+    }
+    const handler = new FootnoteHandler()
+    let popup, navigation
+    handler.addEventListener('before-render', ({ detail: { view } }) => {
+        popup = view
+        Object.assign(view.style, { display: 'block', width: '400px', height: '300px' })
+        document.body.append(view)
+        const goTo = view.renderer.goTo.bind(view.renderer)
+        view.renderer.goTo = target => (navigation = goTo(target))
+    })
+    const refs = source.querySelectorAll('a[href="#note"]')
+    const event = new CustomEvent('link', {
+        cancelable: true,
+        detail: { a: refs[1], href: 'chapter.html#note', check: true },
+    })
+    try {
+        const result = await handler.handle(book, event).then(() => null, error => error)
+        console.assert(!result, `Cross-reference to doc-backlink note should open: ${result?.message}`)
+        const documentText = popup?.renderer.getContents()[0]?.doc.body.textContent
+        console.assert(documentText?.trim() === '1 Note: first, second, and third.',
+            'Only the referenced note paragraph should be shown')
+    } finally {
+        await navigation?.catch(() => {})
+        popup?.close()
+        popup?.remove()
+        URL.revokeObjectURL(url)
+    }
+}
+await runCrossref()

@@ -119,6 +119,9 @@ const extractFootnote = (doc, anchor) => {
     return el
 }
 
+const hasFootnoteBacklink = el =>
+    Array.from(el.querySelectorAll?.('a') ?? []).some(isFootnoteBacklink)
+
 const hasLocalBacklink = (note, reference, section, targetHref) => {
     const sourceHref = reference.getAttribute('href')
     if (!note.matches('p') || !sourceHref?.startsWith('#') || !section?.resolveHref) return false
@@ -289,13 +292,16 @@ export class FootnoteHandler extends EventTarget {
                             range = doc.createRange()
                             range.selectNodeContents(el.closest('.note'))
                         } else if (check && el.children.length > 3) {
-                            if (!hasLocalBacklink(el, reference, book.sections[index], href)
-                                && !isNumberedInlineNote(el, reference)) {
+                            if (hasFootnoteBacklink(el)) {
+                                range = getFootnoteRange(doc, el)
+                            } else if (hasLocalBacklink(el, reference, book.sections[index], href)
+                                || isNumberedInlineNote(el, reference)) {
+                                range = doc.createRange()
+                                range.selectNode(el)
+                            } else {
                                 reject(new Error('Failed to locate footnote content'))
                                 return
                             }
-                            range = doc.createRange()
-                            range.selectNode(el)
                         } else if (el.querySelector('a')) {
                             range = getFootnoteRange(doc, el)
                         } else if (check && !isNumberedInlineNote(el, reference)) {
