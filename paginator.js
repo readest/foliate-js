@@ -1474,10 +1474,12 @@ class View {
         const measured = []
         for (const el of els) {
             // preserve max size if they are already set in CSS
-            const { maxHeight, maxWidth, marginLeft: elMarginLeft, marginRight: elMarginRight,
+            const { maxHeight, maxWidth, position, marginLeft: elMarginLeft, marginRight: elMarginRight,
                 marginTop: elMarginTop, marginBottom: elMarginBottom }
                 = doc.defaultView.getComputedStyle(el)
-            const clippingHeight = this.#column && !vertical && !applyFullscreen && el.localName === 'img'
+            // Positioned images can deliberately overflow the wrapper (e.g. a sprite).
+            const clippingHeight = this.#column && !vertical && !applyFullscreen
+                && el.localName === 'img' && position === 'static'
                 ? getClippingHeight(el.parentElement) : Infinity
             measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
