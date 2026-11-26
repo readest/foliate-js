@@ -2030,6 +2030,7 @@ export class Paginator extends HTMLElement {
     // Bumped by every programmatic scroll, so a WebKit clamp re-apply from an
     // earlier turn (startCssAnimateScroll) doesn't land on top of it.
     #scrollGen = 0
+    #goToCount = 0
     // Horizontal drag offset (px) applied to the views while a finger tracks
     // a page turn on a vertical book; consumed as the slide's start position
     // when the turn commits, or settled back to 0 when it doesn't.
@@ -5036,13 +5037,18 @@ export class Paginator extends HTMLElement {
     }
     async #goTo({ index, anchor, select, focus: wantsFocus }) {
         const focus = wantsFocus ? { from: document.activeElement } : null
+        const count = ++this.#goToCount
         if (this.#pagePreview) await this.#pagePreview
         const section = this.sections[index]
         if (!section) return
         // A preload of the target can still hold a blank document, which
-        // neither the anchor nor the writing direction can be read from
+        // neither the anchor nor the writing direction can be read from.
+        // A jump made meanwhile goes where it was asked to.
         const preload = this.#views.get(index)
-        if (preload && !preload.rendered) await preload.loading
+        if (preload && !preload.rendered) {
+            await preload.loading
+            if (count !== this.#goToCount) return
+        }
         this.#interruptedSnapTarget = null
         this.#interruptScrollAnim('abort')
         this.#scrollGen++
