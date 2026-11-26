@@ -922,6 +922,7 @@ class View {
     // the opening image fitted to its first page, with the clamp and the
     // inline alignment it had before
     #fitted = null
+    #clippingImageSize = null
     #overlayer
     #vertical = false
     #rtl = false
@@ -1460,15 +1461,42 @@ class View {
         // book marks each footnote with an inline <img>, so a volume kept in one
         // XHTML file reaches thousands of them and paged mode froze for minutes
         // (readest/readest#6155). Batched, the whole pass costs one layout.
+        const clippingHeights = new Map()
+        const getClippingHeight = parent => {
+            if (!clippingHeights.has(parent)) {
+                const { overflowY, paddingTop, paddingBottom } = doc.defaultView.getComputedStyle(parent)
+                const height = overflowY === 'hidden' || overflowY === 'clip'
+                    ? parent.clientHeight - parseFloat(paddingTop) - parseFloat(paddingBottom)
+                    : Infinity
+                clippingHeights.set(parent, height > 0 ? height : Infinity)
+            }
+            return clippingHeights.get(parent)
+        }
         const measured = []
         for (const el of els) {
             // preserve max size if they are already set in CSS
-            const { maxHeight, maxWidth, marginLeft: elMarginLeft, marginRight: elMarginRight,
+            const { height: imageHeight, maxHeight, maxWidth, position, marginLeft: elMarginLeft, marginRight: elMarginRight,
                 marginTop: elMarginTop, marginBottom: elMarginBottom }
                 = doc.defaultView.getComputedStyle(el)
-            measured.push({ el, maxHeight, maxWidth,
+            // Preserve crops that explicitly size or offset the image.
+            const authoredHeight = el.style.height || el.style.blockSize || el.getAttribute('height')
+            // A fluid height can need fitting even when the figure limits the width.
+            // For undeclared heights, keep smaller authored crops as they are.
+            const needsFitting = authoredHeight === 'auto'
+                || (!authoredHeight && parseFloat(imageHeight) >= availableHeight)
+            // Only a leading margin shifts which part of the image is shown.
+            // WebKit uses a negative trailing margin to keep image lines together.
+            const offsetByMargin = parseFloat(elMarginTop) < 0
+            const clippingHeight = this.#column && !vertical && !applyFullscreen
+                && el.localName === 'img' && position === 'static' && needsFitting && !offsetByMargin
+                ? getClippingHeight(el.parentElement) : Infinity
+            measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
+        // Keep refitting once a figure clipped: a restyle can turn its clipping
+        // off and back on without a new layout.
+        if (this.#clippingImageSize || [...clippingHeights.values()].some(Number.isFinite))
+            this.#clippingImageSize = [availableWidth, availableHeight]
         // The space above the first shown image in the flow, if it opens its
         // section
         const first = getOpeningImage(doc, els)
@@ -1484,7 +1512,10 @@ class View {
             return margins > 0 ? `calc(100% - ${margins}px)` : '100%'
         }
         for (const m of measured) {
-            const { el, elMarginLeft, elMarginRight, elMarginTop, elMarginBottom } = m
+            const { el, clippingHeight, elMarginLeft, elMarginRight, elMarginTop, elMarginBottom } = m
+            const verticalMargins = (parseFloat(elMarginTop) || 0) + (parseFloat(elMarginBottom) || 0)
+            // A publisher's clipping wrapper can be shorter than the page.
+            const imageHeight = Math.max(1, clippingHeight - Math.max(0, verticalMargins))
             let { maxHeight, maxWidth } = m
             if (parseInt(maxWidth) > availableWidth) {
                 maxWidth = `${availableWidth}px`
@@ -1496,7 +1527,7 @@ class View {
                 'max-height': vertical
                     ? (maxHeight !== 'none' && maxHeight !== '0px' ? maxHeight
                         : fill(elMarginTop, elMarginBottom))
-                    : `${height - (applyFullscreen ? 0 : (marginTop + marginBottom))}px`,
+                    : `${Math.min(height - (applyFullscreen ? 0 : (marginTop + marginBottom)), imageHeight)}px`,
                 'max-width': vertical
                     ? `${width - (applyFullscreen ? 0 : (marginLeft + marginRight))}px`
                     : (maxWidth !== 'none' && maxWidth !== '0px' ? maxWidth
@@ -1592,12 +1623,16 @@ class View {
         el.style.setProperty('vertical-align', value, priority)
         this.#fitted = null
     }
-    // A restyle can change the space above the opening image (a font size
-    // under margins in em) without a new layout, so fit it again
-    refitOpeningImage() {
+    // Restyles can change a clipping figure's height or the space above the
+    // opening image without a new layout.
+    refitImages() {
         const doc = this.document
-        if (!doc?.body || !this.#layout.height || !this.#column || this.#vertical
-            || doc.documentElement.hasAttribute('data-duokan-page-fullscreen')) return
+        if (!doc?.body || doc !== this.#loadedDoc || !this.#layout.height || !this.#column
+            || this.#vertical || doc.documentElement.hasAttribute('data-duokan-page-fullscreen')) return
+        if (this.#clippingImageSize) {
+            this.setImageSize(...this.#clippingImageSize)
+            return
+        }
         this.#unfitOpeningImage()
         const first = getOpeningImage(doc)
         if (first) this.#fitOpeningImage(first, getLeadingSpace(doc, first))
@@ -5342,7 +5377,7 @@ export class Paginator extends HTMLElement {
 
             // needed because the resize observer doesn't work in Firefox
             reflows.push(fontsReady(view.document).then(() => {
-                view.refitOpeningImage()
+                view.refitImages()
                 view.expand()
             }))
         }
