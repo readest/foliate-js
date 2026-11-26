@@ -4749,10 +4749,15 @@ export class Paginator extends HTMLElement {
         detail.index = spine ?? index
         this.dispatchEvent(new CustomEvent('relocate', { detail }))
     }
-    async #display(promise) {
+    // `count` is the jump's #goToCount: a jump made since goes where it was asked to
+    async #display(promise, count) {
         this.#stabilizing = true
         this.#container.style.opacity = '0'
         const { index, src, data, anchor, onLoad, select, focus } = await promise
+        if (count !== this.#goToCount) {
+            if (src) this.sections[index]?.unload?.()
+            return
+        }
         this.#primaryIndex = index
         this.#syncA11y()
         const hasFocus = this.#primaryView?.document?.hasFocus()
@@ -4811,6 +4816,7 @@ export class Paginator extends HTMLElement {
                 }
             }
         }
+        if (count !== this.#goToCount) return
         const resolvedAnchor = (typeof anchor === 'function'
             ? anchor(primaryView.document) : anchor) ?? 0
         await this.#scrollToAnchor(resolvedAnchor, select ? 'selection' : 'navigation', false, focus)
@@ -5113,6 +5119,7 @@ export class Paginator extends HTMLElement {
                     await this.#loadAdjacentSection(prevIdx)
             }
             if (!this.scrolled) await loadPrev()
+            if (count !== this.#goToCount) return
             await this.#scrollToAnchor(resolvedAnchor, select ? 'selection' : 'navigation', false, focus)
             if (this.scrolled) await loadPrev()
             if (blank) this.#container.style.opacity = '1'
@@ -5159,7 +5166,7 @@ export class Paginator extends HTMLElement {
                     console.warn(e)
                     console.warn(new Error(`Failed to load section ${index}`))
                     return {}
-                }))
+                }), count)
         }
     }
     async goTo(target) {
