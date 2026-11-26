@@ -5177,6 +5177,9 @@ export class Paginator extends HTMLElement {
                 Math.min(this.#renderedViewSize, distance ? this.#renderedStart + distance : this.#renderedEnd), null, true)
             return !this.atEnd
         }
+        // A section still loading shows one blank page: turning on from it
+        // would skip all its pages. Stay until it renders.
+        if (this.#primaryView?.rendered === false) return false
         const page = this.#currentPage + 1
         const pages = this.#renderedPages
         // Out of range — stop at the book's end, or skip animation and go
