@@ -1474,13 +1474,17 @@ class View {
         const measured = []
         for (const el of els) {
             // preserve max size if they are already set in CSS
-            const { maxHeight, maxWidth, position, marginLeft: elMarginLeft, marginRight: elMarginRight,
+            const { height: imageHeight, maxHeight, maxWidth, position, marginLeft: elMarginLeft, marginRight: elMarginRight,
                 marginTop: elMarginTop, marginBottom: elMarginBottom }
                 = doc.defaultView.getComputedStyle(el)
-            // A sprite can deliberately offset the part shown in its wrapper.
+            // Preserve crops that explicitly size or offset the image.
+            const authoredHeight = el.style.height || el.style.blockSize || el.getAttribute('height')
+            const sized = authoredHeight && authoredHeight !== 'auto'
             const offsetByMargin = parseFloat(elMarginTop) < 0 || parseFloat(elMarginBottom) < 0
             const clippingHeight = this.#column && !vertical && !applyFullscreen
-                && el.localName === 'img' && position === 'static' && !offsetByMargin
+                && el.localName === 'img' && position === 'static' && !sized && !offsetByMargin
+                // Keep smaller authored crops, including sizes set in stylesheets.
+                && parseFloat(imageHeight) >= availableHeight
                 ? getClippingHeight(el.parentElement) : Infinity
             measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
