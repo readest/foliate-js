@@ -5451,6 +5451,8 @@ export class Paginator extends HTMLElement {
             this.#isAnimating = false
         }
         this.#observer.unobserve(this)
+        // A jump waiting for a preload goes nowhere once the views are gone
+        this.#goToCount++
         this.#destroyAllViews()
         this.#mediaQuery.removeEventListener('change', this.#mediaQueryListener)
         this.#transformTarget?.removeEventListener('data', this.#transformCSS)
