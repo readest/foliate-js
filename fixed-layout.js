@@ -2060,7 +2060,8 @@ export class FixedLayout extends HTMLElement {
                 try {
                     const frames = await this.#loadSpreadFrames(targetIndex, true)
                     if (isStale()) return this.#preloadNextSpreads()
-                    if (!frames) return
+                    // A swipe onto this spread draws it at its own zoom.
+                    if (!frames || this.#pageTurn?.index === targetIndex) return
                     const side = frames.center ? 'center' : frames.left?.blank ? 'right' : 'left'
                     // Draw at the zoom a tap turn keeps; a swipe turn while
                     // zoomed in lands at fit-page and draws again.

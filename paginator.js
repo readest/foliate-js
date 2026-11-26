@@ -944,6 +944,9 @@ class View {
     // Blank pages, possibly half of one, before the content: see expand()
     #lead = 0
     fontReady = Promise.resolve()
+    // Settles when the load in progress ends, the view rendered or dropped
+    loading = Promise.resolve()
+    #endLoad = null
     constructor({ container, onExpand, beforeExpand, spread }) {
         this.container = container
         this.onExpand = onExpand
@@ -1003,7 +1006,8 @@ class View {
     }
     async load(src, data, afterLoad, beforeRender, waitForIdle) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
-        return new Promise(resolve => {
+        return this.loading = new Promise(resolve => {
+            this.#endLoad = resolve
             this.#iframe.addEventListener('load', async () => {
                 // A background fetch can finish after a swipe has started.
                 // Defer its style/layout work, not just the start of preloading.
@@ -1900,6 +1904,8 @@ class View {
     destroy() {
         if (this.document?.body) this.#observer.unobserve(this.document.body)
         this.destroyLoupe()
+        // A removed iframe never fires load
+        this.#endLoad?.()
     }
 }
 
@@ -2024,6 +2030,7 @@ export class Paginator extends HTMLElement {
     // Bumped by every programmatic scroll, so a WebKit clamp re-apply from an
     // earlier turn (startCssAnimateScroll) doesn't land on top of it.
     #scrollGen = 0
+    #goToCount = 0
     // Horizontal drag offset (px) applied to the views while a finger tracks
     // a page turn on a vertical book; consumed as the slide's start position
     // when the turn commits, or settled back to 0 when it doesn't.
@@ -5030,9 +5037,18 @@ export class Paginator extends HTMLElement {
     }
     async #goTo({ index, anchor, select, focus: wantsFocus }) {
         const focus = wantsFocus ? { from: document.activeElement } : null
+        const count = ++this.#goToCount
         if (this.#pagePreview) await this.#pagePreview
         const section = this.sections[index]
         if (!section) return
+        // A preload of the target can still hold a blank document, which
+        // neither the anchor nor the writing direction can be read from.
+        // A jump made meanwhile goes where it was asked to.
+        const preload = this.#views.get(index)
+        if (preload && !preload.rendered) {
+            await preload.loading
+            if (count !== this.#goToCount) return
+        }
         this.#interruptedSnapTarget = null
         this.#interruptScrollAnim('abort')
         this.#scrollGen++
@@ -5177,6 +5193,9 @@ export class Paginator extends HTMLElement {
                 Math.min(this.#renderedViewSize, distance ? this.#renderedStart + distance : this.#renderedEnd), null, true)
             return !this.atEnd
         }
+        // A section still loading shows one blank page: turning on from it
+        // would skip all its pages. Stay until it renders.
+        if (this.#primaryView?.rendered === false) return false
         const page = this.#currentPage + 1
         const pages = this.#renderedPages
         // Out of range — stop at the book's end, or skip animation and go
@@ -5432,6 +5451,8 @@ export class Paginator extends HTMLElement {
             this.#isAnimating = false
         }
         this.#observer.unobserve(this)
+        // A jump waiting for a preload goes nowhere once the views are gone
+        this.#goToCount++
         this.#destroyAllViews()
         this.#mediaQuery.removeEventListener('change', this.#mediaQueryListener)
         this.#transformTarget?.removeEventListener('data', this.#transformCSS)
