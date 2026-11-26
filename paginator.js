@@ -1477,9 +1477,10 @@ class View {
             const { maxHeight, maxWidth, position, marginLeft: elMarginLeft, marginRight: elMarginRight,
                 marginTop: elMarginTop, marginBottom: elMarginBottom }
                 = doc.defaultView.getComputedStyle(el)
-            // Positioned images can deliberately overflow the wrapper (e.g. a sprite).
+            // A sprite can deliberately offset the part shown in its wrapper.
+            const offsetByMargin = parseFloat(elMarginTop) < 0 || parseFloat(elMarginBottom) < 0
             const clippingHeight = this.#column && !vertical && !applyFullscreen
-                && el.localName === 'img' && position === 'static'
+                && el.localName === 'img' && position === 'static' && !offsetByMargin
                 ? getClippingHeight(el.parentElement) : Infinity
             measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
