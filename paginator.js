@@ -1475,7 +1475,7 @@ class View {
         const measured = []
         for (const el of els) {
             // preserve max size if they are already set in CSS
-            const { height: imageHeight, maxHeight, maxWidth, position, marginLeft: elMarginLeft, marginRight: elMarginRight,
+            const { height: imageHeight, maxHeight, maxWidth, position, transform, marginLeft: elMarginLeft, marginRight: elMarginRight,
                 marginTop: elMarginTop, marginBottom: elMarginBottom }
                 = doc.defaultView.getComputedStyle(el)
             // Preserve crops that explicitly size or offset the image.
@@ -1484,11 +1484,12 @@ class View {
             // For undeclared heights, keep smaller authored crops as they are.
             const needsFitting = authoredHeight === 'auto'
                 || (!authoredHeight && parseFloat(imageHeight) >= availableHeight)
-            // Only a leading margin shifts which part of the image is shown.
-            // WebKit uses a negative trailing margin to keep image lines together.
-            const offsetByMargin = parseFloat(elMarginTop) < 0
+            // A leading margin or a transform shifts which part of the image is
+            // shown. WebKit uses a negative trailing margin to keep image lines
+            // together.
+            const offset = parseFloat(elMarginTop) < 0 || transform !== 'none'
             const clippingHeight = this.#column && !vertical && !applyFullscreen
-                && el.localName === 'img' && position === 'static' && needsFitting && !offsetByMargin
+                && el.localName === 'img' && position === 'static' && needsFitting && !offset
                 ? getClippingHeight(el.parentElement) : Infinity
             measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
