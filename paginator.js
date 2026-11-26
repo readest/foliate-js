@@ -922,6 +922,7 @@ class View {
     // the opening image fitted to its first page, with the clamp and the
     // inline alignment it had before
     #fitted = null
+    #clippingImageSize = null
     #overlayer
     #vertical = false
     #rtl = false
@@ -1492,6 +1493,8 @@ class View {
             measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
+        this.#clippingImageSize = [...clippingHeights.values()].some(Number.isFinite)
+            ? [availableWidth, availableHeight] : null
         // The space above the first shown image in the flow, if it opens its
         // section
         const first = getOpeningImage(doc, els)
@@ -1618,12 +1621,16 @@ class View {
         el.style.setProperty('vertical-align', value, priority)
         this.#fitted = null
     }
-    // A restyle can change the space above the opening image (a font size
-    // under margins in em) without a new layout, so fit it again
-    refitOpeningImage() {
+    // Restyles can change a clipping figure's height or the space above the
+    // opening image without a new layout.
+    refitImages() {
         const doc = this.document
-        if (!doc?.body || !this.#layout.height || !this.#column || this.#vertical
-            || doc.documentElement.hasAttribute('data-duokan-page-fullscreen')) return
+        if (!doc?.body || doc !== this.#loadedDoc || !this.#layout.height || !this.#column
+            || this.#vertical || doc.documentElement.hasAttribute('data-duokan-page-fullscreen')) return
+        if (this.#clippingImageSize) {
+            this.setImageSize(...this.#clippingImageSize)
+            return
+        }
         this.#unfitOpeningImage()
         const first = getOpeningImage(doc)
         if (first) this.#fitOpeningImage(first, getLeadingSpace(doc, first))
@@ -5368,7 +5375,7 @@ export class Paginator extends HTMLElement {
 
             // needed because the resize observer doesn't work in Firefox
             reflows.push(fontsReady(view.document).then(() => {
-                view.refitOpeningImage()
+                view.refitImages()
                 view.expand()
             }))
         }
