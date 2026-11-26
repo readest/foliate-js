@@ -1483,7 +1483,9 @@ class View {
             // For undeclared heights, keep smaller authored crops as they are.
             const needsFitting = authoredHeight === 'auto'
                 || (!authoredHeight && parseFloat(imageHeight) >= availableHeight)
-            const offsetByMargin = parseFloat(elMarginTop) < 0 || parseFloat(elMarginBottom) < 0
+            // Only a leading margin shifts which part of the image is shown.
+            // WebKit uses a negative trailing margin to keep image lines together.
+            const offsetByMargin = parseFloat(elMarginTop) < 0
             const clippingHeight = this.#column && !vertical && !applyFullscreen
                 && el.localName === 'img' && position === 'static' && needsFitting && !offsetByMargin
                 ? getClippingHeight(el.parentElement) : Infinity
