@@ -1493,8 +1493,10 @@ class View {
             measured.push({ el, maxHeight, maxWidth, clippingHeight,
                 elMarginLeft, elMarginRight, elMarginTop, elMarginBottom })
         }
-        this.#clippingImageSize = [...clippingHeights.values()].some(Number.isFinite)
-            ? [availableWidth, availableHeight] : null
+        // Keep refitting once a figure clipped: a restyle can turn its clipping
+        // off and back on without a new layout.
+        if (this.#clippingImageSize || [...clippingHeights.values()].some(Number.isFinite))
+            this.#clippingImageSize = [availableWidth, availableHeight]
         // The space above the first shown image in the flow, if it opens its
         // section
         const first = getOpeningImage(doc, els)
